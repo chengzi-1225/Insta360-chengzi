@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Insta360 项目概览
 // @namespace    https://label.insta360.com/
-// @author       chengzi1225
-// @version      1.9.6
-// @description  项目卡片状态概览 + 状态跳转自动筛选
+// @author       chengzi
+// @version      1.9.7
+// @description  项目卡片状态概览 + 状态跳转自动筛选（返工/返修分离）
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
@@ -52,12 +52,13 @@
     autoApplyFilter: true
   };
 
+  // ★ v1.9.7：REWORK 和 REPAIR 拆开
   var STATUS_CODES = [
     'PENDING_ANNOTATION', 'ANNOTATED',
     'REVIEWED_ACCEPTED', 'REVIEWED_REJECTED',
     'APPEALED', 'APPEAL_ACCEPTED', 'APPEAL_REJECTED',
     'ACCEPTANCE_ACCEPTED', 'ACCEPTANCE_REJECTED',
-    'REWORK'
+    'REWORK', 'REPAIR'
   ];
 
   var STATUS_LABELS = {
@@ -65,7 +66,7 @@
     REVIEWED_ACCEPTED: '审核通过', REVIEWED_REJECTED: '审核驳回',
     APPEALED: '已申诉', APPEAL_ACCEPTED: '申诉通过', APPEAL_REJECTED: '申诉拒绝',
     ACCEPTANCE_ACCEPTED: '验收通过', ACCEPTANCE_REJECTED: '验收拒绝',
-    REWORK: '返工/返修'
+    REWORK: '返工', REPAIR: '返修'
   };
 
   var STATUS_COLORS = {
@@ -73,7 +74,7 @@
     REVIEWED_ACCEPTED: '#52c41a', REVIEWED_REJECTED: '#ff4d4f',
     APPEALED: '#722ed1', APPEAL_ACCEPTED: '#13c2c2', APPEAL_REJECTED: '#eb2f96',
     ACCEPTANCE_ACCEPTED: '#389e0d', ACCEPTANCE_REJECTED: '#d4380d',
-    REWORK: '#fa8c16'
+    REWORK: '#fa8c16', REPAIR: '#fa541c'
   };
 
   // 筛选值：全大写优先
@@ -82,12 +83,14 @@
     ANNOTATED:          ['ANNOTATED', 'annotated'],
     REVIEWED_ACCEPTED:  ['REVIEWED_ACCEPTED', 'reviewed_accepted'],
     REVIEWED_REJECTED:  ['REVIEWED_REJECTED', 'reviewed_rejected'],
-    REWORK:             ['REWORK', 'rework']
+    REWORK:             ['REWORK', 'rework'],
+    REPAIR:             ['REPAIR', 'repair']
   };
 
   var FILTERABLE = {
     PENDING_ANNOTATION: 1, ANNOTATED: 1,
-    REVIEWED_ACCEPTED: 1, REVIEWED_REJECTED: 1, REWORK: 1
+    REVIEWED_ACCEPTED: 1, REVIEWED_REJECTED: 1,
+    REWORK: 1, REPAIR: 1
   };
 
   var STATUS_ALIASES = {
@@ -99,13 +102,15 @@
     ANNOTATION_SUBMITTED: 'ANNOTATED', SUBMITTED: 'ANNOTATED',
     TASK_ANNOTATED: 'ANNOTATED', task_annotated: 'ANNOTATED',
     REVIEW_ACCEPTED: 'REVIEWED_ACCEPTED', REVIEW_REJECTED: 'REVIEWED_REJECTED',
-    APPEALING: 'APPEALED', REPAIR: 'REWORK', REWORKING: 'REWORK',
+    APPEALING: 'APPEALED',
+    REWORK: 'REWORK', REWORKING: 'REWORK',
+    REPAIR: 'REPAIR', REPAIRING: 'REPAIR', REPAIRED: 'REPAIR',
     '已提交': 'ANNOTATED', '待标注': 'PENDING_ANNOTATION',
     '审核通过': 'REVIEWED_ACCEPTED', '审核驳回': 'REVIEWED_REJECTED',
     '审核未通过': 'REVIEWED_REJECTED', '已申诉': 'APPEALED',
     '申诉通过': 'APPEAL_ACCEPTED', '申诉拒绝': 'APPEAL_REJECTED',
     '验收通过': 'ACCEPTANCE_ACCEPTED', '验收拒绝': 'ACCEPTANCE_REJECTED',
-    '返工/返修': 'REWORK', '返工': 'REWORK', '返修': 'REWORK'
+    '返工': 'REWORK', '返修': 'REPAIR', '返工/返修': 'REWORK'
   };
 
   function log() {
@@ -114,7 +119,7 @@
   }
 
   /* ============================================================
-   * 字段定义
+   * 字段定义（★ v1.9.7：返工、返修分开）
    * ============================================================ */
 
   var FIELD_DEFS = [
@@ -125,7 +130,8 @@
     { key: 'REVIEWED_REJECTED',   label: '审核驳回',  color: '#ff4d4f', kind: 'status' },
     { key: 'ACCEPTANCE_ACCEPTED', label: '验收通过',  color: '#389e0d', kind: 'status' },
     { key: 'ACCEPTANCE_REJECTED', label: '验收拒绝',  color: '#d4380d', kind: 'status' },
-    { key: 'REWORK',              label: '返工/返修', color: '#fa8c16', kind: 'status' },
+    { key: 'REWORK',              label: '返工',      color: '#fa8c16', kind: 'status' },
+    { key: 'REPAIR',              label: '返修',      color: '#fa541c', kind: 'status' },
     { key: 'annotationProgress',  label: '标注进度',  color: '#13c2c2', kind: 'percent' },
     { key: 'reviewProgress',      label: '审核进度',  color: '#722ed1', kind: 'percent' }
   ];
@@ -133,7 +139,7 @@
   var FIELD_MAP = {};
   for (var fi = 0; fi < FIELD_DEFS.length; fi++) FIELD_MAP[FIELD_DEFS[fi].key] = FIELD_DEFS[fi];
 
-  var DEFAULT_VISIBLE = ['total', 'PENDING_ANNOTATION', 'ANNOTATED', 'REVIEWED_ACCEPTED', 'REVIEWED_REJECTED', 'REWORK'];
+  var DEFAULT_VISIBLE = ['total', 'PENDING_ANNOTATION', 'ANNOTATED', 'REVIEWED_ACCEPTED', 'REVIEWED_REJECTED', 'REWORK', 'REPAIR'];
 
   function loadVisibleFields() {
     try {
@@ -294,7 +300,9 @@
     var acceptance = num(summary.acceptance_count);
     var acceptanceRej = num(summary.acceptance_rejected_count);
     var appealed = num(summary.appealed_count);
-    var rework = num(summary.user_rework_count) + num(summary.user_repair_count);
+    // ★ v1.9.7：返工、返修拆开
+    var rework = num(summary.user_rework_count);
+    var repair = num(summary.user_repair_count);
     var reviewAccepted = Math.max(0, reviewed - reviewRejected);
     var pending = Math.max(0, total - submitted);
     var counts = {};
@@ -307,6 +315,7 @@
     counts.ACCEPTANCE_REJECTED = acceptanceRej;
     counts.APPEALED = appealed;
     counts.REWORK = rework;
+    counts.REPAIR = repair;
     var sum = 0; for (var k in counts) sum += counts[k];
     return { total: total, counts: counts, available: STATUS_CODES.slice(), unknown: Math.max(0, total - sum), source: 'summary-fast', needsTaskDetails: false, summary: summary };
   }
@@ -951,13 +960,11 @@
     var candidates = intent.candidates || [intent.filterValue || intent.code];
     log('自动筛选开始，候选值：', candidates);
 
-    // 1. 点 Filters
     var btn = findFiltersButton();
     if (!btn) { log('未找到 Filters 按钮'); return false; }
     btn.click();
     log('已点击 Filters');
 
-    // 2. 等面板
     var panel = null;
     for (var i = 0; i < 20; i++) {
       await sleep(100);
@@ -967,7 +974,6 @@
     if (!panel) { log('面板未出现'); return false; }
     log('面板已打开');
 
-    // 3. 确保有筛选行
     if (!hasFilterRow(panel)) {
       var addBtn = findAddFilterButton(panel);
       if (addBtn) {
@@ -982,7 +988,6 @@
     if (!hasFilterRow(panel)) { log('筛选行未出现'); return false; }
     log('筛选行存在');
 
-    // 4. 字段切换为 State
     var fieldTrigger = findFieldTrigger(panel);
     if (fieldTrigger) {
       var fieldTxt = (fieldTrigger.textContent || '').replace(/__Cici__\S+/g, '').trim();
@@ -1001,9 +1006,6 @@
       log('未找到字段触发器');
     }
 
-    // 操作符保持 contains，不动
-
-    // 5. 填值
     var valueInput = findValueInput(panel);
     if (!valueInput) { log('未找到值输入框'); return false; }
 
@@ -1014,7 +1016,6 @@
       await sleep(150);
     }
 
-    // 6. 应用
     var applyBtn = findApplyButton(panel);
     if (applyBtn) {
       applyBtn.click();
