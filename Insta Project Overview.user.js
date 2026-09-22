@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 项目概览
 // @namespace    https://label.insta360.com/
-// @author       chengzi66
+// @author       chengzi
 // @version      1.9.5
 // @description  项目卡片状态概览 + 状态跳转自动筛选
 // @match        *://label.insta360.com/*
