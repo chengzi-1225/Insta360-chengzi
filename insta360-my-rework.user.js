@@ -2,8 +2,8 @@
 // @name         Insta360 我的返修面板
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      1.0.2
-// @description  侧边栏「我的返修」按钮，列出被审核驳回的任务，点击可跳转
+// @version      1.1.0
+// @description  侧边栏「我的返修」按钮，只显示属于本人的审核驳回任务
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
@@ -83,68 +83,234 @@
     return [];
   }
 
-  async function fetchMyId() {
-    try {
-      var j = await getJson(CONFIG.whoamiPath);
-      return j && j.id != null ? String(j.id) : null;
-    } catch (e) { return null; }
-  }
-
-  async function fetchAllProjects() {
-    var body = await getJson(apiUrl(CONFIG.projectPath, { page_size: 200 }));
-    return rowsFromResponse(body);
-  }
-
-  async function fetchProjectTasks(pid) {
-    var url = apiUrl(CONFIG.taskPath, { project: pid, page_size: CONFIG.pageSize });
-    var body = await getJson(url);
-    return rowsFromResponse(body);
-  }
-
   /* ============================================================
-   * ★ 新增：多层找项目名
+   * ★ 获取当前登录用户身份
    * ============================================================ */
 
-  function projectTitleFromApi(p) {
-    if (!p) return '';
-    var keys = ['title', 'name', 'project_name', 'projectName', 'display_name', 'project_title', 'label'];
-    for (var i = 0; i < keys.length; i++) {
-      var v = p[keys[i]];
-      if (v != null && String(v).trim()) return String(v).trim();
+  // 从 DOM 元素提取文本，剥掉 Cici 翻译注入节点
+  function extractCleanText(el) {
+    if (!el) return '';
+    try {
+      var clone = el.cloneNode(true);
+      clone.querySelectorAll('.__Cici__translate__, .__Cici__translate__ *').forEach(function (n) {
+        if (n.parentNode) n.parentNode.removeChild(n);
+      });
+      return (clone.textContent || '').trim();
+    } catch (e) {
+      return (el.textContent || '').trim();
     }
-    // 有些接口嵌套在 project 字段里
-    if (p.project && typeof p.project === 'object') return projectTitleFromApi(p.project);
+  }
+
+  function getSidebarUserName() {
+    // 主目标选择器
+    var el = document.querySelector('.ls-userpic__username');
+    if (el) {
+      var t = extractCleanText(el);
+      if (t) return t;
+    }
+    // 兜底：其他可能出现用户名的位置
+    var sels = [
+      '.ls-userpic__name',
+      '[class*="userpic"] [class*="name"]',
+      '.ls-user-menu__name',
+      '[class*="user-name"]'
+    ];
+    for (var i = 0; i < sels.length; i++) {
+      var e = document.querySelector(sels[i]);
+      if (e) {
+        var t2 = extractCleanText(e);
+        if (t2 && t2.length < 50) return t2;
+      }
+    }
     return '';
   }
 
-  function projectTitleFromCard(card) {
-    // 按优先级找标题元素
-    var sels = [
-      '.ls-project-card__title',
-      '[class*="project-title"]',
-      '[class*="card-title"]',
-      '.ls-project-card h1', '.ls-project-card h2', '.ls-project-card h3',
-      '.ls-project-card h4', '.ls-project-card h5', '.ls-project-card h6',
-      'h1', 'h2', 'h3', 'h4', 'h5', 'h6',
-      '[role="heading"]'
-    ];
-    for (var i = 0; i < sels.length; i++) {
-      var el = card.querySelector(sels[i]);
-      if (!el) continue;
-      var t = (el.textContent || '').trim();
-      if (t && t.length < 100) return t;
+  async function fetchMe() {
+    var me = { id: null, names: [], loaded: false };
+
+    // 1. whoami 拿 id + 各种名字字段
+    try {
+      var j = await getJson(CONFIG.whoamiPath);
+      if (j && typeof j === 'object') {
+        if (j.id != null) me.id = String(j.id);
+        var nameKeys = ['username', 'first_name', 'last_name', 'email', 'name', 'display_name', 'nickname'];
+        nameKeys.forEach(function (k) {
+          if (j[k] != null && String(j[k]).trim()) me.names.push(String(j[k]).trim());
+        });
+        if (j.first_name && j.last_name) {
+          me.names.push(j.first_name + j.last_name);
+          me.names.push(j.last_name + j.first_name);
+        }
+      }
+    } catch (e) {
+      log('whoami 失败：', e.message);
     }
-    // 退化：找卡片中第一个短的非空子元素文本
-    var kids = card.querySelectorAll('*');
-    for (var j = 0; j < kids.length; j++) {
-      var t2 = (kids[j].textContent || '').trim();
-      if (t2 && t2.length > 1 && t2.length < 40 && kids[j].children.length === 0) return t2;
-    }
-    return '';
+
+    // 2. 侧边栏用户名
+    var sidebarName = getSidebarUserName();
+    if (sidebarName) me.names.push(sidebarName);
+
+    // 去重、去空
+    var uniq = {};
+    me.names = me.names.filter(function (v) {
+      if (!v) return false;
+      var key = v.replace(/\s+/g, '').toLowerCase();
+      if (uniq[key]) return false;
+      uniq[key] = 1;
+      return true;
+    });
+
+    me.loaded = Boolean(me.id || me.names.length);
+    log('fetchMe 结果：', me);
+    return me;
   }
 
   /* ============================================================
-   * 状态 & 归属判断
+   * ★ 收集任务里所有可能的"归属者"值
+   * ============================================================ */
+
+  function collectTaskOwners(task) {
+    var ids = [];
+    var names = [];
+
+    var idKeys = [
+      'annotator_id', 'assignee_id', 'user_id', 'completed_by',
+      'created_by_id', 'creator_id', 'owner_id', 'assigned_to_id',
+      'annotatorId', 'assigneeId', 'userId', 'completedBy',
+      'createdById', 'creatorId', 'ownerId'
+    ];
+    var nameKeys = [
+      'annotator', 'assignee', 'user', 'created_by', 'creator', 'owner', 'assigned_to',
+      'annotator_name', 'assignee_name', 'created_by_name', 'creator_name',
+      'username', 'user_name', 'operator'
+    ];
+
+    function scanRecord(rec) {
+      if (!rec || typeof rec !== 'object') return;
+      idKeys.forEach(function (k) {
+        var v = rec[k];
+        if (v != null) {
+          var sv = String(v).trim();
+          if (sv) ids.push(sv);
+        }
+      });
+      nameKeys.forEach(function (k) {
+        var v = rec[k];
+        if (v == null) return;
+        if (typeof v === 'object') {
+          if (v.id != null) ids.push(String(v.id));
+          ['username', 'name', 'display_name', 'email', 'first_name', 'last_name', 'nickname'].forEach(function (nk) {
+            if (v[nk] != null && String(v[nk]).trim()) names.push(String(v[nk]).trim());
+          });
+          if (v.first_name && v.last_name) {
+            names.push(v.first_name + v.last_name);
+            names.push(v.last_name + v.first_name);
+          }
+        } else {
+          var sv = String(v).trim();
+          if (!sv) return;
+          if (/^\d+$/.test(sv)) ids.push(sv);
+          else names.push(sv);
+        }
+      });
+    }
+
+    scanRecord(task);
+    if (task.data && typeof task.data === 'object') scanRecord(task.data);
+    if (task.meta && typeof task.meta === 'object') scanRecord(task.meta);
+
+    // 原版 Label Studio 结构：annotations[].completed_by / created_username
+    if (Array.isArray(task.annotations)) {
+      task.annotations.forEach(function (ann) {
+        if (!ann) return;
+        if (ann.completed_by != null) ids.push(String(ann.completed_by));
+        if (ann.created_username) names.push(String(ann.created_username));
+        if (ann.user && typeof ann.user === 'object') {
+          if (ann.user.id != null) ids.push(String(ann.user.id));
+          if (ann.user.username) names.push(String(ann.user.username));
+          if (ann.user.name) names.push(String(ann.user.name));
+        }
+      });
+    }
+    // 评论/历史/事件里的操作人
+    var evLists = [task.events, task.history, task.status_history, task.reviews, task.records];
+    evLists.forEach(function (arr) {
+      if (!Array.isArray(arr)) return;
+      arr.forEach(function (ev) {
+        if (!ev || typeof ev !== 'object') return;
+        if (ev.user_id != null) ids.push(String(ev.user_id));
+        if (ev.userId != null) ids.push(String(ev.userId));
+        if (ev.user != null) {
+          if (typeof ev.user === 'object') {
+            if (ev.user.id != null) ids.push(String(ev.user.id));
+            ['username', 'name', 'display_name'].forEach(function (nk) {
+              if (ev.user[nk]) names.push(String(ev.user[nk]));
+            });
+          } else {
+            var sv = String(ev.user).trim();
+            if (sv) { if (/^\d+$/.test(sv)) ids.push(sv); else names.push(sv); }
+          }
+        }
+        if (ev.username) names.push(String(ev.username));
+        if (ev.operator) names.push(String(ev.operator));
+      });
+    });
+
+    // 去重
+    var uniqId = {}, uniqName = {};
+    ids = ids.filter(function (v) { if (!v || uniqId[v]) return false; uniqId[v] = 1; return true; });
+    names = names.filter(function (v) {
+      if (!v) return false;
+      var k = v.replace(/\s+/g, '').toLowerCase();
+      if (uniqName[k]) return false;
+      uniqName[k] = 1;
+      return true;
+    });
+
+    return { ids: ids, names: names };
+  }
+
+  /* ============================================================
+   * ★ 严格匹配：只保留明确属于"我"的任务
+   * ============================================================ */
+
+  function isMine(task, me) {
+    // 连"我是谁"都拿不到 → 保守起见不过滤（返回 true 保留）
+    if (!me || !me.loaded) return true;
+
+    var owners = collectTaskOwners(task);
+
+    // 没有任何归属信息 → 排除（严格模式）
+    if (!owners.ids.length && !owners.names.length) return false;
+
+    // ID 精确匹配
+    if (me.id) {
+      for (var i = 0; i < owners.ids.length; i++) {
+        if (owners.ids[i] === me.id) return true;
+      }
+    }
+
+    // 名字匹配（去空格、忽略大小写，双向包含）
+    var myNames = me.names.map(function (n) { return n.replace(/\s+/g, '').toLowerCase(); });
+    for (var j = 0; j < owners.names.length; j++) {
+      var on = owners.names[j].replace(/\s+/g, '').toLowerCase();
+      for (var k = 0; k < myNames.length; k++) {
+        var mn = myNames[k];
+        if (!mn) continue;
+        if (mn === on) return true;
+        // 双向包含（覆盖"陈文" vs "wen.chen" 之类的不完全一致）
+        if (mn.length >= 2 && on.length >= 2) {
+          if (on.indexOf(mn) !== -1 || mn.indexOf(on) !== -1) return true;
+        }
+      }
+    }
+
+    // 严格模式：没匹配上就算不是我的
+    return false;
+  }
+
+  /* ============================================================
+   * 状态判断
    * ============================================================ */
 
   function isRejected(task) {
@@ -168,25 +334,6 @@
     return false;
   }
 
-  function isMine(task, myId) {
-    if (!myId) return true;
-    var keys = ['annotator', 'assignee', 'assigned_to', 'user', 'created_by', 'annotator_id', 'assignee_id', 'user_id'];
-    for (var i = 0; i < keys.length; i++) {
-      var v = task[keys[i]];
-      if (v == null) continue;
-      if (typeof v === 'object') {
-        if (v.id != null && String(v.id) === myId) return true;
-      } else if (String(v) === myId) return true;
-    }
-    if (task.data && typeof task.data === 'object') {
-      for (var j = 0; j < keys.length; j++) {
-        var v2 = task.data[keys[j]];
-        if (v2 != null && String(v2) === myId) return true;
-      }
-    }
-    return true;
-  }
-
   /* ============================================================
    * 项目来源
    * ============================================================ */
@@ -198,30 +345,48 @@
     return null;
   }
 
-  function projectContextFromCard(card) {
-    var link = card.closest('a[href]');
-    var href = link ? link.getAttribute('href') : '';
-    if (!href) {
-      var inner = card.querySelector('a[href]');
-      if (inner) href = inner.getAttribute('href') || '';
+  function projectTitleFromApi(p) {
+    if (!p) return '';
+    var keys = ['title', 'name', 'project_name', 'projectName', 'display_name', 'project_title', 'label'];
+    for (var i = 0; i < keys.length; i++) {
+      var v = p[keys[i]];
+      if (v != null && String(v).trim()) return String(v).trim();
     }
-    var info = projectPathFromHref(href);
-    if (!info) return null;
-    // ★ 多层找项目名
-    info.title = projectTitleFromCard(card) || '未命名项目';
-    return info;
+    if (p.project && typeof p.project === 'object') return projectTitleFromApi(p.project);
+    return '';
+  }
+
+  function projectTitleFromCard(card) {
+    var sels = ['.ls-project-card__title', '[class*="project-title"]', '[class*="card-title"]', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', '[role="heading"]'];
+    for (var i = 0; i < sels.length; i++) {
+      var el = card.querySelector(sels[i]);
+      if (!el) continue;
+      var t = (el.textContent || '').trim();
+      if (t && t.length < 100) return t;
+    }
+    var kids = card.querySelectorAll('*');
+    for (var j = 0; j < kids.length; j++) {
+      var t2 = (kids[j].textContent || '').trim();
+      if (t2 && t2.length > 1 && t2.length < 40 && kids[j].children.length === 0) return t2;
+    }
+    return '';
   }
 
   function projectsFromPage() {
     var cards = document.querySelectorAll('.ls-project-card');
-    var out = [];
-    var seen = {};
+    var out = [], seen = {};
     for (var i = 0; i < cards.length; i++) {
-      var ctx = projectContextFromCard(cards[i]);
-      if (!ctx) continue;
-      if (seen[ctx.projectId]) continue;
-      seen[ctx.projectId] = 1;
-      out.push(ctx);
+      var link = cards[i].closest('a[href]');
+      var href = link ? link.getAttribute('href') : '';
+      if (!href) {
+        var inner = cards[i].querySelector('a[href]');
+        if (inner) href = inner.getAttribute('href') || '';
+      }
+      var info = projectPathFromHref(href);
+      if (!info || seen[info.projectId]) continue;
+      seen[info.projectId] = 1;
+      info.title = projectTitleFromCard(cards[i]) || '未命名项目';
+      out.push(info);
     }
     return out;
   }
@@ -233,17 +398,13 @@
       var p = projects[i];
       if (!p || p.id == null) continue;
       var ws = p.workspace != null ? p.workspace : currentWs;
-      // ★ 多层找项目名
-      var title = projectTitleFromApi(p) || '未命名项目';
       out.push({
         workspaceId: String(ws),
         projectId: String(p.id),
-        title: title,
+        title: projectTitleFromApi(p) || '未命名项目',
         basePath: '/workspaces/' + ws + '/projects/' + p.id + '/data',
-        rejectedCount: num(
-          p.review_rejected_count != null ? p.review_rejected_count :
-          p.review_reject_count != null ? p.review_reject_count : 0
-        ),
+        rejectedCount: num(p.review_rejected_count != null ? p.review_rejected_count :
+                           p.review_reject_count != null ? p.review_reject_count : 0),
       });
     }
     return out;
@@ -253,7 +414,7 @@
    * 核心加载
    * ============================================================ */
 
-  var cache = { loadedAt: 0, rows: null, promise: null, scanInfo: '' };
+  var cache = { loadedAt: 0, rows: null, promise: null, scanInfo: '', me: null };
 
   async function loadReworkRows(force, onUpdate) {
     if (!force && cache.rows && (Date.now() - cache.loadedAt < CONFIG.cacheTtlMs)) {
@@ -264,9 +425,8 @@
 
     cache.promise = (async function () {
       var t0 = Date.now();
-      var myIdPromise = fetchMyId();
-      var projects;
-      var scanInfo;
+      var mePromise = fetchMe();
+      var projects, scanInfo;
       try {
         var list = await fetchAllProjects();
         projects = projectsFromApi(list);
@@ -276,14 +436,20 @@
         scanInfo = '页面 ' + projects.length + ' 个项目（API 失败）';
       }
 
-      var myId = await myIdPromise;
-      log('myId =', myId, scanInfo);
+      var me = await mePromise;
+      cache.me = me;
+      if (!me.loaded) {
+        scanInfo += '，⚠ 无法识别当前用户';
+      } else {
+        var idTxt = me.id ? ('#' + me.id) : '';
+        var nameTxt = me.names.length ? ('「' + me.names[0] + '」') : '';
+        scanInfo += '，当前用户 ' + idTxt + nameTxt;
+      }
 
       var candidates = projects.filter(function (p) {
         if (p.rejectedCount == null) return true;
         return p.rejectedCount > 0;
       });
-      log('候选项目 =', candidates.length, '/', projects.length);
 
       if (!candidates.length) {
         var empty = [];
@@ -303,10 +469,11 @@
           var row;
           try {
             var tasks = await fetchProjectTasks(p.projectId);
-            var rejected = tasks.filter(function (t) { return isRejected(t) && isMine(t, myId); });
+            var rejected = tasks.filter(function (t) {
+              return isRejected(t) && isMine(t, me);
+            });
             row = { project: p, tasks: rejected, total: tasks.length };
           } catch (e) {
-            log('项目 ' + p.projectId + ' 失败：', e.message);
             row = { project: p, tasks: [], error: e.message };
           }
           results.push(row);
@@ -335,6 +502,16 @@
       cache.promise = null;
       throw e;
     }
+  }
+
+  async function fetchAllProjects() {
+    var body = await getJson(apiUrl(CONFIG.projectPath, { page_size: 200 }));
+    return rowsFromResponse(body);
+  }
+
+  async function fetchProjectTasks(pid) {
+    var body = await getJson(apiUrl(CONFIG.taskPath, { project: pid, page_size: CONFIG.pageSize }));
+    return rowsFromResponse(body);
   }
 
   /* ============================================================
@@ -425,7 +602,9 @@
     var okProjects = rows.filter(function (r) { return r.tasks.length > 0; });
 
     if (!totalRejected) {
-      body.innerHTML = '<div class="ovw-rwk-empty">没有找到被审核驳回的任务。</div>';
+      body.innerHTML =
+        '<div class="ovw-rwk-empty">没有找到属于你的返修任务。</div>' +
+        '<div class="ovw-rwk-tip">共扫描 ' + rows.length + ' 个项目</div>';
       return;
     }
 
@@ -433,7 +612,6 @@
 
     okProjects.forEach(function (r) {
       html += '<div class="ovw-rwk-group">';
-      // ★ 项目名：显示 title，不显示 ID
       html += '  <a class="ovw-rwk-proj" href="javascript:void(0)" data-path="' + escapeHtml(r.project.basePath) + '" title="点击打开项目">' +
               '    <span class="ovw-rwk-proj-name">' + escapeHtml(r.project.title) + '</span>' +
               '    <span class="ovw-rwk-badge">' + r.tasks.length + '</span>' +
@@ -441,9 +619,7 @@
       html += '  <div class="ovw-rwk-list">';
       r.tasks.forEach(function (t) {
         var tid = t.id || t.task_id || t.taskId;
-        var taskTitle = taskLabel(t);
-        // ★ 任务行：优先显示任务名，无名称才退化到 "任务 #ID"
-        var label = taskTitle || ('任务 #' + tid);
+        var label = taskLabel(t) || ('任务 #' + tid);
         html += '<a class="ovw-rwk-task" href="javascript:void(0)" data-path="' + escapeHtml(r.project.basePath) + '" data-tid="' + escapeHtml(String(tid)) + '" title="' + escapeHtml(label) + '">' +
                 '  <span class="ovw-rwk-task-title">' + escapeHtml(label) + '</span>' +
                 '  <span class="ovw-rwk-task-go">去返修 ›</span>' +
@@ -471,19 +647,15 @@
     });
   }
 
-  // ★ 扩展任务名字段查找
   function taskLabel(t) {
-    // 1. 顶层字段
     var keys = ['inner_id', 'innerId', 'name', 'title', 'video_name', 'fileName', 'file_name', 'task_name', 'display_name'];
     for (var i = 0; i < keys.length; i++) {
       if (t[keys[i]] != null && String(t[keys[i]]).trim()) return String(t[keys[i]]).trim();
     }
-    // 2. data 里
     if (t.data && typeof t.data === 'object') {
       for (var j = 0; j < keys.length; j++) {
         if (t.data[keys[j]] != null && String(t.data[keys[j]]).trim()) return String(t.data[keys[j]]).trim();
       }
-      // data 里任意短字符串值（排除 id 之类）
       for (var k in t.data) {
         if (/id$/i.test(k)) continue;
         var v = t.data[k];
@@ -522,6 +694,7 @@
       '.ovw-rwk-body::-webkit-scrollbar-thumb{background:rgba(0,0,0,.12);border-radius:3px;}',
       '.ovw-rwk-loading,.ovw-rwk-empty{color:#8c8c8c;text-align:center;padding:40px 16px;}',
       '.ovw-rwk-error{color:#cf1322;}',
+      '.ovw-rwk-tip{color:#bfbfbf;text-align:center;font-size:12px;margin-top:8px;}',
       '.ovw-rwk-total{color:#595959;font-size:12px;padding:4px 6px 10px;}',
       '.ovw-rwk-group{margin-bottom:14px;}',
       '.ovw-rwk-proj{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;font-weight:600;color:rgba(0,0,0,.88);border-radius:6px;background:linear-gradient(180deg,rgba(250,250,250,.9),rgba(245,246,248,.9));cursor:pointer;text-decoration:none;transition:all .12s ease;}',
@@ -561,6 +734,9 @@
     refresh: function () { return render(true); },
     data: function () { return cache.rows; },
     info: function () { return cache.scanInfo; },
+    me: function () { return cache.me; },
     clearCache: function () { cache.rows = null; cache.loadedAt = 0; return 'cleared'; },
+    // 快速测一个任务是不是我的
+    test: function (task) { return { isMine: isMine(task, cache.me), owners: collectTaskOwners(task) }; },
   };
 })();
