@@ -2,8 +2,8 @@
 // @name         Insta360 项目概览
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      2.0.0
-// @description  项目卡片状态概览 + 状态跳转自动筛选（返工/返修分离 + all页面手动统计）
+// @version      3.3.0
+// @description  在项目卡片原有内容下方追加状态进度条与统计数字（文字颜色随底色自适应）+ 状态跳转自动筛选
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
@@ -38,12 +38,12 @@
 
   var CONFIG = {
     cardSelector: '.ls-project-card',
-    summaryHostSelector: '.ls-project-card__detail',
-    summaryHostFallback: '.ls-project-card__description',
+    detailSelector: '.ls-project-card__detail',
+    detailFallback: '.ls-project-card__description',
     cacheTtlMs: 60 * 1000,
     projectPath: '/api/projects',
     taskPath: '/api/dm/tasks',
-    settingsKey: 'insta360-overview-fields-v1',
+    settingsKey: 'insta360-overview-fields-v2',
     fastMode: true,
     detailConcurrency: 2,
     taskPageSize: 500,
@@ -82,27 +82,19 @@
     REWORK: '返工', REPAIR: '返修'
   };
 
-  var STATUS_COLORS = {
-    PENDING_ANNOTATION: '#8c8c8c', ANNOTATED: '#1677ff',
-    REVIEWED_ACCEPTED: '#52c41a', REVIEWED_REJECTED: '#ff4d4f',
-    APPEALED: '#722ed1', APPEAL_ACCEPTED: '#13c2c2', APPEAL_REJECTED: '#eb2f96',
-    ACCEPTANCE_ACCEPTED: '#389e0d', ACCEPTANCE_REJECTED: '#d4380d',
-    REWORK: '#fa8c16', REPAIR: '#fa541c'
-  };
-
   var FILTER_VALUE_CANDIDATES = {
     PENDING_ANNOTATION: ['CREATED', 'PENDING', 'created'],
     ANNOTATED:          ['ANNOTATED', 'annotated'],
     REVIEWED_ACCEPTED:  ['REVIEWED_ACCEPTED', 'reviewed_accepted'],
     REVIEWED_REJECTED:  ['REVIEWED_REJECTED', 'reviewed_rejected'],
     REWORK:             ['REWORK', 'rework'],
-    REPAIR:             ['REPAIR', 'repair']
+    REPAIR:             ['REPAIR', 'repair', 'REPAIRED', 'repaired', '修复']
   };
 
   var FILTERABLE = {
     PENDING_ANNOTATION: 1, ANNOTATED: 1,
     REVIEWED_ACCEPTED: 1, REVIEWED_REJECTED: 1,
-    REWORK: 1
+    REWORK: 1, REPAIR: 1
   };
 
   var STATUS_ALIASES = {
@@ -131,27 +123,31 @@
   }
 
   /* ============================================================
-   * 字段定义
+   * 字段定义（percent → 进度条；其余 → 数字格）
    * ============================================================ */
 
   var FIELD_DEFS = [
-    { key: 'total',               label: '当前总数',  color: '#262626', kind: 'total' },
-    { key: 'PENDING_ANNOTATION',  label: '待标注',    color: '#8c8c8c', kind: 'status' },
-    { key: 'ANNOTATED',           label: '已提交',    color: '#1677ff', kind: 'status' },
-    { key: 'REVIEWED_ACCEPTED',   label: '审核通过',  color: '#52c41a', kind: 'status' },
-    { key: 'REVIEWED_REJECTED',   label: '审核驳回',  color: '#ff4d4f', kind: 'status' },
-    { key: 'ACCEPTANCE_ACCEPTED', label: '验收通过',  color: '#389e0d', kind: 'status' },
-    { key: 'ACCEPTANCE_REJECTED', label: '验收拒绝',  color: '#d4380d', kind: 'status' },
-    { key: 'REWORK',              label: '返工',      color: '#fa8c16', kind: 'status' },
-    { key: 'REPAIR',              label: '返修',      color: '#fa541c', kind: 'status' },
-    { key: 'annotationProgress',  label: '标注进度',  color: '#13c2c2', kind: 'percent' },
-    { key: 'reviewProgress',      label: '审核进度',  color: '#722ed1', kind: 'percent' }
+    { key: 'annotationProgress',  label: '标注进度', short: '标注',     color: '#52c41a', kind: 'percent' },
+    { key: 'reviewProgress',      label: '审核进度', short: '审核',     color: '#13c2c2', kind: 'percent' },
+    { key: 'repairProgress',      label: '返修进度', short: '返修',     color: '#ff4d4f', kind: 'percent' },
+    { key: 'total',               label: '总数',     short: '总数',     color: '#1677ff', kind: 'total' },
+    { key: 'ANNOTATED',           label: '已标注',   short: '已标注',   color: '#52c41a', kind: 'status' },
+    { key: 'REVIEWED_ACCEPTED',   label: '已审核',   short: '已审核',   color: '#13c2c2', kind: 'status' },
+    { key: 'REPAIR',              label: '待返修',   short: '待返修',   color: '#ff4d4f', kind: 'status' },
+    { key: 'REWORK',              label: '待返工',   short: '待返工',   color: '#fa8c16', kind: 'status' },
+    { key: 'PENDING_ANNOTATION',  label: '待标注',   short: '待标注',   color: '#8c8c8c', kind: 'status' },
+    { key: 'REVIEWED_REJECTED',   label: '审核驳回', short: '审核驳回', color: '#ff4d4f', kind: 'status' },
+    { key: 'ACCEPTANCE_ACCEPTED', label: '验收通过', short: '验收通过', color: '#52c41a', kind: 'status' },
+    { key: 'ACCEPTANCE_REJECTED', label: '验收拒绝', short: '验收拒绝', color: '#ff4d4f', kind: 'status' }
   ];
 
   var FIELD_MAP = {};
   for (var fi = 0; fi < FIELD_DEFS.length; fi++) FIELD_MAP[FIELD_DEFS[fi].key] = FIELD_DEFS[fi];
 
-  var DEFAULT_VISIBLE = ['total', 'PENDING_ANNOTATION', 'ANNOTATED', 'REVIEWED_ACCEPTED', 'REVIEWED_REJECTED', 'REWORK', 'REPAIR'];
+  var DEFAULT_VISIBLE = [
+    'annotationProgress', 'reviewProgress', 'repairProgress',
+    'total', 'ANNOTATED', 'REVIEWED_ACCEPTED', 'REPAIR', 'REWORK'
+  ];
 
   function loadVisibleFields() {
     try {
@@ -379,18 +375,6 @@
     if (!agg) throw new Error('汇总接口未返回 task_number');
     return agg;
   }
-  function nextPage(body, currentUrl, page, rowCount) {
-    var u = new URL(currentUrl);
-    var projectId = u.searchParams.get('project');
-    var workspaceId = u.searchParams.get('workspace');
-    if (body && typeof body.next === 'string' && body.next) return new URL(body.next, currentUrl).toString();
-    if (body && (body.has_next === true || body.hasNext === true))
-      return apiUrl(CONFIG.taskPath, { project: projectId, workspace: workspaceId, page: page + 1, page_size: CONFIG.taskPageSize });
-    var count = Number((body && (body.count != null ? body.count : body.total)) || 0);
-    if (count > rowCount && page * CONFIG.taskPageSize < count)
-      return apiUrl(CONFIG.taskPath, { project: projectId, workspace: workspaceId, page: page + 1, page_size: CONFIG.taskPageSize });
-    return null;
-  }
   async function loadTasks(projectId, workspaceId) {
     var baseParams = { project: projectId, workspace: workspaceId, page_size: CONFIG.taskPageSize };
     var firstUrl = apiUrl(CONFIG.taskPath, Object.assign({ page: 1 }, baseParams));
@@ -493,6 +477,85 @@
     cache[context.projectId] = entry;
     return promise;
   }
+
+  /* ============================================================
+   * ★ 主题探测：读宿主真实底色决定文字明暗
+   * ============================================================ */
+
+  function parseColor(str) {
+    if (!str) return null;
+    if (str === 'transparent') return null;
+    var m = String(str).match(/rgba?\(([^)]+)\)/i);
+    if (!m) return null;
+    var parts = m[1].split(',');
+    if (parts.length < 3) return null;
+    var r = parseFloat(parts[0]), g = parseFloat(parts[1]), b = parseFloat(parts[2]);
+    var a = parts.length >= 4 ? parseFloat(parts[3]) : 1;
+    if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return null;
+    if (!Number.isFinite(a)) a = 1;
+    return { r: r, g: g, b: b, a: a };
+  }
+
+  function relLum(c) {
+    function ch(v) {
+      v = v / 255;
+      return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+    }
+    return 0.2126 * ch(c.r) + 0.7152 * ch(c.g) + 0.0722 * ch(c.b);
+  }
+
+  function detectTheme(startEl) {
+    var node = startEl;
+    var depth = 0;
+    while (node && depth < 14) {
+      var bg = '';
+      try { bg = window.getComputedStyle(node).backgroundColor; } catch (e) { bg = ''; }
+      var c = parseColor(bg);
+      if (c && c.a > 0.5) {
+        return relLum(c) > 0.5 ? 'light' : 'dark';
+      }
+      node = node.parentElement;
+      depth += 1;
+    }
+    try {
+      if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) return 'dark';
+    } catch (e) {}
+    return 'light';
+  }
+
+  function applyTheme(summaryEl) {
+    if (!summaryEl) return;
+    var start = summaryEl.parentElement || summaryEl;
+    var theme = detectTheme(start);
+    if (summaryEl.dataset.ovwTheme !== theme) summaryEl.dataset.ovwTheme = theme;
+  }
+
+  /* ============================================================
+   * 数值计算
+   * ============================================================ */
+
+  function computePercent(field, agg) {
+    if (!agg) return 0;
+    var counts = agg.counts || {};
+    var total = Number(agg.total) || 0;
+    if (!total) return 0;
+    if (field.key === 'annotationProgress') {
+      var pending = Number(counts.PENDING_ANNOTATION) || 0;
+      return ((total - pending) / total) * 100;
+    }
+    if (field.key === 'reviewProgress') {
+      var acc = Number(counts.REVIEWED_ACCEPTED) || 0;
+      var rej = Number(counts.REVIEWED_REJECTED) || 0;
+      return ((acc + rej) / total) * 100;
+    }
+    if (field.key === 'repairProgress') {
+      var rw = Number(counts.REWORK) || 0;
+      var rp = Number(counts.REPAIR) || 0;
+      return ((rw + rp) / total) * 100;
+    }
+    return 0;
+  }
+
   function computeFieldValue(field, agg) {
     if (!agg) return null;
     var counts = agg.counts || {};
@@ -505,40 +568,68 @@
       return String(counts[field.key] != null ? counts[field.key] : 0);
     }
     if (field.kind === 'percent') {
-      if (field.key === 'annotationProgress') {
-        var total1 = Number(agg.total) || 0;
-        if (!total1) return '—';
-        var pending = Number(counts.PENDING_ANNOTATION) || 0;
-        return (((total1 - pending) / total1) * 100).toFixed(1) + '%';
-      }
-      if (field.key === 'reviewProgress') {
-        var total2 = Number(agg.total) || 0;
-        if (!total2) return '—';
-        var acc = Number(counts.REVIEWED_ACCEPTED) || 0;
-        var rej = Number(counts.REVIEWED_REJECTED) || 0;
-        return (((acc + rej) / total2) * 100).toFixed(1) + '%';
-      }
+      var total = Number(agg.total) || 0;
+      if (!total) return '—';
+      return Math.round(computePercent(field, agg)) + '%';
     }
     return '—';
   }
+
+  /* ============================================================
+   * 图标
+   * ============================================================ */
+
+  var ICON_REFRESH = '<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path fill="currentColor" d="M8 3a5 5 0 1 0 4.55 2.9l1.2-.7A6.5 6.5 0 1 1 8 1.5v1.5z"/><path fill="currentColor" d="M12.5 1v3h-3z"/></svg>';
+
+  /* ============================================================
+   * 卡片追加：创建 / 渲染
+   * ============================================================ */
+
+  function findDetailHost(card) {
+    return card.querySelector(CONFIG.detailSelector)
+      || card.querySelector(CONFIG.detailFallback)
+      || card;
+  }
+
   function createSummary(card, context) {
     var summary = card.querySelector('.ovw-summary');
-    if (summary) return summary;
+    if (summary) { applyTheme(summary); return summary; }
+
     summary = document.createElement('div');
     summary.className = 'ovw-summary';
     summary.dataset.projectId = context.projectId;
-    summary.setAttribute('role', 'button');
-    summary.setAttribute('tabindex', '0');
+    summary.dataset.ovwHref = context.href || '';
+
     summary.addEventListener('click', function (e) {
-      e.preventDefault(); e.stopPropagation();
-      var entry = cache[context.projectId];
-      if (!entry || !entry.aggregate) return;
-      showPopover(summary, context, entry.aggregate);
+      var target = e.target;
+      var cardEl = summary.closest(CONFIG.cardSelector);
+
+      var refreshEl = target.closest ? target.closest('.ovw-refresh') : null;
+      if (refreshEl) {
+        e.preventDefault(); e.stopPropagation();
+        if (cardEl) refreshProject(cardEl, { force: true });
+        return;
+      }
+
+      var keyEl = target.closest ? target.closest('[data-ovw-key]') : null;
+      if (keyEl && cardEl) {
+        var key = keyEl.getAttribute('data-ovw-key');
+        if (FILTERABLE[key]) {
+          e.preventDefault(); e.stopPropagation();
+          var def = FIELD_MAP[key];
+          jumpToProjectWithFilter(cardEl, key, def ? def.label : key);
+        }
+      }
     });
-    var host = card.querySelector(CONFIG.summaryHostSelector) || card.querySelector(CONFIG.summaryHostFallback) || card;
-    host.appendChild(summary);
+
+    /* 悬停时重算一次主题，覆盖页面手动切换主题的情况 */
+    summary.addEventListener('mouseenter', function () { applyTheme(summary); });
+
+    findDetailHost(card).appendChild(summary);
+    applyTheme(summary);
     return summary;
   }
+
   function jumpToProjectWithFilter(card, code, label) {
     var ctx = projectContext(card);
     if (!ctx || !ctx.href) return;
@@ -556,139 +647,89 @@
     } catch (e) {}
     location.href = target;
   }
+
   function renderSummary(summaryEl, agg, loading, error) {
+    applyTheme(summaryEl);
     summaryEl.setAttribute('aria-busy', loading ? 'true' : 'false');
+
     if (error) {
-      summaryEl.innerHTML = '<span class="ovw-message ovw-message--err">统计失败</span>' +
-        '<button type="button" class="ovw-refresh" title="重试"><svg viewBox="0 0 16 16" width="12" height="12"><path fill="currentColor" d="M8 3a5 5 0 1 0 4.55 2.9l1.2-.7A6.5 6.5 0 1 1 8 1.5v1.5z"/><path fill="currentColor" d="M12.5 1v3h-3z"/></svg></button>';
-      var btn = summaryEl.querySelector('.ovw-refresh');
-      if (btn) btn.addEventListener('click', function (e) {
-        e.preventDefault(); e.stopPropagation();
-        refreshProject(summaryEl.closest(CONFIG.cardSelector), { force: true });
-      });
+      summaryEl.innerHTML =
+        '<button type="button" class="ovw-retry">统计失败，点击重试</button>';
       return;
     }
-    if (!agg) { summaryEl.innerHTML = '<span class="ovw-message">加载中…</span>'; return; }
-    var card = summaryEl.closest(CONFIG.cardSelector);
-    var frag = document.createDocumentFragment();
-    if (visibleFields.length === 0) {
-      var empty = document.createElement('span');
-      empty.className = 'ovw-message';
-      empty.textContent = '未选择统计字段';
-      frag.appendChild(empty);
-    } else {
-      for (var i = 0; i < visibleFields.length; i++) {
-        var key = visibleFields[i];
-        var def = FIELD_MAP[key];
-        if (!def) continue;
-        var val = computeFieldValue(def, agg);
-        var isClickable = !!FILTERABLE[def.key];
-        var chip = document.createElement('span');
-        chip.className = 'ovw-chip' + (isClickable ? ' ovw-chip--clickable' : '');
-        chip.style.setProperty('--ovw-c', def.color);
-        chip.innerHTML = '<span class="ovw-chip__label">' + escapeHtml(def.label) + '</span>' +
-          '<span class="ovw-chip__value">' + escapeHtml(String(val)) + '</span>' +
-          (isClickable ? '<span class="ovw-chip__arrow">›</span>' : '');
-        if (isClickable) {
-          chip.setAttribute('role', 'button');
-          chip.setAttribute('tabindex', '0');
-          chip.title = '点击查看此状态的任务';
-          chip.addEventListener('click', (function (k, l) {
-            return function (e) {
-              e.preventDefault(); e.stopPropagation();
-              jumpToProjectWithFilter(card, k, l);
-            };
-          })(def.key, def.label));
-          chip.addEventListener('keydown', function (e) {
-            if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); chip.click(); }
-          });
-        }
-        frag.appendChild(chip);
+    if (!agg) {
+      summaryEl.innerHTML =
+        '<div class="ovw-skeleton"><span></span><span></span></div>';
+      return;
+    }
+
+    var barDefs = [], statDefs = [];
+    for (var i = 0; i < visibleFields.length; i++) {
+      var def = FIELD_MAP[visibleFields[i]];
+      if (!def) continue;
+      if (def.kind === 'percent') barDefs.push(def); else statDefs.push(def);
+    }
+
+    var total = Number(agg.total) || 0;
+    var html = '';
+
+    if (barDefs.length) {
+      html += '<div class="ovw-bars">';
+      for (var b = 0; b < barDefs.length; b++) {
+        var bd = barDefs[b];
+        var pct = total ? computePercent(bd, agg) : 0;
+        var shown = total ? (Math.round(pct) + '%') : '—';
+        html += '<div class="ovw-bar" data-ovw-key="' + bd.key + '" style="--ovw-c:' + bd.color + '">' +
+                  '<span class="ovw-bar__label">' + escapeHtml(bd.short || bd.label) + '</span>' +
+                  '<span class="ovw-bar__track"><span class="ovw-bar__fill" style="width:' +
+                    Math.max(0, Math.min(100, pct)) + '%"></span></span>' +
+                  '<span class="ovw-bar__val">' + shown + '</span>' +
+                '</div>';
       }
+      html += '</div>';
     }
-    var refresh = document.createElement('button');
-    refresh.type = 'button';
-    refresh.className = 'ovw-refresh';
-    refresh.title = '刷新';
-    refresh.innerHTML = '<svg viewBox="0 0 16 16" width="12" height="12"><path fill="currentColor" d="M8 3a5 5 0 1 0 4.55 2.9l1.2-.7A6.5 6.5 0 1 1 8 1.5v1.5z"/><path fill="currentColor" d="M12.5 1v3h-3z"/></svg>';
-    refresh.addEventListener('click', function (e) {
-      e.preventDefault(); e.stopPropagation();
-      refreshProject(summaryEl.closest(CONFIG.cardSelector), { force: true });
-    });
-    frag.appendChild(refresh);
-    summaryEl.innerHTML = '';
-    summaryEl.appendChild(frag);
+
+    if (statDefs.length) {
+      html += '<div class="ovw-stats" style="grid-template-columns:repeat(' + statDefs.length + ',1fr)">';
+      for (var s = 0; s < statDefs.length; s++) {
+        var sd = statDefs[s];
+        var val = computeFieldValue(sd, agg);
+        html += '<div class="ovw-stat" data-ovw-key="' + sd.key + '" style="--ovw-c:' + sd.color + '">' +
+                  '<span class="ovw-stat__num">' + escapeHtml(String(val)) + '</span>' +
+                  '<span class="ovw-stat__label">' + escapeHtml(sd.label) + '</span>' +
+                '</div>';
+      }
+      html += '</div>';
+    }
+
+    html += '<button type="button" class="ovw-refresh" title="刷新">' + ICON_REFRESH + '</button>';
+
+    summaryEl.innerHTML = html;
   }
 
-  function renderSummaryManual(summaryEl, context) {
+  function renderSummaryManual(summaryEl) {
     if (!summaryEl) return;
-    summaryEl.innerHTML =
-      '<button type="button" class="ovw-load-btn">' +
-        '<svg viewBox="0 0 16 16" width="12" height="12" style="margin-right:4px;">' +
-          '<path fill="currentColor" d="M8 2a6 6 0 1 0 6 6h-2a4 4 0 1 1-4-4v2l4-3-4-3v2z"/>' +
-        '</svg>' +
-        '点击统计本项目' +
-      '</button>';
+    applyTheme(summaryEl);
+    summaryEl.innerHTML = '<button type="button" class="ovw-load-btn">点击统计本项目</button>';
     var btn = summaryEl.querySelector('.ovw-load-btn');
-    if (btn) {
-      ['click', 'mousedown', 'mouseup', 'pointerdown'].forEach(function (ev) {
-        btn.addEventListener(ev, function (e) { e.stopPropagation(); });
-      });
-      btn.addEventListener('click', function (e) {
-        e.preventDefault();
-        e.stopPropagation();
-        var card = summaryEl.closest(CONFIG.cardSelector);
-        if (card) {
-          renderSummary(summaryEl, null, true);
-          detailPool.run(function () { return refreshProject(card, { force: true }); }).catch(function () {});
-        }
-      });
-    }
+    if (!btn) return;
+    ['mousedown', 'mouseup', 'pointerdown'].forEach(function (ev) {
+      btn.addEventListener(ev, function (e) { e.stopPropagation(); });
+    });
+    btn.addEventListener('click', function (e) {
+      e.preventDefault();
+      e.stopPropagation();
+      var card = summaryEl.closest(CONFIG.cardSelector);
+      if (card) {
+        renderSummary(summaryEl, null, true);
+        detailPool.run(function () { return refreshProject(card, { force: true }); }).catch(function () {});
+      }
+    });
   }
 
-  var openPopover = null;
-  function closePopover() { if (openPopover) openPopover.remove(); openPopover = null; }
-  function showPopover(anchor, context, agg) {
-    closePopover();
-    var popover = document.createElement('div');
-    popover.className = 'ovw-popover';
-    var rowsHtml = STATUS_CODES.map(function (c) {
-      var count = agg.counts[c] != null ? agg.counts[c] : 0;
-      var clickable = !!FILTERABLE[c];
-      return '<div class="ovw-popover__row' + (clickable ? ' ovw-popover__row--clickable' : '') + '" data-code="' + c + '">' +
-        '<span class="ovw-popover__dot" style="background:' + STATUS_COLORS[c] + '"></span>' +
-        '<span class="ovw-popover__label">' + STATUS_LABELS[c] + '</span>' +
-        '<span class="ovw-popover__num">' + count + (clickable ? ' <span class="ovw-popover__arrow">›</span>' : '') + '</span>' +
-      '</div>';
-    }).join('');
-    popover.innerHTML =
-      '<div class="ovw-popover__head">' +
-        '<span class="ovw-popover__title">项目状态</span>' +
-        '<button type="button" class="ovw-popover__close" aria-label="关闭"><svg viewBox="0 0 16 16" width="14" height="14"><path fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" d="M3.5 3.5l9 9M12.5 3.5l-9 9"/></svg></button>' +
-      '</div>' +
-      '<div class="ovw-popover__body">' + rowsHtml + '</div>' +
-      '<div class="ovw-popover__foot">' +
-        '<div class="ovw-popover__foot-row"><span>未知</span><span>' + agg.unknown + '</span></div>' +
-        '<div class="ovw-popover__foot-row ovw-popover__foot-row--strong"><span>合计</span><span>' + agg.total + '</span></div>' +
-        '<div class="ovw-popover__time">' + formatTime(Date.now()) + '</div>' +
-      '</div>';
-    document.body.appendChild(popover);
-    popover.querySelectorAll('.ovw-popover__row--clickable').forEach(function (row) {
-      row.addEventListener('click', function (e) {
-        e.preventDefault(); e.stopPropagation();
-        var code = row.getAttribute('data-code');
-        var card = anchor.closest(CONFIG.cardSelector);
-        if (card) jumpToProjectWithFilter(card, code, STATUS_LABELS[code]);
-      });
-    });
-    var rect = anchor.getBoundingClientRect();
-    var left = Math.min(Math.max(12, rect.left), window.innerWidth - popover.offsetWidth - 12);
-    var top = (rect.bottom + 10 + popover.offsetHeight < window.innerHeight) ? rect.bottom + 10 : Math.max(12, rect.top - popover.offsetHeight - 10);
-    popover.style.left = left + 'px';
-    popover.style.top = top + 'px';
-    popover.querySelector('.ovw-popover__close').addEventListener('click', closePopover);
-    openPopover = popover;
-  }
+  /* ============================================================
+   * 工具栏 / 扫描
+   * ============================================================ */
 
   function findSearchInput() {
     var list = [].slice.call(document.querySelectorAll('input[type="search"]'))
@@ -749,7 +790,7 @@
         dot.className = 'ovw-toolbar__dot';
         dot.style.background = def.color;
         var text = document.createElement('span');
-        text.textContent = def.label;
+        text.textContent = def.label + (def.kind === 'percent' ? '（进度条）' : '');
         row.appendChild(cb); row.appendChild(dot); row.appendChild(text);
         listEl.appendChild(row);
       }
@@ -819,7 +860,7 @@
 
     var totalCards = document.querySelectorAll(CONFIG.cardSelector).length;
     if (shouldManualMode(totalCards) && !statsEnabled) {
-      renderSummaryManual(card.querySelector('.ovw-summary'), context);
+      renderSummaryManual(card.querySelector('.ovw-summary'));
       return;
     }
 
@@ -843,59 +884,93 @@
   }
 
   /* ============================================================
-   * 样式（★ 按钮不换行优化）
+   * 样式：颜色全部走 CSS 变量，随 data-ovw-theme 切换
    * ============================================================ */
 
   var CSS_TEXT = [
-    '.ovw-summary{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:10px;padding:8px 10px;border-radius:8px;background:linear-gradient(180deg,rgba(250,250,250,.9),rgba(245,246,248,.9));border:1px solid rgba(0,0,0,.05);color:#595959;font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif;cursor:pointer;transition:all .15s ease;box-sizing:border-box;}',
-    '.ovw-summary:hover{background:#fff;border-color:rgba(22,119,255,.25);box-shadow:0 2px 8px rgba(22,119,255,.08);}',
-    '.ovw-summary[aria-busy="true"]{opacity:.6;}',
-    '.ovw-summary::before{content:"";flex:0 0 4px;height:16px;border-radius:2px;background:linear-gradient(180deg,#1677ff,#4096ff);opacity:.7;}',
-    '.ovw-load-btn{display:inline-flex;align-items:center;padding:4px 10px;border:1px solid #1677ff;border-radius:5px;background:#fff;color:#1677ff;cursor:pointer;font-size:12px;font-family:inherit;white-space:nowrap;transition:all .12s ease;}',
-    '.ovw-load-btn:hover{background:rgba(22,119,255,.08);}',
-    '.ovw-global-toggle{display:inline-flex;align-items:center;height:32px;padding:0 14px;margin-left:8px;border:1px solid #1677ff;border-radius:6px;background:#1677ff;color:#fff;cursor:pointer;font-size:13px;font-family:inherit;white-space:nowrap;flex:0 0 auto;transition:all .15s ease;}',
-    '.ovw-global-toggle:hover{background:#0958d9;border-color:#0958d9;}',
-    '.ovw-global-toggle.is-on{background:#f5f5f5;color:#8c8c8c;border-color:#d9d9d9;cursor:default;}',
-    '.ovw-chip{display:inline-flex;align-items:baseline;gap:4px;padding:3px 8px;border-radius:5px;background:rgba(0,0,0,.028);white-space:nowrap;font-variant-numeric:tabular-nums;transition:all .12s ease;}',
-    '.ovw-chip__label{color:#8c8c8c;font-size:11px;}',
-    '.ovw-chip__value{color:var(--ovw-c,#262626);font-weight:600;font-size:12.5px;}',
-    '.ovw-chip__arrow{color:var(--ovw-c,#262626);font-size:14px;opacity:.35;margin-left:1px;font-weight:600;transition:all .15s ease;display:inline-block;}',
-    '.ovw-chip--clickable{cursor:pointer;}',
-    '.ovw-chip--clickable:hover{background:rgba(22,119,255,.08);box-shadow:0 1px 4px rgba(22,119,255,.12);transform:translateY(-1px);}',
-    '.ovw-chip--clickable:hover .ovw-chip__arrow{opacity:1;transform:translateX(2px);}',
-    '.ovw-chip--clickable:focus{outline:none;box-shadow:0 0 0 2px rgba(22,119,255,.35);}',
-    '.ovw-message{color:#8c8c8c;}',
-    '.ovw-message--err{color:#cf1322;}',
-    '.ovw-refresh{margin-left:auto;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border:0;border-radius:5px;background:transparent;color:#8c8c8c;cursor:pointer;padding:0;transition:all .15s ease;}',
-    '.ovw-refresh:hover{background:rgba(22,119,255,.1);color:#1677ff;}',
+    /* ---- 追加区容器：默认浅色主题变量 ---- */
+    '.ovw-summary{',
+      '--ovw-label:#595959;',            /* 标签文字（明显但不抢眼） */
+      '--ovw-label-strong:#262626;',     /* 需要强调的标签 */
+      '--ovw-track:rgba(0,0,0,.08);',    /* 进度条轨道 */
+      '--ovw-divider:rgba(0,0,0,.08);',  /* 顶部虚线 */
+      '--ovw-hover:rgba(0,0,0,.045);',   /* 悬停底色 */
+      '--ovw-icon:rgba(0,0,0,.35);',
+      'position:relative;display:block;margin-top:10px;padding-top:9px;border-top:1px dashed var(--ovw-divider);',
+      'color:var(--ovw-label-strong);',
+      'font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif;',
+      'box-sizing:border-box;',
+    '}',
+
+    /* ---- 深色主题变量覆盖 ---- */
+    '.ovw-summary[data-ovw-theme="dark"]{',
+      '--ovw-label:rgba(255,255,255,.80);',
+      '--ovw-label-strong:#fff;',
+      '--ovw-track:rgba(255,255,255,.18);',
+      '--ovw-divider:rgba(255,255,255,.16);',
+      '--ovw-hover:rgba(255,255,255,.10);',
+      '--ovw-icon:rgba(255,255,255,.55);',
+    '}',
+
+    '.ovw-summary[aria-busy="true"]{opacity:.7;}',
+
+    /* ---- 进度条 ---- */
+    '.ovw-bars{display:flex;flex-direction:column;gap:7px;}',
+    '.ovw-bar{display:grid;grid-template-columns:34px 1fr 40px;align-items:center;gap:9px;padding:1px 2px;border-radius:4px;cursor:default;}',
+    '.ovw-bar[data-ovw-key]{cursor:pointer;}',
+    '.ovw-bar[data-ovw-key]:hover{background:var(--ovw-hover);}',
+    '.ovw-bar__label{font-size:11.5px;font-weight:500;color:var(--ovw-label);white-space:nowrap;}',
+    '.ovw-bar__track{position:relative;height:5px;border-radius:3px;background:var(--ovw-track);overflow:hidden;}',
+    '.ovw-bar__fill{display:block;height:100%;border-radius:3px;background:var(--ovw-c,#52c41a);transition:width .35s ease;}',
+    '.ovw-bar__val{font-size:12px;font-weight:700;text-align:right;color:var(--ovw-c,#52c41a);font-variant-numeric:tabular-nums;}',
+
+    /* ---- 数字格 ---- */
+    '.ovw-stats{display:grid;gap:2px;margin-top:9px;}',
+    '.ovw-stat{display:flex;flex-direction:column;align-items:center;gap:1px;padding:2px 0;border-radius:6px;cursor:pointer;transition:background .15s ease;}',
+    '.ovw-stat:hover{background:var(--ovw-hover);}',
+    '.ovw-stat__num{font-size:15px;font-weight:700;line-height:1.15;color:var(--ovw-c,#1677ff);font-variant-numeric:tabular-nums;}',
+    '.ovw-stat__label{font-size:10.5px;font-weight:500;color:var(--ovw-label);white-space:nowrap;}',
+
+    /* ---- 深色底：状态色提亮，保证对比度 ---- */
+    '.ovw-summary[data-ovw-theme="dark"] .ovw-stat__num,',
+    '.ovw-summary[data-ovw-theme="dark"] .ovw-bar__val{filter:brightness(1.28) saturate(1.05);}',
+    '.ovw-summary[data-ovw-theme="dark"] .ovw-bar__fill{filter:brightness(1.18) saturate(1.05);}',
+
+    /* ---- 刷新 ---- */
+    '.ovw-refresh{position:absolute;top:6px;right:0;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--ovw-icon);cursor:pointer;opacity:0;transition:opacity .15s ease,color .15s ease,background .15s ease;}',
+    '.ovw-summary:hover .ovw-refresh{opacity:1;}',
+    '.ovw-refresh:hover{background:rgba(22,119,255,.14);color:#1677ff;}',
+
+    /* ---- 状态 ---- */
+    '.ovw-skeleton{display:flex;flex-direction:column;gap:8px;padding:4px 0;}',
+    '.ovw-skeleton span{display:block;height:7px;border-radius:4px;background:var(--ovw-track);background-image:linear-gradient(90deg,transparent,rgba(128,128,128,.18),transparent);background-size:200% 100%;animation:ovw-shimmer 1.2s infinite;}',
+    '.ovw-skeleton span:nth-child(1){width:82%;}',
+    '.ovw-skeleton span:nth-child(2){width:60%;}',
+    '@keyframes ovw-shimmer{0%{background-position:200% 0;}100%{background-position:-200% 0;}}',
+    '.ovw-retry{display:block;width:100%;padding:5px 8px;border:1px dashed rgba(255,77,79,.55);border-radius:6px;background:rgba(255,77,79,.06);color:#cf1322;font-size:11.5px;font-weight:500;cursor:pointer;font-family:inherit;}',
+    '.ovw-summary[data-ovw-theme="dark"] .ovw-retry{color:#ff7875;background:rgba(255,77,79,.12);}',
+    '.ovw-retry:hover{background:rgba(255,77,79,.16);}',
+    '.ovw-load-btn{display:inline-flex;align-items:center;justify-content:center;width:100%;padding:5px 10px;border:1px solid rgba(22,119,255,.45);border-radius:6px;background:rgba(22,119,255,.05);color:#1677ff;cursor:pointer;font-size:12px;font-weight:500;font-family:inherit;white-space:nowrap;transition:all .12s ease;}',
+    '.ovw-load-btn:hover{background:rgba(22,119,255,.14);border-color:#1677ff;}',
+
+    /* ---- 顶部工具栏 ---- */
     '.ovw-toolbar{position:relative;display:inline-block;vertical-align:middle;margin-left:8px;font:14px/1.5 Roboto,Arial,sans-serif;white-space:nowrap;flex:0 0 auto;}',
     '.ovw-toolbar__btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:rgba(0,0,0,.88);cursor:pointer;font-size:13px;line-height:1;white-space:nowrap;transition:all .15s ease;font-family:inherit;}',
     '.ovw-toolbar__btn:hover,.ovw-toolbar__btn.is-open{color:#1677ff;border-color:#1677ff;background:rgba(22,119,255,.03);}',
-    '.ovw-toolbar__panel{position:absolute;top:calc(100% + 6px);right:0;z-index:1000000;min-width:210px;padding:0;border:1px solid rgba(0,0,0,.06);border-radius:10px;background:#fff;box-shadow:0 8px 28px rgba(0,0,0,.13);overflow:hidden;}',
+    '.ovw-toolbar__panel{position:absolute;top:calc(100% + 6px);right:0;z-index:1000000;min-width:220px;padding:0;border:1px solid rgba(0,0,0,.06);border-radius:10px;background:#fff;box-shadow:0 8px 28px rgba(0,0,0,.13);overflow:hidden;}',
     '.ovw-toolbar__panel-head{display:flex;justify-content:space-between;align-items:center;padding:10px 14px 8px;font-size:12px;color:#8c8c8c;border-bottom:1px solid rgba(0,0,0,.04);}',
     '.ovw-toolbar__reset{border:0;background:transparent;color:#1677ff;cursor:pointer;font-size:12px;padding:0;}',
     '.ovw-toolbar__panel-list{max-height:340px;overflow-y:auto;padding:4px 0;}',
     '.ovw-toolbar__item{display:flex;align-items:center;gap:9px;padding:7px 14px;cursor:pointer;font-size:13px;color:rgba(0,0,0,.88);}',
     '.ovw-toolbar__item:hover{background:rgba(22,119,255,.05);}',
     '.ovw-toolbar__dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:0 0 8px;}',
-    '.ovw-popover{position:fixed;z-index:1000001;width:260px;padding:0;border:1px solid rgba(0,0,0,.06);border-radius:12px;background:#fff;box-shadow:0 12px 36px rgba(0,0,0,.16);color:rgba(0,0,0,.88);font:13px/1.5 Roboto,Arial,sans-serif;overflow:hidden;box-sizing:border-box;}',
-    '.ovw-popover__head{display:flex;justify-content:space-between;align-items:center;padding:12px 14px 10px;border-bottom:1px solid rgba(0,0,0,.05);}',
-    '.ovw-popover__title{font-weight:600;font-size:13px;}',
-    '.ovw-popover__close{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border:0;border-radius:5px;background:transparent;color:#8c8c8c;cursor:pointer;padding:0;}',
-    '.ovw-popover__close:hover{background:rgba(0,0,0,.05);color:#262626;}',
-    '.ovw-popover__body{padding:8px;max-height:340px;overflow-y:auto;}',
-    '.ovw-popover__row{display:grid;grid-template-columns:10px 1fr auto;align-items:center;gap:8px;padding:5px 8px;border-radius:5px;font-size:12.5px;}',
-    '.ovw-popover__row--clickable{cursor:pointer;}',
-    '.ovw-popover__row--clickable:hover{background:rgba(22,119,255,.08);}',
-    '.ovw-popover__dot{width:7px;height:7px;border-radius:50%;}',
-    '.ovw-popover__label{color:#595959;}',
-    '.ovw-popover__num{color:#262626;font-weight:600;font-variant-numeric:tabular-nums;}',
-    '.ovw-popover__arrow{color:#1677ff;opacity:.6;font-weight:600;}',
-    '.ovw-popover__row--clickable:hover .ovw-popover__arrow{opacity:1;}',
-    '.ovw-popover__foot{padding:8px 14px 12px;border-top:1px solid rgba(0,0,0,.05);background:rgba(250,250,251,.6);}',
-    '.ovw-popover__foot-row{display:flex;justify-content:space-between;gap:12px;padding:2px 0;font-size:12.5px;color:#8c8c8c;}',
-    '.ovw-popover__foot-row--strong{color:rgba(0,0,0,.88);font-weight:600;}',
-    '.ovw-popover__time{margin-top:6px;text-align:right;font-size:11px;color:#bfbfbf;}',
+
+    /* ---- 全部统计开关 ---- */
+    '.ovw-global-toggle{display:inline-flex;align-items:center;height:32px;padding:0 14px;margin-left:8px;border:1px solid #1677ff;border-radius:6px;background:#1677ff;color:#fff;cursor:pointer;font-size:13px;font-family:inherit;white-space:nowrap;flex:0 0 auto;transition:all .15s ease;}',
+    '.ovw-global-toggle:hover{background:#0958d9;border-color:#0958d9;}',
+    '.ovw-global-toggle.is-on{background:#f5f5f5;color:#8c8c8c;border-color:#d9d9d9;cursor:default;}',
+
+    /* ---- 筛选提示 ---- */
     '.ovw-filter-hint{position:fixed;top:80px;right:20px;z-index:1000002;display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;background:#fff;border:1px solid rgba(22,119,255,.25);box-shadow:0 8px 24px rgba(22,119,255,.15);color:rgba(0,0,0,.88);font:13px/1.4 Roboto,Arial,sans-serif;max-width:420px;}',
     '.ovw-filter-hint__icon{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;background:linear-gradient(180deg,#1677ff,#4096ff);color:#fff;flex:0 0 26px;}',
     '.ovw-filter-hint__text{flex:1;min-width:0;}',
@@ -914,12 +989,6 @@
 
   var ESCAPE_MAP = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   function escapeHtml(v) { return String(v).replace(/[&<>"']/g, function (c) { return ESCAPE_MAP[c]; }); }
-  function formatTime(ts) { return new Date(ts).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }); }
-
-  document.addEventListener('click', function (e) {
-    if (openPopover && !openPopover.contains(e.target) && !(e.target.closest && e.target.closest('.ovw-summary'))) closePopover();
-  }, true);
-  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closePopover(); });
 
   /* ============================================================
    * data 页自动筛选执行
@@ -1206,11 +1275,10 @@
     statsEnabled = false;
     if (observer) { observer.disconnect(); observer = null; }
     if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
-    document.querySelectorAll('.ovw-summary, .ovw-toolbar, .ovw-popover, .ovw-global-toggle').forEach(function (el) {
+    document.querySelectorAll('.ovw-summary, .ovw-toolbar, .ovw-global-toggle').forEach(function (el) {
       if (el.parentNode) el.parentNode.removeChild(el);
     });
     document.querySelectorAll('[data-ovw-mounted]').forEach(function (el) { delete el.dataset.ovwMounted; });
-    closePopover();
     cache = {};
     var style = document.getElementById('ovw-style');
     if (style && style.parentNode) style.parentNode.removeChild(style);
@@ -1232,6 +1300,14 @@
       active: function () { return active; },
       page: function () { return isListPage() ? 'list' : (isDataPage() ? 'data' : 'other'); },
       statsEnabled: function () { return statsEnabled; },
+      theme: function () {
+        var el = document.querySelector('.ovw-summary');
+        return el ? { theme: el.dataset.ovwTheme, bg: window.getComputedStyle(el.parentElement || el).backgroundColor } : '未挂载';
+      },
+      rescanTheme: function () {
+        document.querySelectorAll('.ovw-summary').forEach(applyTheme);
+        return '已重算主题';
+      },
       setFilter: function (code, label) {
         var cands = FILTER_VALUE_CANDIDATES[code] || [code];
         sessionStorage.setItem(PENDING_KEY, JSON.stringify({
