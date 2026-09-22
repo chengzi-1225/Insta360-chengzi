@@ -2,7 +2,7 @@
 // @name         Insta360 我的返修面板
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      1.1.0
+// @version      1.2.0
 // @description  侧边栏「我的返修」按钮，只显示属于本人的审核驳回任务
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
@@ -83,18 +83,28 @@
     return [];
   }
 
+  async function fetchAllProjects() {
+    var body = await getJson(apiUrl(CONFIG.projectPath, { page_size: 200 }));
+    return rowsFromResponse(body);
+  }
+
+  async function fetchProjectTasks(pid) {
+    var body = await getJson(apiUrl(CONFIG.taskPath, { project: pid, page_size: CONFIG.pageSize }));
+    return rowsFromResponse(body);
+  }
+
   /* ============================================================
-   * ★ 获取当前登录用户身份
+   * 识别当前用户
    * ============================================================ */
 
-  // 从 DOM 元素提取文本，剥掉 Cici 翻译注入节点
   function extractCleanText(el) {
     if (!el) return '';
     try {
       var clone = el.cloneNode(true);
-      clone.querySelectorAll('.__Cici__translate__, .__Cici__translate__ *').forEach(function (n) {
-        if (n.parentNode) n.parentNode.removeChild(n);
-      });
+      var kills = clone.querySelectorAll('.__Cici__translate__, .__Cici__translate__ *');
+      for (var i = 0; i < kills.length; i++) {
+        if (kills[i].parentNode) kills[i].parentNode.removeChild(kills[i]);
+      }
       return (clone.textContent || '').trim();
     } catch (e) {
       return (el.textContent || '').trim();
@@ -102,19 +112,12 @@
   }
 
   function getSidebarUserName() {
-    // 主目标选择器
     var el = document.querySelector('.ls-userpic__username');
     if (el) {
       var t = extractCleanText(el);
       if (t) return t;
     }
-    // 兜底：其他可能出现用户名的位置
-    var sels = [
-      '.ls-userpic__name',
-      '[class*="userpic"] [class*="name"]',
-      '.ls-user-menu__name',
-      '[class*="user-name"]'
-    ];
+    var sels = ['.ls-userpic__name', '[class*="userpic"] [class*="name"]', '.ls-user-menu__name', '[class*="user-name"]'];
     for (var i = 0; i < sels.length; i++) {
       var e = document.querySelector(sels[i]);
       if (e) {
@@ -128,29 +131,43 @@
   async function fetchMe() {
     var me = { id: null, names: [], loaded: false };
 
-    // 1. whoami 拿 id + 各种名字字段
     try {
       var j = await getJson(CONFIG.whoamiPath);
       if (j && typeof j === 'object') {
         if (j.id != null) me.id = String(j.id);
-        var nameKeys = ['username', 'first_name', 'last_name', 'email', 'name', 'display_name', 'nickname'];
-        nameKeys.forEach(function (k) {
+
+        var fn = j.first_name ? String(j.first_name).trim() : '';
+        var ln = j.last_name ? String(j.last_name).trim() : '';
+
+        // 组合真名优先
+        if (fn && ln) {
+          me.names.push(fn + ln);
+          me.names.push(ln + fn);
+        }
+        if (fn) me.names.push(fn);
+        if (ln) me.names.push(ln);
+
+        // username：纯数字（手机号）就跳过
+        if (j.username && !/^\d+$/.test(String(j.username).trim())) {
+          me.names.push(String(j.username).trim());
+        }
+        // 邮箱前缀
+        if (j.email && String(j.email).indexOf('@') > 0) {
+          var ep = String(j.email).split('@')[0];
+          if (!/^\d+$/.test(ep)) me.names.push(ep);
+        }
+        // 其他别名
+        ['name', 'display_name', 'nickname'].forEach(function (k) {
           if (j[k] != null && String(j[k]).trim()) me.names.push(String(j[k]).trim());
         });
-        if (j.first_name && j.last_name) {
-          me.names.push(j.first_name + j.last_name);
-          me.names.push(j.last_name + j.first_name);
-        }
       }
     } catch (e) {
       log('whoami 失败：', e.message);
     }
 
-    // 2. 侧边栏用户名
     var sidebarName = getSidebarUserName();
     if (sidebarName) me.names.push(sidebarName);
 
-    // 去重、去空
     var uniq = {};
     me.names = me.names.filter(function (v) {
       if (!v) return false;
@@ -166,7 +183,7 @@
   }
 
   /* ============================================================
-   * ★ 收集任务里所有可能的"归属者"值
+   * 收集任务的归属者（支持数组字段）
    * ============================================================ */
 
   function collectTaskOwners(task) {
@@ -177,13 +194,35 @@
       'annotator_id', 'assignee_id', 'user_id', 'completed_by',
       'created_by_id', 'creator_id', 'owner_id', 'assigned_to_id',
       'annotatorId', 'assigneeId', 'userId', 'completedBy',
-      'createdById', 'creatorId', 'ownerId'
+      'createdById', 'creatorId', 'ownerId', 'updated_by'
     ];
     var nameKeys = [
       'annotator', 'assignee', 'user', 'created_by', 'creator', 'owner', 'assigned_to',
       'annotator_name', 'assignee_name', 'created_by_name', 'creator_name',
       'username', 'user_name', 'operator'
     ];
+    var arrayKeys = ['annotators', 'reviewers', 'acceptors', 'annotations', 'reviews', 'acceptances'];
+
+    function pushUserObject(obj) {
+      if (!obj) return;
+      if (typeof obj === 'object') {
+        if (obj.id != null) ids.push(String(obj.id));
+        ['username', 'name', 'display_name', 'email', 'first_name', 'last_name', 'nickname'].forEach(function (nk) {
+          if (obj[nk] != null && String(obj[nk]).trim()) {
+            var sv = String(obj[nk]).trim();
+            names.push(sv);
+          }
+        });
+        if (obj.first_name && obj.last_name) {
+          names.push(obj.first_name + obj.last_name);
+          names.push(obj.last_name + obj.first_name);
+        }
+      } else if (typeof obj === 'string' || typeof obj === 'number') {
+        var sv = String(obj).trim();
+        if (/^\d+$/.test(sv)) ids.push(sv);
+        else names.push(sv);
+      }
+    }
 
     function scanRecord(rec) {
       if (!rec || typeof rec !== 'object') return;
@@ -197,21 +236,16 @@
       nameKeys.forEach(function (k) {
         var v = rec[k];
         if (v == null) return;
-        if (typeof v === 'object') {
-          if (v.id != null) ids.push(String(v.id));
-          ['username', 'name', 'display_name', 'email', 'first_name', 'last_name', 'nickname'].forEach(function (nk) {
-            if (v[nk] != null && String(v[nk]).trim()) names.push(String(v[nk]).trim());
-          });
-          if (v.first_name && v.last_name) {
-            names.push(v.first_name + v.last_name);
-            names.push(v.last_name + v.first_name);
-          }
-        } else {
+        if (typeof v === 'object') pushUserObject(v);
+        else {
           var sv = String(v).trim();
-          if (!sv) return;
-          if (/^\d+$/.test(sv)) ids.push(sv);
-          else names.push(sv);
+          if (sv) { if (/^\d+$/.test(sv)) ids.push(sv); else names.push(sv); }
         }
+      });
+      arrayKeys.forEach(function (k) {
+        var arr = rec[k];
+        if (!Array.isArray(arr)) return;
+        arr.forEach(pushUserObject);
       });
     }
 
@@ -219,44 +253,19 @@
     if (task.data && typeof task.data === 'object') scanRecord(task.data);
     if (task.meta && typeof task.meta === 'object') scanRecord(task.meta);
 
-    // 原版 Label Studio 结构：annotations[].completed_by / created_username
-    if (Array.isArray(task.annotations)) {
-      task.annotations.forEach(function (ann) {
-        if (!ann) return;
-        if (ann.completed_by != null) ids.push(String(ann.completed_by));
-        if (ann.created_username) names.push(String(ann.created_username));
-        if (ann.user && typeof ann.user === 'object') {
-          if (ann.user.id != null) ids.push(String(ann.user.id));
-          if (ann.user.username) names.push(String(ann.user.username));
-          if (ann.user.name) names.push(String(ann.user.name));
-        }
-      });
-    }
-    // 评论/历史/事件里的操作人
-    var evLists = [task.events, task.history, task.status_history, task.reviews, task.records];
+    var evLists = [task.events, task.history, task.status_history, task.records];
     evLists.forEach(function (arr) {
       if (!Array.isArray(arr)) return;
       arr.forEach(function (ev) {
         if (!ev || typeof ev !== 'object') return;
         if (ev.user_id != null) ids.push(String(ev.user_id));
         if (ev.userId != null) ids.push(String(ev.userId));
-        if (ev.user != null) {
-          if (typeof ev.user === 'object') {
-            if (ev.user.id != null) ids.push(String(ev.user.id));
-            ['username', 'name', 'display_name'].forEach(function (nk) {
-              if (ev.user[nk]) names.push(String(ev.user[nk]));
-            });
-          } else {
-            var sv = String(ev.user).trim();
-            if (sv) { if (/^\d+$/.test(sv)) ids.push(sv); else names.push(sv); }
-          }
-        }
+        if (ev.user != null) pushUserObject(ev.user);
         if (ev.username) names.push(String(ev.username));
         if (ev.operator) names.push(String(ev.operator));
       });
     });
 
-    // 去重
     var uniqId = {}, uniqName = {};
     ids = ids.filter(function (v) { if (!v || uniqId[v]) return false; uniqId[v] = 1; return true; });
     names = names.filter(function (v) {
@@ -271,26 +280,22 @@
   }
 
   /* ============================================================
-   * ★ 严格匹配：只保留明确属于"我"的任务
+   * 严格归属判断
    * ============================================================ */
 
   function isMine(task, me) {
-    // 连"我是谁"都拿不到 → 保守起见不过滤（返回 true 保留）
     if (!me || !me.loaded) return true;
 
     var owners = collectTaskOwners(task);
 
-    // 没有任何归属信息 → 排除（严格模式）
     if (!owners.ids.length && !owners.names.length) return false;
 
-    // ID 精确匹配
     if (me.id) {
       for (var i = 0; i < owners.ids.length; i++) {
         if (owners.ids[i] === me.id) return true;
       }
     }
 
-    // 名字匹配（去空格、忽略大小写，双向包含）
     var myNames = me.names.map(function (n) { return n.replace(/\s+/g, '').toLowerCase(); });
     for (var j = 0; j < owners.names.length; j++) {
       var on = owners.names[j].replace(/\s+/g, '').toLowerCase();
@@ -298,14 +303,12 @@
         var mn = myNames[k];
         if (!mn) continue;
         if (mn === on) return true;
-        // 双向包含（覆盖"陈文" vs "wen.chen" 之类的不完全一致）
         if (mn.length >= 2 && on.length >= 2) {
           if (on.indexOf(mn) !== -1 || mn.indexOf(on) !== -1) return true;
         }
       }
     }
 
-    // 严格模式：没匹配上就算不是我的
     return false;
   }
 
@@ -438,11 +441,18 @@
 
       var me = await mePromise;
       cache.me = me;
+
       if (!me.loaded) {
         scanInfo += '，⚠ 无法识别当前用户';
       } else {
+        // 挑一个非纯数字的显示名
+        var displayName = '';
+        for (var i = 0; i < me.names.length; i++) {
+          if (!/^\d+$/.test(me.names[i])) { displayName = me.names[i]; break; }
+        }
+        if (!displayName) displayName = me.names[0] || '';
         var idTxt = me.id ? ('#' + me.id) : '';
-        var nameTxt = me.names.length ? ('「' + me.names[0] + '」') : '';
+        var nameTxt = displayName ? ('「' + displayName + '」') : '';
         scanInfo += '，当前用户 ' + idTxt + nameTxt;
       }
 
@@ -502,16 +512,6 @@
       cache.promise = null;
       throw e;
     }
-  }
-
-  async function fetchAllProjects() {
-    var body = await getJson(apiUrl(CONFIG.projectPath, { page_size: 200 }));
-    return rowsFromResponse(body);
-  }
-
-  async function fetchProjectTasks(pid) {
-    var body = await getJson(apiUrl(CONFIG.taskPath, { project: pid, page_size: CONFIG.pageSize }));
-    return rowsFromResponse(body);
   }
 
   /* ============================================================
@@ -736,7 +736,6 @@
     info: function () { return cache.scanInfo; },
     me: function () { return cache.me; },
     clearCache: function () { cache.rows = null; cache.loadedAt = 0; return 'cleared'; },
-    // 快速测一个任务是不是我的
     test: function (task) { return { isMine: isMine(task, cache.me), owners: collectTaskOwners(task) }; },
   };
 })();
