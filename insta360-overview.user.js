@@ -2,8 +2,8 @@
 // @name         Insta360 项目概览
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      3.4.0
-// @description  项目卡片追加状态进度条与统计数字（颜色随底色自适应）+ 统计开关持久化 + 单卡关闭 + 状态跳转自动筛选
+// @version      3.5.0
+// @description  项目卡片追加状态进度条与统计数字（颜色随底色自适应）+ 统计开关持久化 + 单卡关闭 + 关闭全部已统计 + 状态跳转自动筛选
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
@@ -630,7 +630,6 @@
       var target = e.target;
       var cardEl = summary.closest(CONFIG.cardSelector);
 
-      /* 关闭此卡统计 */
       var closeEl = target.closest ? target.closest('.ovw-close') : null;
       if (closeEl) {
         e.preventDefault(); e.stopPropagation();
@@ -643,7 +642,6 @@
         return;
       }
 
-      /* 刷新 */
       var refreshEl = target.closest ? target.closest('.ovw-refresh') : null;
       if (refreshEl) {
         e.preventDefault(); e.stopPropagation();
@@ -651,7 +649,6 @@
         return;
       }
 
-      /* 状态跳转 */
       var keyEl = target.closest ? target.closest('[data-ovw-key]') : null;
       if (keyEl && cardEl) {
         var key = keyEl.getAttribute('data-ovw-key');
@@ -1006,7 +1003,6 @@
 
     '.ovw-summary[aria-busy="true"]{opacity:.7;}',
 
-    /* 进度条 */
     '.ovw-bars{display:flex;flex-direction:column;gap:7px;}',
     '.ovw-bar{display:grid;grid-template-columns:34px 1fr 40px;align-items:center;gap:9px;padding:1px 2px;border-radius:4px;cursor:default;}',
     '.ovw-bar[data-ovw-key]{cursor:pointer;}',
@@ -1016,7 +1012,6 @@
     '.ovw-bar__fill{display:block;height:100%;border-radius:3px;background:var(--ovw-c,#52c41a);transition:width .35s ease;}',
     '.ovw-bar__val{font-size:12px;font-weight:700;text-align:right;color:var(--ovw-c,#52c41a);font-variant-numeric:tabular-nums;}',
 
-    /* 数字格 */
     '.ovw-stats{display:grid;gap:2px;margin-top:9px;}',
     '.ovw-stat{display:flex;flex-direction:column;align-items:center;gap:1px;padding:2px 0;border-radius:6px;cursor:pointer;transition:background .15s ease;}',
     '.ovw-stat:hover{background:var(--ovw-hover);}',
@@ -1027,10 +1022,8 @@
     '.ovw-summary[data-ovw-theme="dark"] .ovw-bar__val{filter:brightness(1.28) saturate(1.05);}',
     '.ovw-summary[data-ovw-theme="dark"] .ovw-bar__fill{filter:brightness(1.18) saturate(1.05);}',
 
-    /* 空字段提示 */
     '.ovw-empty{padding:4px 0;font-size:11.5px;color:var(--ovw-label);text-align:center;}',
 
-    /* 刷新 / 关闭 */
     '.ovw-refresh{position:absolute;top:6px;right:0;display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;padding:0;border:0;border-radius:4px;background:transparent;color:var(--ovw-icon);cursor:pointer;opacity:0;transition:opacity .15s ease,color .15s ease,background .15s ease,right .15s ease;}',
     '.ovw-summary:hover .ovw-refresh{opacity:1;}',
     '.ovw-refresh:hover{background:rgba(22,119,255,.14);color:#1677ff;}',
@@ -1039,7 +1032,6 @@
     '.ovw-summary:hover .ovw-close{opacity:1;}',
     '.ovw-close:hover{background:rgba(255,77,79,.14);color:#ff4d4f;}',
 
-    /* 状态 */
     '.ovw-skeleton{display:flex;flex-direction:column;gap:8px;padding:4px 0;}',
     '.ovw-skeleton span{display:block;height:7px;border-radius:4px;background:var(--ovw-track);background-image:linear-gradient(90deg,transparent,rgba(128,128,128,.18),transparent);background-size:200% 100%;animation:ovw-shimmer 1.2s infinite;}',
     '.ovw-skeleton span:nth-child(1){width:82%;}',
@@ -1051,13 +1043,11 @@
     '.ovw-load-btn{display:inline-flex;align-items:center;justify-content:center;width:100%;padding:5px 10px;border:1px solid rgba(22,119,255,.45);border-radius:6px;background:rgba(22,119,255,.05);color:#1677ff;cursor:pointer;font-size:12px;font-weight:500;font-family:inherit;white-space:nowrap;transition:all .12s ease;}',
     '.ovw-load-btn:hover{background:rgba(22,119,255,.14);border-color:#1677ff;}',
 
-    /* 顶部工具栏 */
     '.ovw-toolbar{position:relative;display:inline-block;vertical-align:middle;margin-left:8px;font:14px/1.5 Roboto,Arial,sans-serif;white-space:nowrap;flex:0 0 auto;}',
     '.ovw-toolbar__btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:rgba(0,0,0,.88);cursor:pointer;font-size:13px;line-height:1;white-space:nowrap;transition:all .15s ease;font-family:inherit;}',
     '.ovw-toolbar__btn:hover,.ovw-toolbar__btn.is-open{color:#1677ff;border-color:#1677ff;background:rgba(22,119,255,.03);}',
     '.ovw-toolbar__panel{position:absolute;top:calc(100% + 6px);right:0;z-index:1000000;min-width:240px;padding:0;border:1px solid rgba(0,0,0,.06);border-radius:10px;background:#fff;box-shadow:0 8px 28px rgba(0,0,0,.13);overflow:hidden;}',
-    '.ovw-toolbar__panel-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 14px 8px;font-size:12px;color:#8c8c8c;border-bottom:1px solid rgba(0,0,0,.04);}',
-    '.ovw-toolbar__acts{display:inline-flex;align-items:center;gap:10px;flex:0 0 auto;}',
+    '.ovw-toolbar__panel-head{display:flex;justify-content:space-between;align-items:center;padding:10px 14px 8px;font-size:12px;color:#8c8c8c;border-bottom:1px solid rgba(0,0,0,.04);}',
     '.ovw-toolbar__reset{border:0;background:transparent;color:#1677ff;cursor:pointer;font-size:12px;padding:0;}',
     '.ovw-toolbar__none{border:0;background:transparent;color:#8c8c8c;cursor:pointer;font-size:12px;padding:0;}',
     '.ovw-toolbar__none:hover{color:#ff4d4f;}',
@@ -1066,13 +1056,11 @@
     '.ovw-toolbar__item:hover{background:rgba(22,119,255,.05);}',
     '.ovw-toolbar__dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:0 0 8px;}',
 
-    /* 全部统计开关 */
     '.ovw-global-toggle{display:inline-flex;align-items:center;height:32px;padding:0 14px;margin-left:8px;border:1px solid #1677ff;border-radius:6px;background:#1677ff;color:#fff;cursor:pointer;font-size:13px;font-family:inherit;white-space:nowrap;flex:0 0 auto;transition:all .15s ease;}',
     '.ovw-global-toggle:hover{background:#0958d9;border-color:#0958d9;}',
     '.ovw-global-toggle.is-on{background:#f5f5f5;color:#8c8c8c;border-color:#d9d9d9;}',
     '.ovw-global-toggle.is-on:hover{background:#ededed;border-color:#bfbfbf;color:#595959;}',
 
-    /* 筛选提示 */
     '.ovw-filter-hint{position:fixed;top:80px;right:20px;z-index:1000002;display:flex;align-items:center;gap:10px;padding:10px 14px;border-radius:10px;background:#fff;border:1px solid rgba(22,119,255,.25);box-shadow:0 8px 24px rgba(22,119,255,.15);color:rgba(0,0,0,.88);font:13px/1.4 Roboto,Arial,sans-serif;max-width:420px;}',
     '.ovw-filter-hint__icon{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:50%;background:linear-gradient(180deg,#1677ff,#4096ff);color:#fff;flex:0 0 26px;}',
     '.ovw-filter-hint__text{flex:1;min-width:0;}',
