@@ -2,7 +2,7 @@
 // @name         Insta360 项目概览
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      1.9.9
+// @version      2.0.0
 // @description  项目卡片状态概览 + 状态跳转自动筛选（返工/返修分离 + all页面手动统计）
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
@@ -34,8 +34,6 @@
 
   var DEBUG = false;
   var PENDING_KEY = 'ovw_pending_filter';
-
-  // ★ 统计总开关（all 页面默认关）
   var statsEnabled = false;
 
   var CONFIG = {
@@ -53,7 +51,6 @@
     defaultPendingWhenNoStatus: true,
     mountDelayMs: 120,
     autoApplyFilter: true,
-    // ★ all 页面不自动统计，需手动开启
     manualModeOnAllWorkspace: true,
     allWorkspaceCardLimit: 50
   };
@@ -623,7 +620,6 @@
     summaryEl.appendChild(frag);
   }
 
-  // ★ 手动模式占位渲染
   function renderSummaryManual(summaryEl, context) {
     if (!summaryEl) return;
     summaryEl.innerHTML =
@@ -772,7 +768,6 @@
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) closePanel(); });
   }
 
-  // ★ 全部统计开关
   function injectGlobalStatsToggle() {
     if (document.querySelector('.ovw-global-toggle')) return;
     var input = findSearchInput();
@@ -822,7 +817,6 @@
     card.dataset.ovwMounted = '1';
     createSummary(card, context);
 
-    // ★ 手动模式：不自动请求
     var totalCards = document.querySelectorAll(CONFIG.cardSelector).length;
     if (shouldManualMode(totalCards) && !statsEnabled) {
       renderSummaryManual(card.querySelector('.ovw-summary'), context);
@@ -849,7 +843,7 @@
   }
 
   /* ============================================================
-   * 样式
+   * 样式（★ 按钮不换行优化）
    * ============================================================ */
 
   var CSS_TEXT = [
@@ -857,9 +851,9 @@
     '.ovw-summary:hover{background:#fff;border-color:rgba(22,119,255,.25);box-shadow:0 2px 8px rgba(22,119,255,.08);}',
     '.ovw-summary[aria-busy="true"]{opacity:.6;}',
     '.ovw-summary::before{content:"";flex:0 0 4px;height:16px;border-radius:2px;background:linear-gradient(180deg,#1677ff,#4096ff);opacity:.7;}',
-    '.ovw-load-btn{display:inline-flex;align-items:center;padding:4px 10px;border:1px solid #1677ff;border-radius:5px;background:#fff;color:#1677ff;cursor:pointer;font-size:12px;font-family:inherit;transition:all .12s ease;}',
+    '.ovw-load-btn{display:inline-flex;align-items:center;padding:4px 10px;border:1px solid #1677ff;border-radius:5px;background:#fff;color:#1677ff;cursor:pointer;font-size:12px;font-family:inherit;white-space:nowrap;transition:all .12s ease;}',
     '.ovw-load-btn:hover{background:rgba(22,119,255,.08);}',
-    '.ovw-global-toggle{display:inline-flex;align-items:center;height:32px;padding:0 14px;margin-left:8px;border:1px solid #1677ff;border-radius:6px;background:#1677ff;color:#fff;cursor:pointer;font-size:13px;font-family:inherit;transition:all .15s ease;}',
+    '.ovw-global-toggle{display:inline-flex;align-items:center;height:32px;padding:0 14px;margin-left:8px;border:1px solid #1677ff;border-radius:6px;background:#1677ff;color:#fff;cursor:pointer;font-size:13px;font-family:inherit;white-space:nowrap;flex:0 0 auto;transition:all .15s ease;}',
     '.ovw-global-toggle:hover{background:#0958d9;border-color:#0958d9;}',
     '.ovw-global-toggle.is-on{background:#f5f5f5;color:#8c8c8c;border-color:#d9d9d9;cursor:default;}',
     '.ovw-chip{display:inline-flex;align-items:baseline;gap:4px;padding:3px 8px;border-radius:5px;background:rgba(0,0,0,.028);white-space:nowrap;font-variant-numeric:tabular-nums;transition:all .12s ease;}',
@@ -874,8 +868,8 @@
     '.ovw-message--err{color:#cf1322;}',
     '.ovw-refresh{margin-left:auto;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border:0;border-radius:5px;background:transparent;color:#8c8c8c;cursor:pointer;padding:0;transition:all .15s ease;}',
     '.ovw-refresh:hover{background:rgba(22,119,255,.1);color:#1677ff;}',
-    '.ovw-toolbar{position:relative;display:inline-block;vertical-align:middle;margin-left:8px;font:14px/1.5 Roboto,Arial,sans-serif;}',
-    '.ovw-toolbar__btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:rgba(0,0,0,.88);cursor:pointer;font-size:13px;line-height:1;transition:all .15s ease;font-family:inherit;}',
+    '.ovw-toolbar{position:relative;display:inline-block;vertical-align:middle;margin-left:8px;font:14px/1.5 Roboto,Arial,sans-serif;white-space:nowrap;flex:0 0 auto;}',
+    '.ovw-toolbar__btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:rgba(0,0,0,.88);cursor:pointer;font-size:13px;line-height:1;white-space:nowrap;transition:all .15s ease;font-family:inherit;}',
     '.ovw-toolbar__btn:hover,.ovw-toolbar__btn.is-open{color:#1677ff;border-color:#1677ff;background:rgba(22,119,255,.03);}',
     '.ovw-toolbar__panel{position:absolute;top:calc(100% + 6px);right:0;z-index:1000000;min-width:210px;padding:0;border:1px solid rgba(0,0,0,.06);border-radius:10px;background:#fff;box-shadow:0 8px 28px rgba(0,0,0,.13);overflow:hidden;}',
     '.ovw-toolbar__panel-head{display:flex;justify-content:space-between;align-items:center;padding:10px 14px 8px;font-size:12px;color:#8c8c8c;border-bottom:1px solid rgba(0,0,0,.04);}',
@@ -1209,7 +1203,7 @@
   function deactivate() {
     if (!active) return;
     active = false;
-    statsEnabled = false;  // ★ 离开时重置开关
+    statsEnabled = false;
     if (observer) { observer.disconnect(); observer = null; }
     if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
     document.querySelectorAll('.ovw-summary, .ovw-toolbar, .ovw-popover, .ovw-global-toggle').forEach(function (el) {
