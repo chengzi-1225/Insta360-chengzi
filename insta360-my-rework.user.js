@@ -2,7 +2,7 @@
 // @name         Insta360 我的返修面板
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      1.3.0
+// @version      1.3.1
 // @description  侧边栏「我的返修」按钮，只显示属于本人的审核驳回任务
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
@@ -20,7 +20,7 @@
 
   var CONFIG = {
     projectPath: '/api/projects',
-    taskPath: '/api/dm/tasks',
+    taskPath: '/api/tasks',        // ★ v1.3.1：新接口路径（旧 /api/dm/tasks 已废弃）
     whoamiPath: '/api/current-user/whoami',
     pageSize: 500,
     concurrency: 8,
@@ -80,44 +80,22 @@
   }
 
   /* ============================================================
-   * ★ 带 workspace 兜底的 task 请求
+   * ★ v1.3.1：/api/tasks 只传 project 参数
    * ============================================================ */
 
   async function fetchProjectTasks(pid, ws) {
-    // 当前页面的 workspace（从 URL 兜底）
-    var curWs = (location.pathname.match(/\/workspaces\/([^/]+)/) || [])[1] || '';
-
-    // 依次尝试多种组合，第一个成功就用
-    var attempts = [];
-    if (ws && ws !== 'all') attempts.push({ project: pid, workspace: ws, page_size: CONFIG.pageSize });
-    if (curWs && curWs !== 'all' && curWs !== ws) attempts.push({ project: pid, workspace: curWs, page_size: CONFIG.pageSize });
-    attempts.push({ project: pid, workspace: 'all', page_size: CONFIG.pageSize });
-    attempts.push({ project: pid, page_size: CONFIG.pageSize });
-
-    var lastErr = null;
-    for (var i = 0; i < attempts.length; i++) {
-      try {
-        var body = await getJson(apiUrl(CONFIG.taskPath, attempts[i]));
-        if (i > 0) log('项目 ' + pid + ' 第 ' + (i+1) + ' 个组合成功：', attempts[i]);
-        return rowsFromResponse(body);
-      } catch (e) {
-        lastErr = e;
-        if (e.status !== 404) throw e; // 非 404 直接抛
-        // 404 继续试下一个
-      }
-    }
-    throw lastErr || new Error('全部 workspace 组合都失败');
+    // /api/tasks 用 project 参数即可，不需要 workspace
+    var params = { project: pid, page_size: CONFIG.pageSize };
+    var body = await getJson(apiUrl(CONFIG.taskPath, params));
+    return rowsFromResponse(body);
   }
 
   async function fetchAllProjects() {
-    // 先试当前 workspace（可能只返回当前 ws 的项目）
     var curWs = (location.pathname.match(/\/workspaces\/([^/]+)/) || [])[1] || '';
     var params = { page_size: 500 };
     if (curWs && curWs !== 'all') params.workspace = curWs;
     var body = await getJson(apiUrl(CONFIG.projectPath, params));
     var list = rowsFromResponse(body);
-
-    // 如果当前 ws 拿到的少，试 all
     if (curWs && curWs !== 'all' && list.length < 100) {
       try {
         var body2 = await getJson(apiUrl(CONFIG.projectPath, { page_size: 500, workspace: 'all' }));
@@ -193,7 +171,7 @@
   }
 
   /* ============================================================
-   * 归属识别（支持数组字段）
+   * 归属识别（数组字段 + 单数字段 + events）
    * ============================================================ */
 
   function collectTaskOwners(task) {
@@ -554,10 +532,9 @@
     var failed = rows.filter(function (r) { return r.error; });
 
     if (!totalRejected) {
-      var html0 = '<div class="ovw-rwk-empty">没有找到属于你的返修任务。</div>' +
-                  '<div class="ovw-rwk-tip">共扫描 ' + rows.length + ' 个项目' +
-                  (failed.length ? '，其中 ' + failed.length + ' 个请求失败' : '') + '</div>';
-      body.innerHTML = html0;
+      body.innerHTML = '<div class="ovw-rwk-empty">没有找到属于你的返修任务。</div>' +
+        '<div class="ovw-rwk-tip">共扫描 ' + rows.length + ' 个项目' +
+        (failed.length ? '，其中 ' + failed.length + ' 个请求失败' : '') + '</div>';
       return;
     }
 
