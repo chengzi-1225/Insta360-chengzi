@@ -2,7 +2,7 @@
 // @name         Insta360 项目概览
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      1.9.7
+// @version      1.9.8
 // @description  项目卡片状态概览 + 状态跳转自动筛选（返工/返修分离）
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
@@ -87,10 +87,10 @@
     REPAIR:             ['REPAIR', 'repair']
   };
 
-  var FILTERABLE = {
+   var FILTERABLE = {
     PENDING_ANNOTATION: 1, ANNOTATED: 1,
     REVIEWED_ACCEPTED: 1, REVIEWED_REJECTED: 1,
-    REWORK: 1, REPAIR: 1
+    REWORK: 1
   };
 
   var STATUS_ALIASES = {
