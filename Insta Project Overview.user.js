@@ -2,12 +2,14 @@
 // @name         Insta360 项目概览
 // @namespace    https://label.insta360.com/
 // @author       chengzi66
-// @version      1.9.4
+// @version      1.9.5
 // @description  项目卡片状态概览 + 状态跳转自动筛选
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
 // @noframes
+// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/Insta%20Project%20Overview.user.js
+// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/Insta%20Project%20Overview.user.js
 // ==/UserScript==
 
 (function () {
