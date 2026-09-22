@@ -2,8 +2,8 @@
 // @name         Insta360 项目概览
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      1.9.8
-// @description  项目卡片状态概览 + 状态跳转自动筛选（返工/返修分离）
+// @version      1.9.9
+// @description  项目卡片状态概览 + 状态跳转自动筛选（返工/返修分离 + all页面手动统计）
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
@@ -35,6 +35,9 @@
   var DEBUG = false;
   var PENDING_KEY = 'ovw_pending_filter';
 
+  // ★ 统计总开关（all 页面默认关）
+  var statsEnabled = false;
+
   var CONFIG = {
     cardSelector: '.ls-project-card',
     summaryHostSelector: '.ls-project-card__detail',
@@ -49,10 +52,23 @@
     taskPageConcurrency: 12,
     defaultPendingWhenNoStatus: true,
     mountDelayMs: 120,
-    autoApplyFilter: true
+    autoApplyFilter: true,
+    // ★ all 页面不自动统计，需手动开启
+    manualModeOnAllWorkspace: true,
+    allWorkspaceCardLimit: 50
   };
 
-  // ★ v1.9.7：REWORK 和 REPAIR 拆开
+  function isAllWorkspace() {
+    return /^\/workspaces\/all(\/|$)/.test(location.pathname) || /\/workspaces\/all\//.test(location.pathname);
+  }
+
+  function shouldManualMode(cardCount) {
+    if (!CONFIG.manualModeOnAllWorkspace) return false;
+    if (isAllWorkspace()) return true;
+    if (cardCount > CONFIG.allWorkspaceCardLimit) return true;
+    return false;
+  }
+
   var STATUS_CODES = [
     'PENDING_ANNOTATION', 'ANNOTATED',
     'REVIEWED_ACCEPTED', 'REVIEWED_REJECTED',
@@ -77,7 +93,6 @@
     REWORK: '#fa8c16', REPAIR: '#fa541c'
   };
 
-  // 筛选值：全大写优先
   var FILTER_VALUE_CANDIDATES = {
     PENDING_ANNOTATION: ['CREATED', 'PENDING', 'created'],
     ANNOTATED:          ['ANNOTATED', 'annotated'],
@@ -87,7 +102,7 @@
     REPAIR:             ['REPAIR', 'repair']
   };
 
-   var FILTERABLE = {
+  var FILTERABLE = {
     PENDING_ANNOTATION: 1, ANNOTATED: 1,
     REVIEWED_ACCEPTED: 1, REVIEWED_REJECTED: 1,
     REWORK: 1
@@ -119,7 +134,7 @@
   }
 
   /* ============================================================
-   * 字段定义（★ v1.9.7：返工、返修分开）
+   * 字段定义
    * ============================================================ */
 
   var FIELD_DEFS = [
@@ -300,7 +315,6 @@
     var acceptance = num(summary.acceptance_count);
     var acceptanceRej = num(summary.acceptance_rejected_count);
     var appealed = num(summary.appealed_count);
-    // ★ v1.9.7：返工、返修拆开
     var rework = num(summary.user_rework_count);
     var repair = num(summary.user_repair_count);
     var reviewAccepted = Math.max(0, reviewed - reviewRejected);
@@ -608,6 +622,34 @@
     summaryEl.innerHTML = '';
     summaryEl.appendChild(frag);
   }
+
+  // ★ 手动模式占位渲染
+  function renderSummaryManual(summaryEl, context) {
+    if (!summaryEl) return;
+    summaryEl.innerHTML =
+      '<button type="button" class="ovw-load-btn">' +
+        '<svg viewBox="0 0 16 16" width="12" height="12" style="margin-right:4px;">' +
+          '<path fill="currentColor" d="M8 2a6 6 0 1 0 6 6h-2a4 4 0 1 1-4-4v2l4-3-4-3v2z"/>' +
+        '</svg>' +
+        '点击统计本项目' +
+      '</button>';
+    var btn = summaryEl.querySelector('.ovw-load-btn');
+    if (btn) {
+      ['click', 'mousedown', 'mouseup', 'pointerdown'].forEach(function (ev) {
+        btn.addEventListener(ev, function (e) { e.stopPropagation(); });
+      });
+      btn.addEventListener('click', function (e) {
+        e.preventDefault();
+        e.stopPropagation();
+        var card = summaryEl.closest(CONFIG.cardSelector);
+        if (card) {
+          renderSummary(summaryEl, null, true);
+          detailPool.run(function () { return refreshProject(card, { force: true }); }).catch(function () {});
+        }
+      });
+    }
+  }
+
   var openPopover = null;
   function closePopover() { if (openPopover) openPopover.remove(); openPopover = null; }
   function showPopover(anchor, context, agg) {
@@ -663,6 +705,7 @@
     }
     return null;
   }
+
   function injectFieldsToolbar() {
     if (document.querySelector('.ovw-toolbar')) return;
     var input = findSearchInput();
@@ -728,6 +771,46 @@
     document.addEventListener('click', function (e) { if (!toolbar.contains(e.target)) closePanel(); }, true);
     document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !panel.hidden) closePanel(); });
   }
+
+  // ★ 全部统计开关
+  function injectGlobalStatsToggle() {
+    if (document.querySelector('.ovw-global-toggle')) return;
+    var input = findSearchInput();
+    if (!input) return;
+    var host = input.closest('.ant-input-affix-wrapper')
+      || input.closest('.ant-input-group-wrapper')
+      || input.closest('.ant-input-search')
+      || input.parentElement;
+    if (!host || !host.parentElement) return;
+
+    var totalCards = document.querySelectorAll(CONFIG.cardSelector).length;
+    if (!shouldManualMode(totalCards)) return;
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'ovw-global-toggle' + (statsEnabled ? ' is-on' : '');
+    btn.textContent = statsEnabled ? '已开启统计' : '开启全部统计（' + totalCards + '）';
+    btn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      if (statsEnabled) return;
+      statsEnabled = true;
+      btn.textContent = '已开启统计';
+      btn.classList.add('is-on');
+
+      document.querySelectorAll(CONFIG.cardSelector).forEach(function (c) {
+        delete c.dataset.ovwMounted;
+      });
+      scanCards();
+    });
+
+    var fieldsToolbar = host.parentElement.querySelector('.ovw-toolbar');
+    if (fieldsToolbar && fieldsToolbar.nextSibling) {
+      host.parentElement.insertBefore(btn, fieldsToolbar.nextSibling);
+    } else {
+      host.parentElement.insertBefore(btn, host.nextSibling);
+    }
+  }
+
   function mountCard(card) {
     if (card.dataset.ovwMounted === '1') return;
     var context = projectContext(card);
@@ -738,6 +821,14 @@
     }
     card.dataset.ovwMounted = '1';
     createSummary(card, context);
+
+    // ★ 手动模式：不自动请求
+    var totalCards = document.querySelectorAll(CONFIG.cardSelector).length;
+    if (shouldManualMode(totalCards) && !statsEnabled) {
+      renderSummaryManual(card.querySelector('.ovw-summary'), context);
+      return;
+    }
+
     detailPool.run(function () { return refreshProject(card); }).catch(function () {});
   }
   function scanCards() {
@@ -766,6 +857,11 @@
     '.ovw-summary:hover{background:#fff;border-color:rgba(22,119,255,.25);box-shadow:0 2px 8px rgba(22,119,255,.08);}',
     '.ovw-summary[aria-busy="true"]{opacity:.6;}',
     '.ovw-summary::before{content:"";flex:0 0 4px;height:16px;border-radius:2px;background:linear-gradient(180deg,#1677ff,#4096ff);opacity:.7;}',
+    '.ovw-load-btn{display:inline-flex;align-items:center;padding:4px 10px;border:1px solid #1677ff;border-radius:5px;background:#fff;color:#1677ff;cursor:pointer;font-size:12px;font-family:inherit;transition:all .12s ease;}',
+    '.ovw-load-btn:hover{background:rgba(22,119,255,.08);}',
+    '.ovw-global-toggle{display:inline-flex;align-items:center;height:32px;padding:0 14px;margin-left:8px;border:1px solid #1677ff;border-radius:6px;background:#1677ff;color:#fff;cursor:pointer;font-size:13px;font-family:inherit;transition:all .15s ease;}',
+    '.ovw-global-toggle:hover{background:#0958d9;border-color:#0958d9;}',
+    '.ovw-global-toggle.is-on{background:#f5f5f5;color:#8c8c8c;border-color:#d9d9d9;cursor:default;}',
     '.ovw-chip{display:inline-flex;align-items:baseline;gap:4px;padding:3px 8px;border-radius:5px;background:rgba(0,0,0,.028);white-space:nowrap;font-variant-numeric:tabular-nums;transition:all .12s ease;}',
     '.ovw-chip__label{color:#8c8c8c;font-size:11px;}',
     '.ovw-chip__value{color:var(--ovw-c,#262626);font-weight:600;font-size:12.5px;}',
@@ -1087,7 +1183,7 @@
     scanTimer = setTimeout(function () {
       scanTimer = null;
       if (!active) return;
-      try { scanCards(); injectFieldsToolbar(); } catch (e) {}
+      try { scanCards(); injectFieldsToolbar(); injectGlobalStatsToggle(); } catch (e) {}
     }, CONFIG.mountDelayMs);
   }
   function activate() {
@@ -1101,7 +1197,7 @@
       var hasCards = document.querySelectorAll(CONFIG.cardSelector).length > 0;
       var hasSearch = Boolean(findSearchInput());
       if ((hasCards && hasSearch) || tries > 30) {
-        scanCards(); injectFieldsToolbar();
+        scanCards(); injectFieldsToolbar(); injectGlobalStatsToggle();
         if (!observer) {
           observer = new MutationObserver(scheduleScan);
           observer.observe(document.body, { childList: true, subtree: true });
@@ -1113,9 +1209,10 @@
   function deactivate() {
     if (!active) return;
     active = false;
+    statsEnabled = false;  // ★ 离开时重置开关
     if (observer) { observer.disconnect(); observer = null; }
     if (scanTimer) { clearTimeout(scanTimer); scanTimer = null; }
-    document.querySelectorAll('.ovw-summary, .ovw-toolbar, .ovw-popover').forEach(function (el) {
+    document.querySelectorAll('.ovw-summary, .ovw-toolbar, .ovw-popover, .ovw-global-toggle').forEach(function (el) {
       if (el.parentNode) el.parentNode.removeChild(el);
     });
     document.querySelectorAll('[data-ovw-mounted]').forEach(function (el) { delete el.dataset.ovwMounted; });
@@ -1140,6 +1237,7 @@
     window.__OVW = {
       active: function () { return active; },
       page: function () { return isListPage() ? 'list' : (isDataPage() ? 'data' : 'other'); },
+      statsEnabled: function () { return statsEnabled; },
       setFilter: function (code, label) {
         var cands = FILTER_VALUE_CANDIDATES[code] || [code];
         sessionStorage.setItem(PENDING_KEY, JSON.stringify({
