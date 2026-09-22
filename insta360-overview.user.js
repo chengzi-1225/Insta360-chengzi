@@ -2,8 +2,8 @@
 // @name         Insta360 项目概览
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      3.6.0
-// @description  项目卡片追加状态进度条与统计数字（颜色随底色自适应）+ 统计开关持久化 + 单卡关闭 + 关闭已统计 + 全部关闭 + 状态跳转自动筛选
+// @version      3.6.1
+// @description  项目卡片追加状态进度条与统计数字（颜色随底色自适应）+ 统计开关持久化 + 单卡关闭 + 关闭已统计 + 全部关闭（双控开关）+ 状态跳转自动筛选
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
@@ -88,7 +88,7 @@
   var statsEnabled = loadStatsFlag();
   var allHidden = loadHideAll();
 
-  /* ---- 三个批量操作 ---- */
+  /* ---- 批量操作 ---- */
 
   /* 关闭已统计：已统计过的卡片 → 变回「点击统计项目」（不动未统计的） */
   function closeStatedProjects() {
@@ -103,11 +103,10 @@
     scanCards();
   }
 
-  /* 全部关闭：包括「点击统计项目」那边也一起关掉，所有卡片彻底不显示 */
+  /* 全部关闭：所有卡片（含待点击态）都隐藏。保留统计记忆，方便"全部打开"时恢复 */
   function hideAllCards() {
     allHidden = true;
     saveHideAll(true);
-    saveStatsProjects({});
     document.querySelectorAll(CONFIG.cardSelector).forEach(function (c) {
       delete c.dataset.ovwMounted;
       var s = c.querySelector('.ovw-summary');
@@ -117,9 +116,23 @@
       }
     });
     scanCards();
+    updateHideAllBtn();
   }
 
-  /* 恢复默认：清空所有隐藏/统计记忆，恢复字段默认显示 */
+  /* 全部打开：只取消隐藏，恢复各卡片原有的统计/待点击状态 */
+  function showAllCards() {
+    allHidden = false;
+    saveHideAll(false);
+    document.querySelectorAll(CONFIG.cardSelector).forEach(function (c) {
+      delete c.dataset.ovwMounted;
+      var s = c.querySelector('.ovw-summary');
+      if (s) s.classList.remove('ovw-summary--off');
+    });
+    scanCards();
+    updateHideAllBtn();
+  }
+
+  /* 恢复默认：清空所有隐藏/统计记忆，字段回默认 */
   function restoreAll() {
     allHidden = false;
     saveHideAll(false);
@@ -135,6 +148,22 @@
       }
     });
     scanCards();
+    updateHideAllBtn();
+  }
+
+  /* ★ 双控按钮状态同步 */
+  var hideAllBtnEl = null;
+  function updateHideAllBtn() {
+    if (!hideAllBtnEl) return;
+    if (allHidden) {
+      hideAllBtnEl.textContent = '全部打开';
+      hideAllBtnEl.classList.add('is-on');
+      hideAllBtnEl.title = '当前全部隐藏，点此全部打开';
+    } else {
+      hideAllBtnEl.textContent = '全部关闭';
+      hideAllBtnEl.classList.remove('is-on');
+      hideAllBtnEl.title = '所有卡片彻底不显示（含待点击态）';
+    }
   }
 
   function isAllWorkspace() {
@@ -884,6 +913,9 @@
     var hideAllBtn = toolbar.querySelector('.ovw-toolbar__hideall');
     var closeStatBtn = toolbar.querySelector('.ovw-toolbar__closestat');
 
+    hideAllBtnEl = hideAllBtn;
+    updateHideAllBtn();
+
     function renderList() {
       listEl.innerHTML = '';
       for (var i = 0; i < FIELD_DEFS.length; i++) {
@@ -914,7 +946,12 @@
         listEl.appendChild(row);
       }
     }
-    function openPanel() { renderList(); panel.hidden = false; btn.classList.add('is-open'); }
+    function openPanel() {
+      renderList();
+      updateHideAllBtn();
+      panel.hidden = false;
+      btn.classList.add('is-open');
+    }
     function closePanel() { panel.hidden = true; btn.classList.remove('is-open'); }
 
     btn.addEventListener('click', function (e) { e.stopPropagation(); if (panel.hidden) openPanel(); else closePanel(); });
@@ -925,9 +962,10 @@
       renderList();
     });
 
+    /* ★ 一键双控：隐藏/显示切换 */
     hideAllBtn.addEventListener('click', function (e) {
       e.stopPropagation();
-      hideAllCards();
+      if (allHidden) showAllCards(); else hideAllCards();
     });
 
     closeStatBtn.addEventListener('click', function (e) {
@@ -982,13 +1020,14 @@
       saveStatsFlag(true);
       btn.textContent = '统计已开启（点此关闭全部）';
       btn.classList.add('is-on');
+      allHidden = false;
+      saveHideAll(false);
+      updateHideAllBtn();
       document.querySelectorAll(CONFIG.cardSelector).forEach(function (c) {
         delete c.dataset.ovwMounted;
         var s = c.querySelector('.ovw-summary');
         if (s) s.classList.remove('ovw-summary--off');
       });
-      allHidden = false;
-      saveHideAll(false);
       scanCards();
     });
 
@@ -1011,7 +1050,6 @@
     card.dataset.ovwMounted = '1';
     var summaryEl = createSummary(card, context);
 
-    /* ★ 全部关闭：连「点击统计项目」也不显示 */
     if (allHidden) {
       summaryEl.dataset.ovwManual = '';
       summaryEl.classList.add('ovw-summary--off');
@@ -1127,10 +1165,15 @@
     '.ovw-toolbar__panel-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 14px 8px;font-size:12px;color:#8c8c8c;border-bottom:1px solid rgba(0,0,0,.04);}',
     '.ovw-toolbar__acts{display:inline-flex;align-items:center;gap:10px;flex:0 0 auto;}',
     '.ovw-toolbar__reset{border:0;background:transparent;color:#1677ff;cursor:pointer;font-size:12px;padding:0;font-family:inherit;}',
-    '.ovw-toolbar__hideall{border:0;background:transparent;color:#8c8c8c;cursor:pointer;font-size:12px;padding:0;font-family:inherit;}',
-    '.ovw-toolbar__hideall:hover{color:#ff4d4f;}',
     '.ovw-toolbar__closestat{border:0;background:transparent;color:#fa8c16;cursor:pointer;font-size:12px;padding:0;font-family:inherit;}',
     '.ovw-toolbar__closestat:hover{color:#d46b08;}',
+
+    /* ★ 全部关闭/全部打开 双控按钮 */
+    '.ovw-toolbar__hideall{border:0;background:transparent;color:#8c8c8c;cursor:pointer;font-size:12px;padding:0;font-family:inherit;transition:all .15s ease;border-radius:4px;}',
+    '.ovw-toolbar__hideall:hover{color:#ff4d4f;}',
+    '.ovw-toolbar__hideall.is-on{background:#fa8c16;color:#fff;padding:1px 8px;border-radius:4px;font-weight:600;box-shadow:0 1px 4px rgba(250,140,22,.35);}',
+    '.ovw-toolbar__hideall.is-on:hover{background:#d46b08;color:#fff;}',
+
     '.ovw-toolbar__panel-list{max-height:340px;overflow-y:auto;padding:4px 0;}',
     '.ovw-toolbar__item{display:flex;align-items:center;gap:9px;padding:7px 14px;cursor:pointer;font-size:13px;color:rgba(0,0,0,.88);}',
     '.ovw-toolbar__item:hover{background:rgba(22,119,255,.05);}',
@@ -1449,6 +1492,7 @@
     });
     document.querySelectorAll('[data-ovw-mounted]').forEach(function (el) { delete el.dataset.ovwMounted; });
     cache = {};
+    hideAllBtnEl = null;
     var style = document.getElementById('ovw-style');
     if (style && style.parentNode) style.parentNode.removeChild(style);
   }
@@ -1473,6 +1517,7 @@
       statsProjects: function () { return loadStatsProjects(); },
       closeStated: function () { closeStatedProjects(); return '已把已统计卡片收回'; },
       hideAll: function () { hideAllCards(); return '已全部关闭'; },
+      showAll: function () { showAllCards(); return '已全部打开'; },
       restore: function () { restoreAll(); return '已恢复默认'; },
       theme: function () {
         var el = document.querySelector('.ovw-summary');
@@ -1488,6 +1533,7 @@
         saveHideAll(false);
         allHidden = false;
         statsEnabled = false;
+        updateHideAllBtn();
         return '已清空所有记忆（刷新后生效）';
       },
       setFilter: function (code, label) {
