@@ -7,6 +7,8 @@
 // @run-at       document-idle
 // @grant        none
 // @noframes
+// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360项目卡片隐藏.user.js
+// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360项目卡片隐藏.user.js
 // ==/UserScript==
 
 (function () {
