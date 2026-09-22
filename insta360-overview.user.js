@@ -8,8 +8,8 @@
 // @run-at       document-idle
 // @grant        none
 // @noframes
-// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/Insta%20Project%20Overview.user.js
-// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/Insta%20Project%20Overview.user.js
+// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/insta360-overview.user.js
+// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/insta360-overview.user.js
 // ==/UserScript==
 
 (function () {
