@@ -2,8 +2,8 @@
 // @name         Insta360 项目概览
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      3.5.0
-// @description  项目卡片追加状态进度条与统计数字（颜色随底色自适应）+ 统计开关持久化 + 单卡关闭 + 关闭全部已统计 + 状态跳转自动筛选
+// @version      3.6.0
+// @description  项目卡片追加状态进度条与统计数字（颜色随底色自适应）+ 统计开关持久化 + 单卡关闭 + 关闭已统计 + 全部关闭 + 状态跳转自动筛选
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
@@ -54,9 +54,10 @@
     allWorkspaceCardLimit: 50
   };
 
-  /* ---- 统计开关持久化 ---- */
+  /* ---- 持久化 key ---- */
   var STATS_ON_KEY = 'insta360-overview-stats-on-v1';
   var STATS_PROJECTS_KEY = 'insta360-overview-stats-projects-v1';
+  var HIDE_ALL_KEY = 'insta360-overview-hide-all-v1';
 
   function loadStatsFlag() {
     try { return localStorage.getItem(STATS_ON_KEY) === '1'; } catch (e) { return false; }
@@ -77,7 +78,64 @@
   function markProjectOff(id) { var o = loadStatsProjects(); delete o[String(id)]; saveStatsProjects(o); }
   function isProjectOn(id) { return !!loadStatsProjects()[String(id)]; }
 
+  function loadHideAll() {
+    try { return localStorage.getItem(HIDE_ALL_KEY) === '1'; } catch (e) { return false; }
+  }
+  function saveHideAll(v) {
+    try { localStorage.setItem(HIDE_ALL_KEY, v ? '1' : '0'); } catch (e) {}
+  }
+
   var statsEnabled = loadStatsFlag();
+  var allHidden = loadHideAll();
+
+  /* ---- 三个批量操作 ---- */
+
+  /* 关闭已统计：已统计过的卡片 → 变回「点击统计项目」（不动未统计的） */
+  function closeStatedProjects() {
+    saveStatsProjects({});
+    document.querySelectorAll(CONFIG.cardSelector).forEach(function (c) {
+      var s = c.querySelector('.ovw-summary');
+      if (s && s.dataset.ovwManual === '1') {
+        s.dataset.ovwManual = '';
+        delete c.dataset.ovwMounted;
+      }
+    });
+    scanCards();
+  }
+
+  /* 全部关闭：包括「点击统计项目」那边也一起关掉，所有卡片彻底不显示 */
+  function hideAllCards() {
+    allHidden = true;
+    saveHideAll(true);
+    saveStatsProjects({});
+    document.querySelectorAll(CONFIG.cardSelector).forEach(function (c) {
+      delete c.dataset.ovwMounted;
+      var s = c.querySelector('.ovw-summary');
+      if (s) {
+        s.dataset.ovwManual = '';
+        s.classList.add('ovw-summary--off');
+      }
+    });
+    scanCards();
+  }
+
+  /* 恢复默认：清空所有隐藏/统计记忆，恢复字段默认显示 */
+  function restoreAll() {
+    allHidden = false;
+    saveHideAll(false);
+    saveStatsProjects({});
+    visibleFields = DEFAULT_VISIBLE.slice();
+    saveVisibleFields(visibleFields);
+    document.querySelectorAll(CONFIG.cardSelector).forEach(function (c) {
+      delete c.dataset.ovwMounted;
+      var s = c.querySelector('.ovw-summary');
+      if (s) {
+        s.dataset.ovwManual = '';
+        s.classList.remove('ovw-summary--off');
+      }
+    });
+    scanCards();
+  }
 
   function isAllWorkspace() {
     return /^\/workspaces\/all(\/|$)/.test(location.pathname) || /\/workspaces\/all\//.test(location.pathname);
@@ -147,7 +205,7 @@
   }
 
   /* ============================================================
-   * 字段定义（percent → 进度条；其余 → 数字格）
+   * 字段定义
    * ============================================================ */
 
   var FIELD_DEFS = [
@@ -473,6 +531,7 @@
     var context = card && projectContext(card);
     if (!context) return null;
     var summaryEl = createSummary(card, context);
+    if (summaryEl.classList.contains('ovw-summary--off')) return null;
     var existing = cache[context.projectId];
     if (!options.force && existing && existing.aggregate && Date.now() - existing.loadedAt < CONFIG.cacheTtlMs) {
       renderSummary(summaryEl, existing.aggregate);
@@ -503,7 +562,7 @@
   }
 
   /* ============================================================
-   * 主题探测：读宿主真实底色决定文字明暗
+   * 主题探测
    * ============================================================ */
 
   function parseColor(str) {
@@ -607,7 +666,7 @@
   var ICON_CLOSE = '<svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" d="M4 4l8 8M12 4l-8 8"/></svg>';
 
   /* ============================================================
-   * 卡片追加：创建 / 渲染
+   * 卡片追加
    * ============================================================ */
 
   function findDetailHost(card) {
@@ -808,10 +867,11 @@
       '</button>' +
       '<div class="ovw-toolbar__panel" hidden>' +
         '<div class="ovw-toolbar__panel-head">' +
-          '<span>卡片显示字段</span>' +
+          '<span>卡片显示</span>' +
           '<span class="ovw-toolbar__acts">' +
-            '<button type="button" class="ovw-toolbar__none">全部关闭</button>' +
-            '<button type="button" class="ovw-toolbar__reset">恢复默认</button>' +
+            '<button type="button" class="ovw-toolbar__closestat" title="已统计的卡片回到「点击统计本项目」">关闭已统计</button>' +
+            '<button type="button" class="ovw-toolbar__hideall" title="所有卡片彻底不显示（含待点击态）">全部关闭</button>' +
+            '<button type="button" class="ovw-toolbar__reset" title="恢复字段默认并重新显示所有卡片">恢复默认</button>' +
           '</span>' +
         '</div>' +
         '<div class="ovw-toolbar__panel-list"></div>' +
@@ -821,7 +881,8 @@
     var panel = toolbar.querySelector('.ovw-toolbar__panel');
     var listEl = toolbar.querySelector('.ovw-toolbar__panel-list');
     var resetBtn = toolbar.querySelector('.ovw-toolbar__reset');
-    var noneBtn = toolbar.querySelector('.ovw-toolbar__none');
+    var hideAllBtn = toolbar.querySelector('.ovw-toolbar__hideall');
+    var closeStatBtn = toolbar.querySelector('.ovw-toolbar__closestat');
 
     function renderList() {
       listEl.innerHTML = '';
@@ -860,16 +921,18 @@
 
     resetBtn.addEventListener('click', function (e) {
       e.stopPropagation();
-      visibleFields = DEFAULT_VISIBLE.slice();
-      saveVisibleFields(visibleFields);
-      renderList(); rerenderAllCards();
+      restoreAll();
+      renderList();
     });
 
-    noneBtn.addEventListener('click', function (e) {
+    hideAllBtn.addEventListener('click', function (e) {
       e.stopPropagation();
-      visibleFields = [];
-      saveVisibleFields(visibleFields);
-      renderList(); rerenderAllCards();
+      hideAllCards();
+    });
+
+    closeStatBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      closeStatedProjects();
     });
 
     panel.addEventListener('click', function (e) { e.stopPropagation(); });
@@ -921,7 +984,11 @@
       btn.classList.add('is-on');
       document.querySelectorAll(CONFIG.cardSelector).forEach(function (c) {
         delete c.dataset.ovwMounted;
+        var s = c.querySelector('.ovw-summary');
+        if (s) s.classList.remove('ovw-summary--off');
       });
+      allHidden = false;
+      saveHideAll(false);
       scanCards();
     });
 
@@ -943,6 +1010,14 @@
     }
     card.dataset.ovwMounted = '1';
     var summaryEl = createSummary(card, context);
+
+    /* ★ 全部关闭：连「点击统计项目」也不显示 */
+    if (allHidden) {
+      summaryEl.dataset.ovwManual = '';
+      summaryEl.classList.add('ovw-summary--off');
+      return;
+    }
+    summaryEl.classList.remove('ovw-summary--off');
 
     var totalCards = document.querySelectorAll(CONFIG.cardSelector).length;
     var manual = shouldManualMode(totalCards) && !statsEnabled;
@@ -968,6 +1043,7 @@
       var card = cards[i];
       var summary = card.querySelector('.ovw-summary');
       if (!summary) continue;
+      if (summary.classList.contains('ovw-summary--off')) continue;
       var ctx = projectContext(card);
       if (!ctx) continue;
       var entry = cache[ctx.projectId];
@@ -976,7 +1052,7 @@
   }
 
   /* ============================================================
-   * 样式：颜色全部走 CSS 变量，随 data-ovw-theme 切换
+   * 样式
    * ============================================================ */
 
   var CSS_TEXT = [
@@ -991,6 +1067,7 @@
       'font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif;',
       'box-sizing:border-box;',
     '}',
+    '.ovw-summary--off{display:none !important;}',
 
     '.ovw-summary[data-ovw-theme="dark"]{',
       '--ovw-label:rgba(255,255,255,.80);',
@@ -1046,11 +1123,14 @@
     '.ovw-toolbar{position:relative;display:inline-block;vertical-align:middle;margin-left:8px;font:14px/1.5 Roboto,Arial,sans-serif;white-space:nowrap;flex:0 0 auto;}',
     '.ovw-toolbar__btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:rgba(0,0,0,.88);cursor:pointer;font-size:13px;line-height:1;white-space:nowrap;transition:all .15s ease;font-family:inherit;}',
     '.ovw-toolbar__btn:hover,.ovw-toolbar__btn.is-open{color:#1677ff;border-color:#1677ff;background:rgba(22,119,255,.03);}',
-    '.ovw-toolbar__panel{position:absolute;top:calc(100% + 6px);right:0;z-index:1000000;min-width:240px;padding:0;border:1px solid rgba(0,0,0,.06);border-radius:10px;background:#fff;box-shadow:0 8px 28px rgba(0,0,0,.13);overflow:hidden;}',
-    '.ovw-toolbar__panel-head{display:flex;justify-content:space-between;align-items:center;padding:10px 14px 8px;font-size:12px;color:#8c8c8c;border-bottom:1px solid rgba(0,0,0,.04);}',
-    '.ovw-toolbar__reset{border:0;background:transparent;color:#1677ff;cursor:pointer;font-size:12px;padding:0;}',
-    '.ovw-toolbar__none{border:0;background:transparent;color:#8c8c8c;cursor:pointer;font-size:12px;padding:0;}',
-    '.ovw-toolbar__none:hover{color:#ff4d4f;}',
+    '.ovw-toolbar__panel{position:absolute;top:calc(100% + 6px);right:0;z-index:1000000;min-width:320px;padding:0;border:1px solid rgba(0,0,0,.06);border-radius:10px;background:#fff;box-shadow:0 8px 28px rgba(0,0,0,.13);overflow:hidden;}',
+    '.ovw-toolbar__panel-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 14px 8px;font-size:12px;color:#8c8c8c;border-bottom:1px solid rgba(0,0,0,.04);}',
+    '.ovw-toolbar__acts{display:inline-flex;align-items:center;gap:10px;flex:0 0 auto;}',
+    '.ovw-toolbar__reset{border:0;background:transparent;color:#1677ff;cursor:pointer;font-size:12px;padding:0;font-family:inherit;}',
+    '.ovw-toolbar__hideall{border:0;background:transparent;color:#8c8c8c;cursor:pointer;font-size:12px;padding:0;font-family:inherit;}',
+    '.ovw-toolbar__hideall:hover{color:#ff4d4f;}',
+    '.ovw-toolbar__closestat{border:0;background:transparent;color:#fa8c16;cursor:pointer;font-size:12px;padding:0;font-family:inherit;}',
+    '.ovw-toolbar__closestat:hover{color:#d46b08;}',
     '.ovw-toolbar__panel-list{max-height:340px;overflow-y:auto;padding:4px 0;}',
     '.ovw-toolbar__item{display:flex;align-items:center;gap:9px;padding:7px 14px;cursor:pointer;font-size:13px;color:rgba(0,0,0,.88);}',
     '.ovw-toolbar__item:hover{background:rgba(22,119,255,.05);}',
@@ -1389,7 +1469,11 @@
       active: function () { return active; },
       page: function () { return isListPage() ? 'list' : (isDataPage() ? 'data' : 'other'); },
       statsEnabled: function () { return statsEnabled; },
+      allHidden: function () { return allHidden; },
       statsProjects: function () { return loadStatsProjects(); },
+      closeStated: function () { closeStatedProjects(); return '已把已统计卡片收回'; },
+      hideAll: function () { hideAllCards(); return '已全部关闭'; },
+      restore: function () { restoreAll(); return '已恢复默认'; },
       theme: function () {
         var el = document.querySelector('.ovw-summary');
         return el ? { theme: el.dataset.ovwTheme, bg: window.getComputedStyle(el.parentElement || el).backgroundColor } : '未挂载';
@@ -1401,7 +1485,10 @@
       resetStats: function () {
         saveStatsFlag(false);
         saveStatsProjects({});
-        return '已清空统计开关记忆（刷新后生效）';
+        saveHideAll(false);
+        allHidden = false;
+        statsEnabled = false;
+        return '已清空所有记忆（刷新后生效）';
       },
       setFilter: function (code, label) {
         var cands = FILTER_VALUE_CANDIDATES[code] || [code];
