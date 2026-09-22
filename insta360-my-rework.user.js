@@ -2,8 +2,8 @@
 // @name         Insta360 我的返修面板
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      1.3.1
-// @description  侧边栏「我的返修」按钮，只显示属于本人的审核驳回任务
+// @version      1.5.0
+// @description  侧边栏「我的返修」按钮，只显示属于本人的审核驳回任务（含进度条）
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
@@ -20,10 +20,19 @@
 
   var CONFIG = {
     projectPath: '/api/projects',
-    taskPath: '/api/tasks',        // ★ v1.3.1：新接口路径（旧 /api/dm/tasks 已废弃）
+    taskPath: '/api/tasks',        // ★ v1.3.1：新接口路径
     whoamiPath: '/api/current-user/whoami',
     pageSize: 500,
-    concurrency: 8,
+    projectIdPageSize: 2000,
+    projectBatchSize: 800,
+    projectBatchConcurrency: 6,
+    userCountFields: 'id,user_rework_count,user_repair_count',
+    maxTaskPages: 50,
+    concurrency: 4,
+    pageConcurrency: 3,
+    useRejectedFilter: true,
+    rejectedQueryKey: 'status',
+    rejectedQueryValue: 'REVIEWED_REJECTED',
     cacheTtlMs: 60 * 1000,
     rejectedStatuses: ['REVIEWED_REJECTED', 'REVIEW_REJECTED', 'REJECTED'],
   };
@@ -79,31 +88,175 @@
     return [];
   }
 
-  /* ============================================================
-   * ★ v1.3.1：/api/tasks 只传 project 参数
-   * ============================================================ */
-
-  async function fetchProjectTasks(pid, ws) {
-    // /api/tasks 用 project 参数即可，不需要 workspace
-    var params = { project: pid, page_size: CONFIG.pageSize };
-    var body = await getJson(apiUrl(CONFIG.taskPath, params));
-    return rowsFromResponse(body);
+  function totalFromResponse(body) {
+    if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+    var keys = ['count', 'total', 'total_count', 'totalCount'];
+    for (var i = 0; i < keys.length; i++) {
+      var v = Number(body[keys[i]]);
+      if (Number.isFinite(v)) return v;
+    }
+    return null;
   }
 
-  async function fetchAllProjects() {
+  function responseNext(body) {
+    return body && typeof body.next === 'string' && body.next ? body.next : '';
+  }
+
+  /* ============================================================
+   * 任务分页拉取：优先按驳回状态筛选，首屏拿到 total 后并行拉后续页
+   * ============================================================ */
+
+  function taskKey(task, fallback) {
+    if (!task || typeof task !== 'object') return '__row_' + fallback;
+    var id = task.id != null ? task.id : task.task_id != null ? task.task_id : task.taskId;
+    return id == null ? '__row_' + fallback : String(id);
+  }
+
+  function mergeTaskRows(groups) {
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < groups.length; i++) {
+      var rows = groups[i] || [];
+      for (var j = 0; j < rows.length; j++) {
+        var key = taskKey(rows[j], out.length);
+        if (seen[key]) continue;
+        seen[key] = 1;
+        out.push(rows[j]);
+      }
+    }
+    return out;
+  }
+
+  function rejectedQueryParams() {
+    var params = {};
+    if (CONFIG.useRejectedFilter && CONFIG.rejectedQueryKey && CONFIG.rejectedQueryValue) {
+      params[CONFIG.rejectedQueryKey] = CONFIG.rejectedQueryValue;
+    }
+    return params;
+  }
+
+  async function fetchTaskPage(pid, page, extraParams) {
+    var params = Object.assign({ project: pid, page: page, page_size: CONFIG.pageSize }, extraParams || {});
+    var body = await getJson(apiUrl(CONFIG.taskPath, params));
+    return { body: body, rows: rowsFromResponse(body) };
+  }
+
+  async function fetchProjectTasks(pid) {
+    var useFilterForPages = CONFIG.useRejectedFilter;
+    var first = await fetchTaskPage(pid, 1, rejectedQueryParams());
+    var firstRows = first.rows;
+
+    // 有些部署会忽略 status 参数；发现返回了其它状态时自动回退，确保统计不漏。
+    if (CONFIG.useRejectedFilter && firstRows.some(function (task) { return !isRejected(task); })) {
+      first = await fetchTaskPage(pid, 1, {});
+      firstRows = first.rows;
+      useFilterForPages = false;
+    }
+
+    var total = totalFromResponse(first.body);
+    var groups = [firstRows];
+    var next = first.body && typeof first.body.next === 'string' ? first.body.next : '';
+    var totalPages = total != null ? Math.min(CONFIG.maxTaskPages, Math.ceil(total / CONFIG.pageSize)) : 0;
+
+    if (totalPages > 1) {
+      var pagePool = new Pool(CONFIG.pageConcurrency);
+      var pages = [];
+      for (var page = 2; page <= totalPages; page++) pages.push(page);
+      var pageResults = await Promise.all(pages.map(function (pageNo) {
+        return pagePool.run(function () {
+          return fetchTaskPage(pid, pageNo, useFilterForPages ? rejectedQueryParams() : {});
+        });
+      }));
+      for (var i = 0; i < pageResults.length; i++) groups.push(pageResults[i].rows);
+    } else if (next) {
+      // 没有 total 时保留 next 链路兼容性；这类接口只能串行跟随链接。
+      var url = next;
+      for (var guard = 1; url && guard < CONFIG.maxTaskPages; guard++) {
+        var body = await getJson(new URL(url, location.origin).toString());
+        var rows = rowsFromResponse(body);
+        if (!rows.length) break;
+        groups.push(rows);
+        url = body && typeof body.next === 'string' ? body.next : '';
+      }
+    } else if (firstRows.length >= CONFIG.pageSize) {
+      // 接口没有 total/next 时按旧逻辑补页，避免截断数据。
+      for (var fallbackPage = 2; fallbackPage <= CONFIG.maxTaskPages; fallbackPage++) {
+        var fallback = await fetchTaskPage(pid, fallbackPage, useFilterForPages ? rejectedQueryParams() : {});
+        if (!fallback.rows.length) break;
+        groups.push(fallback.rows);
+        if (fallback.rows.length < CONFIG.pageSize) break;
+      }
+    }
+    return mergeTaskRows(groups);
+  }
+
+  async function fetchAllProjects(onProgress) {
     var curWs = (location.pathname.match(/\/workspaces\/([^/]+)/) || [])[1] || '';
-    var params = { page_size: 500 };
-    if (curWs && curWs !== 'all') params.workspace = curWs;
-    var body = await getJson(apiUrl(CONFIG.projectPath, params));
-    var list = rowsFromResponse(body);
+    var list = [];
+    var page = 1;
+    var url = apiUrl(CONFIG.projectPath, Object.assign({ page: page, page_size: CONFIG.projectIdPageSize },
+      curWs && curWs !== 'all' ? { workspace: curWs } : {}));
+
+    for (var guard = 0; url && guard < 100; guard++) {
+      var body = await getJson(url);
+      var rows = rowsFromResponse(body);
+      if (!rows.length) break;
+      list = list.concat(rows);
+      if (onProgress) onProgress('读取项目列表 ' + list.length + (totalFromResponse(body) != null ? ' / ' + totalFromResponse(body) : '') + '…');
+      var next = responseNext(body);
+      if (next) url = new URL(next, location.origin).toString();
+      else if (rows.length >= CONFIG.projectIdPageSize) {
+        page += 1;
+        url = apiUrl(CONFIG.projectPath, Object.assign({ page: page, page_size: CONFIG.projectIdPageSize },
+          curWs && curWs !== 'all' ? { workspace: curWs } : {}));
+      } else url = '';
+    }
+
+    // 当前工作区接口偶尔只返回局部项目，保留原有 all 工作区兜底。
     if (curWs && curWs !== 'all' && list.length < 100) {
       try {
-        var body2 = await getJson(apiUrl(CONFIG.projectPath, { page_size: 500, workspace: 'all' }));
-        var list2 = rowsFromResponse(body2);
-        if (list2.length > list.length) list = list2;
+        var allBody = await getJson(apiUrl(CONFIG.projectPath, { page: 1, page_size: CONFIG.projectIdPageSize, workspace: 'all' }));
+        var allRows = rowsFromResponse(allBody);
+        if (allRows.length > list.length) list = allRows;
       } catch (e) {}
     }
     return list;
+  }
+
+  function projectIdChunks(projects) {
+    var ids = projects.map(function (p) { return p.projectId != null ? p.projectId : p.id; }).filter(function (id) { return id != null; });
+    var chunks = [];
+    for (var i = 0; i < ids.length; i += CONFIG.projectBatchSize) {
+      chunks.push(ids.slice(i, i + CONFIG.projectBatchSize));
+    }
+    return chunks;
+  }
+
+  async function fetchProjectUserCounts(projects, onProgress) {
+    var chunks = projectIdChunks(projects);
+    var rows = [];
+    var done = 0;
+    var failed = 0;
+    var pool = new Pool(CONFIG.projectBatchConcurrency);
+    await Promise.all(chunks.map(function (ids) {
+      return pool.run(async function () {
+        try {
+          var body = await getJson(apiUrl(CONFIG.projectPath, {
+            ids: ids.join(','),
+            include: CONFIG.userCountFields,
+            page_size: ids.length,
+          }));
+          rows = rows.concat(rowsFromResponse(body));
+        } catch (e) {
+          failed += 1;
+          log('项目返修计数批次失败：', e.message);
+        } finally {
+          done += ids.length;
+          if (onProgress) onProgress('统计我的返修 ' + Math.min(done, projects.length) + ' / ' + projects.length + '…' + (failed ? '（' + failed + ' 批失败）' : ''));
+        }
+      });
+    }));
+    return { rows: rows, failed: failed };
   }
 
   /* ============================================================
@@ -171,7 +324,7 @@
   }
 
   /* ============================================================
-   * 归属识别（数组字段 + 单数字段 + events）
+   * 归属识别
    * ============================================================ */
 
   function collectTaskOwners(task) {
@@ -354,20 +507,53 @@
    * ============================================================ */
 
   var cache = { loadedAt: 0, rows: null, promise: null, scanInfo: '', me: null };
+  var projectCache = new Map();
+
+  function getCachedProjectRow(project, me, force) {
+    var key = String(project.projectId);
+    var hit = projectCache.get(key);
+    if (!force && hit && hit.row && Date.now() - hit.loadedAt < CONFIG.cacheTtlMs) {
+      return Promise.resolve(hit.row);
+    }
+    if (!force && hit && hit.promise) return hit.promise;
+
+    var promise = (async function () {
+      try {
+        var tasks = await fetchProjectTasks(project.projectId);
+        var rejected = tasks.filter(function (t) { return isRejected(t) && isMine(t, me); });
+        return { project: project, tasks: rejected, total: tasks.length };
+      } catch (e) {
+        log('项目 ' + project.projectId + ' 失败：', e.message);
+        return { project: project, tasks: [], error: e.message };
+      }
+    })();
+    projectCache.set(key, { loadedAt: 0, promise: promise, row: null });
+    return promise.then(function (row) {
+      projectCache.set(key, { loadedAt: Date.now(), promise: null, row: row });
+      return row;
+    }, function (err) {
+      projectCache.delete(key);
+      throw err;
+    });
+  }
 
   async function loadReworkRows(force, onUpdate) {
     if (!force && cache.rows && (Date.now() - cache.loadedAt < CONFIG.cacheTtlMs)) {
-      if (onUpdate) onUpdate(cache.rows, cache.scanInfo);
+      if (onUpdate) onUpdate(cache.rows, cache.scanInfo, 0, 0);
       return cache.rows;
     }
     if (cache.promise && !force) return cache.promise;
+
+    if (force) projectCache.clear();
 
     cache.promise = (async function () {
       var t0 = Date.now();
       var mePromise = fetchMe();
       var projects, scanInfo;
       try {
-        var list = await fetchAllProjects();
+        var list = await fetchAllProjects(function (msg) {
+          if (onUpdate) onUpdate([], '', 0, null, msg);
+        });
         projects = projectsFromApi(list);
         scanInfo = 'API ' + projects.length + ' 个项目';
       } catch (e) {
@@ -388,42 +574,60 @@
         scanInfo += '，当前用户 ' + (me.id ? '#' + me.id : '') + (displayName ? '「' + displayName + '」' : '');
       }
 
+      // 先按项目批量查询当前用户的返修计数，只有命中的项目才补查任务明细。
+      var countResult = await fetchProjectUserCounts(projects, function (msg) {
+        if (onUpdate) onUpdate([], scanInfo, 0, null, msg);
+      });
+      var countById = {};
+      countResult.rows.forEach(function (row) {
+        if (row && row.id != null) countById[String(row.id)] = row;
+      });
+      projects.forEach(function (project) {
+        var count = countById[String(project.projectId)];
+        if (!count) return;
+        project.userRepairCount = num(count.user_repair_count);
+        project.userReworkCount = num(count.user_rework_count);
+        project.hasUserCount = true;
+      });
+
       var candidates = projects.filter(function (p) {
+        if (p.hasUserCount) return p.userRepairCount > 0 || p.userReworkCount > 0;
         if (p.rejectedCount == null) return true;
         return p.rejectedCount > 0;
       });
+
+      // 项目列表和当前用户加载完成后，立即把真实扫描总数交给界面。
+      if (onUpdate) onUpdate([], scanInfo, 0, candidates.length, candidates.length ? '准备扫描 ' + candidates.length + ' 个项目…' : '没有需要扫描的驳回项目');
 
       if (!candidates.length) {
         var empty = [];
         cache.rows = empty;
         cache.loadedAt = Date.now();
         cache.scanInfo = scanInfo + '，无驳回项目';
-        if (onUpdate) onUpdate(empty, cache.scanInfo);
+        if (onUpdate) onUpdate(empty, cache.scanInfo, 0, 0);
         return empty;
       }
 
       var pool = new Pool(CONFIG.concurrency);
       var results = [];
       var completed = 0;
+      var started = 0;
       var failCount = 0;
+      var total = candidates.length;
 
       await Promise.all(candidates.map(function (p) {
         return pool.run(async function () {
-          var row;
-          try {
-            var tasks = await fetchProjectTasks(p.projectId, p.workspaceId);
-            var rejected = tasks.filter(function (t) { return isRejected(t) && isMine(t, me); });
-            row = { project: p, tasks: rejected, total: tasks.length };
-          } catch (e) {
-            failCount += 1;
-            log('项目 ' + p.projectId + ' 失败：', e.message);
-            row = { project: p, tasks: [], error: e.message };
+          started += 1;
+          if (onUpdate) {
+            onUpdate(results.slice(), scanInfo, completed, total, '正在扫描项目 ' + started + ' / ' + total + '…');
           }
+          var row = await getCachedProjectRow(p, me, force);
+          if (row.error) failCount += 1;
           results.push(row);
           completed += 1;
           if (onUpdate) {
             var partial = results.slice().sort(function (a, b) { return b.tasks.length - a.tasks.length; });
-            onUpdate(partial, scanInfo + '，已扫描 ' + completed + '/' + candidates.length + (failCount ? '（' + failCount + ' 个失败）' : ''));
+            onUpdate(partial, scanInfo, completed, total);
           }
           return row;
         });
@@ -485,6 +689,10 @@
       '    <button type="button" class="ovw-rwk-refresh" title="刷新">⟳</button>' +
       '    <button type="button" class="ovw-rwk-close" aria-label="关闭">×</button>' +
       '  </div>' +
+      '  <div class="ovw-rwk-progress" style="display:none">' +
+      '    <div class="ovw-rwk-progress-bar"></div>' +
+      '    <div class="ovw-rwk-progress-text"></div>' +
+      '  </div>' +
       '  <div class="ovw-rwk-body"><div class="ovw-rwk-loading">加载中…</div></div>' +
       '</div>';
     document.body.appendChild(openEl);
@@ -510,15 +718,45 @@
     if (el) el.textContent = text ? '· ' + text : '';
   }
 
+  function updateProgress(completed, total) {
+    if (!openEl) return;
+    var wrap = openEl.querySelector('.ovw-rwk-progress');
+    var bar = openEl.querySelector('.ovw-rwk-progress-bar');
+    var text = openEl.querySelector('.ovw-rwk-progress-text');
+    if (!wrap || !bar || !text) return;
+    var phase = arguments.length > 2 ? arguments[2] : '';
+    if (phase) {
+      wrap.style.display = 'block';
+      wrap.classList.add('ovw-rwk-progress-indeterminate');
+      bar.style.width = '35%';
+      text.textContent = phase;
+      return;
+    }
+    wrap.classList.remove('ovw-rwk-progress-indeterminate');
+    if (!total || completed >= total) {
+      wrap.style.display = 'none';
+      return;
+    }
+    wrap.style.display = 'block';
+    var pct = Math.round((completed / total) * 100);
+    bar.style.width = pct + '%';
+    text.textContent = '扫描项目 ' + completed + ' / ' + total + '（' + pct + '%）';
+  }
+
   async function render(force) {
     if (!openEl) return;
     var body = openEl.querySelector('.ovw-rwk-body');
     if (!body) return;
     body.innerHTML = '<div class="ovw-rwk-loading">加载中…</div>';
+    // 项目接口响应前显示明确的加载状态，不伪装成 0 / 1。
+    updateProgress(0, null, '正在获取项目列表…');
+
     try {
-      await loadReworkRows(force, function (partial, info) {
+      await loadReworkRows(force, function (partial, info, completed, total, phase) {
         if (!openEl) return;
         updateInfo(info);
+        if (phase) updateProgress(0, null, phase);
+        else if (typeof completed === 'number') updateProgress(completed, total);
         renderRows(body, partial);
       });
     } catch (e) {
@@ -615,6 +853,11 @@
       '.ovw-rwk-refresh,.ovw-rwk-close{border:0;background:transparent;color:#8c8c8c;cursor:pointer;padding:2px 6px;border-radius:4px;font-size:16px;line-height:1;}',
       '.ovw-rwk-close{font-size:22px;}',
       '.ovw-rwk-refresh:hover,.ovw-rwk-close:hover{background:rgba(0,0,0,.05);color:#262626;}',
+      '.ovw-rwk-progress{position:relative;height:22px;background:rgba(0,0,0,.04);overflow:hidden;flex:0 0 auto;}',
+      '.ovw-rwk-progress-bar{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,#1677ff,#4096ff);transition:width .25s ease;width:0;}',
+      '.ovw-rwk-progress-indeterminate .ovw-rwk-progress-bar{animation:ovw-rwk-progress-slide 1.15s ease-in-out infinite;}',
+      '@keyframes ovw-rwk-progress-slide{0%{transform:translateX(-100%);}100%{transform:translateX(300%);}}',
+      '.ovw-rwk-progress-text{position:absolute;left:0;right:0;top:0;bottom:0;display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:600;text-shadow:0 1px 2px rgba(0,0,0,.35);pointer-events:none;}',
       '.ovw-rwk-body{flex:1;overflow-y:auto;padding:10px 12px;}',
       '.ovw-rwk-body::-webkit-scrollbar{width:6px;}',
       '.ovw-rwk-body::-webkit-scrollbar-thumb{background:rgba(0,0,0,.12);border-radius:3px;}',
@@ -657,7 +900,7 @@
     data: function () { return cache.rows; },
     info: function () { return cache.scanInfo; },
     me: function () { return cache.me; },
-    clearCache: function () { cache.rows = null; cache.loadedAt = 0; return 'cleared'; },
+    clearCache: function () { cache.rows = null; cache.loadedAt = 0; projectCache.clear(); return 'cleared'; },
     test: function (task) { return { isMine: isMine(task, cache.me), owners: collectTaskOwners(task) }; },
   };
 })();
