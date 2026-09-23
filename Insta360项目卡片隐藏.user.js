@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 项目卡片隐藏
 // @namespace    https://label.insta360.com/
-// @version      1.5.2
+// @version      1.5.3
 // @description  隐藏项目卡片并持久保存（隐藏后自动重排，不留空位），入口位于「所有项目」左侧，可查看/恢复
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
