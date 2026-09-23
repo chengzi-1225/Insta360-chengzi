@@ -2,8 +2,8 @@
 // @name         Insta360 我的返修面板
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      1.5.0
-// @description  侧边栏「我的返修」按钮，只显示属于本人的审核驳回任务（含进度条）
+// @version      1.6.0
+// @description  侧边栏「我的返修」按钮，只显示属于本人的审核驳回任务（含进度条）。项目列表页优先从卡片「返修 (N)」按钮直读数字，只深挖返修>0的项目。
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
@@ -20,7 +20,7 @@
 
   var CONFIG = {
     projectPath: '/api/projects',
-    taskPath: '/api/tasks',        // ★ v1.3.1：新接口路径
+    taskPath: '/api/tasks',
     whoamiPath: '/api/current-user/whoami',
     pageSize: 500,
     projectIdPageSize: 2000,
@@ -35,6 +35,9 @@
     rejectedQueryValue: 'REVIEWED_REJECTED',
     cacheTtlMs: 60 * 1000,
     rejectedStatuses: ['REVIEWED_REJECTED', 'REVIEW_REJECTED', 'REJECTED'],
+    // ★ v1.6.0：DOM 直读
+    repairButtonSelector: '.ls-project-card__annotation-button_repair',
+    preferDomScan: true,
   };
 
   /* ============================================================
@@ -103,7 +106,7 @@
   }
 
   /* ============================================================
-   * 任务分页拉取：优先按驳回状态筛选，首屏拿到 total 后并行拉后续页
+   * 任务分页拉取
    * ============================================================ */
 
   function taskKey(task, fallback) {
@@ -146,7 +149,6 @@
     var first = await fetchTaskPage(pid, 1, rejectedQueryParams());
     var firstRows = first.rows;
 
-    // 有些部署会忽略 status 参数；发现返回了其它状态时自动回退，确保统计不漏。
     if (CONFIG.useRejectedFilter && firstRows.some(function (task) { return !isRejected(task); })) {
       first = await fetchTaskPage(pid, 1, {});
       firstRows = first.rows;
@@ -169,7 +171,6 @@
       }));
       for (var i = 0; i < pageResults.length; i++) groups.push(pageResults[i].rows);
     } else if (next) {
-      // 没有 total 时保留 next 链路兼容性；这类接口只能串行跟随链接。
       var url = next;
       for (var guard = 1; url && guard < CONFIG.maxTaskPages; guard++) {
         var body = await getJson(new URL(url, location.origin).toString());
@@ -179,7 +180,6 @@
         url = body && typeof body.next === 'string' ? body.next : '';
       }
     } else if (firstRows.length >= CONFIG.pageSize) {
-      // 接口没有 total/next 时按旧逻辑补页，避免截断数据。
       for (var fallbackPage = 2; fallbackPage <= CONFIG.maxTaskPages; fallbackPage++) {
         var fallback = await fetchTaskPage(pid, fallbackPage, useFilterForPages ? rejectedQueryParams() : {});
         if (!fallback.rows.length) break;
@@ -212,7 +212,6 @@
       } else url = '';
     }
 
-    // 当前工作区接口偶尔只返回局部项目，保留原有 all 工作区兜底。
     if (curWs && curWs !== 'all' && list.length < 100) {
       try {
         var allBody = await getJson(apiUrl(CONFIG.projectPath, { page: 1, page_size: CONFIG.projectIdPageSize, workspace: 'all' }));
@@ -452,32 +451,46 @@
     for (var i = 0; i < sels.length; i++) {
       var el = card.querySelector(sels[i]);
       if (!el) continue;
-      var t = (el.textContent || '').trim();
+      var t = extractCleanText(el);
       if (t && t.length < 100) return t;
     }
     var kids = card.querySelectorAll('*');
     for (var j = 0; j < kids.length; j++) {
-      var t2 = (kids[j].textContent || '').trim();
+      var t2 = extractCleanText(kids[j]);
       if (t2 && t2.length > 1 && t2.length < 40 && kids[j].children.length === 0) return t2;
     }
     return '';
+  }
+
+  // ★ v1.6.0：从卡片「返修 (N)」按钮读数字
+  function repairCountFromCard(card) {
+    var btn = card.querySelector(CONFIG.repairButtonSelector);
+    if (!btn) return null;
+    var text = extractCleanText(btn);
+    var m = text.match(/返修\s*[（(]\s*(\d+)\s*[)）]/);
+    if (m) return Number(m[1]);
+    var nums = text.match(/\d+/g);
+    if (nums && nums.length) return Number(nums[0]);
+    return null;
   }
 
   function projectsFromPage() {
     var cards = document.querySelectorAll('.ls-project-card');
     var out = [], seen = {};
     for (var i = 0; i < cards.length; i++) {
-      var link = cards[i].closest('a[href]');
+      var card = cards[i];
+      var link = card.closest('a[href]');
       var href = link ? link.getAttribute('href') : '';
       if (!href) {
-        var inner = cards[i].querySelector('a[href]');
+        var inner = card.querySelector('a[href]');
         if (inner) href = inner.getAttribute('href') || '';
       }
       var info = projectPathFromHref(href);
       if (!info || seen[info.projectId]) continue;
       seen[info.projectId] = 1;
-      info.title = projectTitleFromCard(cards[i]) || '未命名项目';
+      info.title = projectTitleFromCard(card) || '未命名项目';
       info.rejectedCount = 1;
+      info.repairCount = repairCountFromCard(card);
       out.push(info);
     }
     return out;
@@ -537,7 +550,16 @@
     });
   }
 
-  async function loadReworkRows(force, onUpdate) {
+  function collectCandidatesFromDom() {
+    if (!CONFIG.preferDomScan) return null;
+    var pageProjects = projectsFromPage();
+    if (!pageProjects.length) return null;
+    var readable = pageProjects.filter(function (p) { return p.repairCount != null; });
+    if (!readable.length) return null;
+    return { all: pageProjects, readable: readable };
+  }
+
+  async function loadReworkRows(force, onUpdate, forceFullScan) {
     if (!force && cache.rows && (Date.now() - cache.loadedAt < CONFIG.cacheTtlMs)) {
       if (onUpdate) onUpdate(cache.rows, cache.scanInfo, 0, 0);
       return cache.rows;
@@ -549,61 +571,75 @@
     cache.promise = (async function () {
       var t0 = Date.now();
       var mePromise = fetchMe();
-      var projects, scanInfo;
-      try {
-        var list = await fetchAllProjects(function (msg) {
-          if (onUpdate) onUpdate([], '', 0, null, msg);
-        });
-        projects = projectsFromApi(list);
-        scanInfo = 'API ' + projects.length + ' 个项目';
-      } catch (e) {
-        projects = projectsFromPage();
-        scanInfo = '页面 ' + projects.length + ' 个项目（API 失败）';
-      }
+      var me = null;
+      var scanInfo;
 
-      var me = await mePromise;
-      cache.me = me;
-      if (!me.loaded) {
-        scanInfo += '，⚠ 无法识别当前用户';
+      var domScan = forceFullScan ? null : collectCandidatesFromDom();
+      var candidates;
+
+      if (domScan) {
+        scanInfo = '页面直读 ' + domScan.all.length + ' 个项目';
+        candidates = domScan.all.filter(function (p) { return p.repairCount !== 0; });
+        var hit = candidates.filter(function (p) { return p.repairCount > 0; }).length;
+        scanInfo += '，' + hit + ' 个返修>0' + (candidates.length - hit ? '，' + (candidates.length - hit) + ' 个待 API 核对' : '');
+        if (onUpdate) onUpdate([], scanInfo, 0, candidates.length, candidates.length ? '准备扫描 ' + candidates.length + ' 个项目…' : '当前页没有需要扫描的返修项目');
       } else {
-        var displayName = '';
-        for (var i = 0; i < me.names.length; i++) {
-          if (!/^\d+$/.test(me.names[i])) { displayName = me.names[i]; break; }
+        var projects;
+        try {
+          var list = await fetchAllProjects(function (msg) {
+            if (onUpdate) onUpdate([], '', 0, null, msg);
+          });
+          projects = projectsFromApi(list);
+          scanInfo = 'API ' + projects.length + ' 个项目';
+        } catch (e) {
+          projects = projectsFromPage();
+          scanInfo = '页面 ' + projects.length + ' 个项目（API 失败）';
         }
-        if (!displayName) displayName = me.names[0] || '';
-        scanInfo += '，当前用户 ' + (me.id ? '#' + me.id : '') + (displayName ? '「' + displayName + '」' : '');
+
+        me = await mePromise;
+        cache.me = me;
+        if (!me.loaded) {
+          scanInfo += '，⚠ 无法识别当前用户';
+        } else {
+          var displayName = '';
+          for (var i = 0; i < me.names.length; i++) {
+            if (!/^\d+$/.test(me.names[i])) { displayName = me.names[i]; break; }
+          }
+          if (!displayName) displayName = me.names[0] || '';
+          scanInfo += '，当前用户 ' + (me.id ? '#' + me.id : '') + (displayName ? '「' + displayName + '」' : '');
+        }
+
+        var countResult = await fetchProjectUserCounts(projects, function (msg) {
+          if (onUpdate) onUpdate([], scanInfo, 0, null, msg);
+        });
+        var countById = {};
+        countResult.rows.forEach(function (row) {
+          if (row && row.id != null) countById[String(row.id)] = row;
+        });
+        projects.forEach(function (project) {
+          var count = countById[String(project.projectId)];
+          if (!count) return;
+          project.userRepairCount = num(count.user_repair_count);
+          project.userReworkCount = num(count.user_rework_count);
+          project.hasUserCount = true;
+        });
+
+        candidates = projects.filter(function (p) {
+          if (p.hasUserCount) return p.userRepairCount > 0 || p.userReworkCount > 0;
+          if (p.rejectedCount == null) return true;
+          return p.rejectedCount > 0;
+        });
+
+        if (onUpdate) onUpdate([], scanInfo, 0, candidates.length, candidates.length ? '准备扫描 ' + candidates.length + ' 个项目…' : '没有需要扫描的驳回项目');
       }
 
-      // 先按项目批量查询当前用户的返修计数，只有命中的项目才补查任务明细。
-      var countResult = await fetchProjectUserCounts(projects, function (msg) {
-        if (onUpdate) onUpdate([], scanInfo, 0, null, msg);
-      });
-      var countById = {};
-      countResult.rows.forEach(function (row) {
-        if (row && row.id != null) countById[String(row.id)] = row;
-      });
-      projects.forEach(function (project) {
-        var count = countById[String(project.projectId)];
-        if (!count) return;
-        project.userRepairCount = num(count.user_repair_count);
-        project.userReworkCount = num(count.user_rework_count);
-        project.hasUserCount = true;
-      });
-
-      var candidates = projects.filter(function (p) {
-        if (p.hasUserCount) return p.userRepairCount > 0 || p.userReworkCount > 0;
-        if (p.rejectedCount == null) return true;
-        return p.rejectedCount > 0;
-      });
-
-      // 项目列表和当前用户加载完成后，立即把真实扫描总数交给界面。
-      if (onUpdate) onUpdate([], scanInfo, 0, candidates.length, candidates.length ? '准备扫描 ' + candidates.length + ' 个项目…' : '没有需要扫描的驳回项目');
+      if (!me) { me = await mePromise; cache.me = me; }
 
       if (!candidates.length) {
         var empty = [];
         cache.rows = empty;
         cache.loadedAt = Date.now();
-        cache.scanInfo = scanInfo + '，无驳回项目';
+        cache.scanInfo = scanInfo + '，无返修项目';
         if (onUpdate) onUpdate(empty, cache.scanInfo, 0, 0);
         return empty;
       }
@@ -686,7 +722,8 @@
       '  <div class="ovw-rwk-head">' +
       '    <span>我的返修任务</span>' +
       '    <span class="ovw-rwk-info"></span>' +
-      '    <button type="button" class="ovw-rwk-refresh" title="刷新">⟳</button>' +
+      '    <button type="button" class="ovw-rwk-deep" title="全量深度扫描（走 API，忽略当前页 DOM）">⛏</button>' +
+      '    <button type="button" class="ovw-rwk-refresh" title="刷新（优先页面直读）">⟳</button>' +
       '    <button type="button" class="ovw-rwk-close" aria-label="关闭">×</button>' +
       '  </div>' +
       '  <div class="ovw-rwk-progress" style="display:none">' +
@@ -698,9 +735,10 @@
     document.body.appendChild(openEl);
     openEl.querySelector('.ovw-rwk-mask').addEventListener('click', closePanel);
     openEl.querySelector('.ovw-rwk-close').addEventListener('click', closePanel);
-    openEl.querySelector('.ovw-rwk-refresh').addEventListener('click', function () { render(true); });
+    openEl.querySelector('.ovw-rwk-refresh').addEventListener('click', function () { render(true, false); });
+    openEl.querySelector('.ovw-rwk-deep').addEventListener('click', function () { render(true, true); });
     document.addEventListener('keydown', onEsc);
-    render(false);
+    render(false, false);
   }
 
   function closePanel() {
@@ -743,13 +781,12 @@
     text.textContent = '扫描项目 ' + completed + ' / ' + total + '（' + pct + '%）';
   }
 
-  async function render(force) {
+  async function render(force, forceFullScan) {
     if (!openEl) return;
     var body = openEl.querySelector('.ovw-rwk-body');
     if (!body) return;
     body.innerHTML = '<div class="ovw-rwk-loading">加载中…</div>';
-    // 项目接口响应前显示明确的加载状态，不伪装成 0 / 1。
-    updateProgress(0, null, '正在获取项目列表…');
+    updateProgress(0, null, forceFullScan ? '正在执行全量深度扫描…' : '正在获取项目列表…');
 
     try {
       await loadReworkRows(force, function (partial, info, completed, total, phase) {
@@ -758,7 +795,7 @@
         if (phase) updateProgress(0, null, phase);
         else if (typeof completed === 'number') updateProgress(completed, total);
         renderRows(body, partial);
-      });
+      }, forceFullScan);
     } catch (e) {
       body.innerHTML = '<div class="ovw-rwk-empty ovw-rwk-error">加载失败：' + escapeHtml(e.message || e) + '</div>';
     }
@@ -850,9 +887,9 @@
       '.ovw-rwk-head{display:flex;align-items:center;gap:8px;padding:14px 16px;border-bottom:1px solid rgba(0,0,0,.06);font-weight:600;font-size:14px;}',
       '.ovw-rwk-head>span:first-child{flex:0 0 auto;}',
       '.ovw-rwk-info{flex:1;font-weight:400;font-size:11px;color:#bfbfbf;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}',
-      '.ovw-rwk-refresh,.ovw-rwk-close{border:0;background:transparent;color:#8c8c8c;cursor:pointer;padding:2px 6px;border-radius:4px;font-size:16px;line-height:1;}',
+      '.ovw-rwk-deep,.ovw-rwk-refresh,.ovw-rwk-close{border:0;background:transparent;color:#8c8c8c;cursor:pointer;padding:2px 6px;border-radius:4px;font-size:16px;line-height:1;}',
       '.ovw-rwk-close{font-size:22px;}',
-      '.ovw-rwk-refresh:hover,.ovw-rwk-close:hover{background:rgba(0,0,0,.05);color:#262626;}',
+      '.ovw-rwk-deep:hover,.ovw-rwk-refresh:hover,.ovw-rwk-close:hover{background:rgba(0,0,0,.05);color:#262626;}',
       '.ovw-rwk-progress{position:relative;height:22px;background:rgba(0,0,0,.04);overflow:hidden;flex:0 0 auto;}',
       '.ovw-rwk-progress-bar{position:absolute;left:0;top:0;bottom:0;background:linear-gradient(90deg,#1677ff,#4096ff);transition:width .25s ease;width:0;}',
       '.ovw-rwk-progress-indeterminate .ovw-rwk-progress-bar{animation:ovw-rwk-progress-slide 1.15s ease-in-out infinite;}',
@@ -896,11 +933,23 @@
 
   window.__REWORK = {
     open: openPanel, close: closePanel,
-    refresh: function () { return render(true); },
+    refresh: function () { return render(true, false); },
+    deepScan: function () { return render(true, true); },
     data: function () { return cache.rows; },
     info: function () { return cache.scanInfo; },
     me: function () { return cache.me; },
     clearCache: function () { cache.rows = null; cache.loadedAt = 0; projectCache.clear(); return 'cleared'; },
+    pageRepairCounts: function () {
+      return Array.prototype.map.call(document.querySelectorAll('.ls-project-card'), function (card) {
+        var link = card.closest('a[href]') || card.querySelector('a[href]');
+        var info = projectPathFromHref(link ? link.getAttribute('href') : '');
+        return {
+          projectId: info && info.projectId,
+          title: projectTitleFromCard(card),
+          repairCount: repairCountFromCard(card),
+        };
+      });
+    },
     test: function (task) { return { isMine: isMine(task, cache.me), owners: collectTaskOwners(task) }; },
   };
 })();
