@@ -1,12 +1,12 @@
 // ==UserScript==
 // @name         Insta360 项目卡片隐藏
 // @namespace    https://label.insta360.com/
-// @version      1.8.0
+// @version      1.9.0
 // @description  隐藏项目卡片并持久保存（隐藏后自动重排，不留空位），入口固定在「所有项目」左侧
 // @match        https://label.insta360.com/workspaces/*/projects*
-// @match        https://label.insta360.com/annotation/workspaces/all*
-// @match        https://label.insta360.com/review/workspaces/all*
-// @match        https://label.insta360.com/acceptance/workspaces/all*
+// @match        https://label.insta360.com/annotation/workspaces/*
+// @match        https://label.insta360.com/review/workspaces/*
+// @match        https://label.insta360.com/acceptance/workspaces/*
 // @run-at       document-idle
 // @grant        none
 // @noframes
@@ -26,11 +26,10 @@
   var HIDE_ATTR = 'data-ovw-hidden';
   var MANAGED_PATHS = [
     /^\/workspaces\/[^/]+\/projects$/,
-    '/annotation/workspaces/all',
-    '/review/workspaces/all',
-    '/acceptance/workspaces/all'
+    /^\/(?:annotation|review|acceptance)\/workspaces\/[^/]+$/
   ];
   var active = false;
+  var lastHref = location.href;
 
   function isManagedPage(url) {
     var u;
@@ -473,6 +472,16 @@
     window.addEventListener('popstate', syncRoute);
     window.addEventListener('hashchange', syncRoute);
     window.addEventListener('ovw-route-change', syncRoute);
+    function pollRoute() {
+      var href = location.href;
+      if (href !== lastHref) {
+        lastHref = href;
+        syncRoute();
+      } else if (active && (!entryBtn || !document.body.contains(entryBtn))) {
+        activate();
+      }
+    }
+    setInterval(pollRoute, 400);
   }
 
   /* ---------- 启动 ---------- */
