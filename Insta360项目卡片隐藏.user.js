@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Insta360 项目卡片隐藏
 // @namespace    https://label.insta360.com/
-// @version      1.7.0
+// @version      1.8.0
 // @description  隐藏项目卡片并持久保存（隐藏后自动重排，不留空位），入口固定在「所有项目」左侧
-// @match        https://label.insta360.com/workspaces/all/projects*
+// @match        https://label.insta360.com/workspaces/*/projects*
 // @match        https://label.insta360.com/annotation/workspaces/all*
 // @match        https://label.insta360.com/review/workspaces/all*
 // @match        https://label.insta360.com/acceptance/workspaces/all*
@@ -25,7 +25,7 @@
   var CARD_ITEM_SEL = '.ls-projects-page__link, .ls-annotation-center-page__link, .ls-review-center-page__link, .ls-acceptance-center-page__link';
   var HIDE_ATTR = 'data-ovw-hidden';
   var MANAGED_PATHS = [
-    '/workspaces/all/projects',
+    /^\/workspaces\/[^/]+\/projects$/,
     '/annotation/workspaces/all',
     '/review/workspaces/all',
     '/acceptance/workspaces/all'
@@ -35,7 +35,9 @@
   function isManagedPage(url) {
     var u;
     try { u = new URL(url || location.href, location.origin); } catch (e) { return false; }
-    return u.origin === location.origin && MANAGED_PATHS.indexOf(u.pathname) !== -1;
+    return u.origin === location.origin && MANAGED_PATHS.some(function (path) {
+      return path instanceof RegExp ? path.test(u.pathname) : path === u.pathname;
+    });
   }
 
   /* ---------- 存储 ---------- */
