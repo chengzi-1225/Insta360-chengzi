@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Insta360 项目卡片隐藏
 // @namespace    https://label.insta360.com/
-// @version      1.5.0
-// @description  隐藏项目卡片并持久保存（隐藏后自动重排，不留空位），顶部入口紧贴「创建项目」按钮左侧，可查看/恢复
+// @version      1.5.1
+// @description  隐藏项目卡片并持久保存（隐藏后自动重排，不留空位），入口位于搜索框右侧，可查看/恢复
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
@@ -219,14 +219,17 @@
     return count;
   }
 
-  /* ★ 找到「创建项目」按钮作为锚点 */
-  function findCreateProjectBtn() {
-    var els = document.querySelectorAll('button, a');
-    for (var i = 0; i < els.length; i++) {
-      var tx = (els[i].textContent || '').replace(/\s+/g, '').trim();
-      if (/^(创建项目|新建项目)$/.test(tx)) return els[i];
-    }
-    return null;
+  /* ★ 找到搜索框组的宿主：优先 .ant-input-group-wrapper */
+  function findSearchHost() {
+    var input = document.querySelector('input[placeholder*="项目名称"]')
+      || document.querySelector('input[placeholder*="搜索"]')
+      || document.querySelector('input[type="search"]');
+    if (!input) return null;
+    var host = input.closest('.ant-input-group-wrapper');
+    if (host) return host;
+    host = input.closest('.ant-input-affix-wrapper');
+    if (host) return host;
+    return input.parentElement;
   }
 
   function updateEntryNotice() {
@@ -237,14 +240,12 @@
   }
 
   function ensureEntryButton() {
-    // 入口还在 → 只刷新状态
     if (entryBtn && document.body.contains(entryBtn)) {
       updateEntryBadge();
       updateEntryNotice();
       return;
     }
 
-    // 构建 entryWrap(noticeEl + entryBtn)
     entryWrap = document.createElement('div');
     entryWrap.className = 'ovw-hide-entry-wrap';
     noticeEl = document.createElement('span');
@@ -263,10 +264,10 @@
     entryBtn.addEventListener('click', function (e) { e.stopPropagation(); togglePop(); });
     entryWrap.appendChild(entryBtn);
 
-    // ★ 插到「创建项目」按钮的左侧
-    var createBtn = findCreateProjectBtn();
-    if (createBtn && createBtn.parentElement) {
-      createBtn.parentElement.insertBefore(entryWrap, createBtn);
+    /* ★ 插到搜索框组的右边（会自然排到「开启全部统计」「统计字段」之前） */
+    var host = findSearchHost();
+    if (host && host.parentElement) {
+      host.parentElement.insertBefore(entryWrap, host.nextSibling);
       entryWrap.classList.remove('ovw-hide-entry-fallback');
     } else {
       entryWrap.classList.add('ovw-hide-entry-fallback');
@@ -362,9 +363,9 @@
       '.ls-project-card:hover .ovw-hide-btn{display:inline-flex;}',
       '.ovw-hide-btn:hover{background:#fff;color:#ff4d4f;}',
 
-      /* ★ 入口容器：紧贴「创建项目」左侧，与它是同级的 flex 子项 */
-      '.ovw-hide-entry-wrap{display:inline-flex;align-items:center;gap:10px;margin-right:12px;vertical-align:middle;}',
-      '.ovw-hide-entry-wrap.ovw-hide-entry-fallback{position:fixed;top:12px;right:160px;z-index:9999;margin-right:0;}',
+      /* ★ 入口容器：紧贴搜索框右侧，与它同级的 flex 子项 */
+      '.ovw-hide-entry-wrap{display:inline-flex;align-items:center;gap:10px;margin-left:8px;vertical-align:middle;}',
+      '.ovw-hide-entry-wrap.ovw-hide-entry-fallback{position:fixed;top:12px;right:160px;z-index:9999;margin-left:0;}',
       '.ovw-hide-notice{display:inline-flex;align-items:center;color:#8c8c8c;font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif;white-space:nowrap;}',
       '.ovw-hide-entry{display:inline-flex;align-items:center;height:32px;padding:0 12px;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:rgba(0,0,0,.75);font:13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif;cursor:pointer;transition:all .12s;}',
       '.ovw-hide-entry:hover{border-color:#1677ff;color:#1677ff;}',
