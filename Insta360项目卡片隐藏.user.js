@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Insta360 项目卡片隐藏
 // @namespace    https://label.insta360.com/
-// @version      1.4.0
-// @description  隐藏项目卡片并持久保存（隐藏后自动重排，不留空位），顶部入口可查看/恢复
+// @version      1.5.0
+// @description  隐藏项目卡片并持久保存（隐藏后自动重排，不留空位），顶部入口紧贴「创建项目」按钮左侧，可查看/恢复
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
@@ -95,8 +95,6 @@
   }
 
   function locateSlot(card) {
-    // 各中心页面都以对应的 *_page__link 作为 grid/flex 直接子项。
-    // 隐藏这个外层节点才能让后续项目自动补位。
     var item = cardItem(card);
     if (item) return item;
 
@@ -106,8 +104,6 @@
       var disp = '';
       try { disp = getComputedStyle(p).display || ''; } catch (e) {}
       if (disp.indexOf('grid') !== -1 || disp.indexOf('flex') !== -1) {
-        // node 是 p 的直接子项（一个格子）
-        // 若这一格里还装着别的卡片，就不能隐藏整格
         var others = node.querySelectorAll ? node.querySelectorAll(CARD_SEL) : [];
         var visibleOther = 0;
         for (var i = 0; i < others.length; i++) {
@@ -134,7 +130,6 @@
 
   /* ---------- 应用隐藏 ---------- */
   function applyHidden() {
-    // 先清理：已不在隐藏表里的，恢复显示
     var marked = document.querySelectorAll('[' + HIDE_ATTR + ']');
     for (var i = 0; i < marked.length; i++) {
       var m = marked[i];
@@ -142,7 +137,6 @@
       var id = c ? cardId(c) : '';
       if (!id || !hidden[id]) showSlot(m);
     }
-    // 再应用
     var cards = document.querySelectorAll(CARD_SEL);
     for (var j = 0; j < cards.length; j++) {
       var card = cards[j];
@@ -180,7 +174,6 @@
     hidden[id] = t;
     saveHidden(hidden);
     hideSlot(locateSlot(card));
-    // 统一重放一次，兼容列表组件在点击后同步/异步重绘的情况。
     applyHidden();
     updateEntryBadge();
     updateEntryNotice();
@@ -226,23 +219,14 @@
     return count;
   }
 
-  function findHeaderHost() {
-    var sels = [
-      '.ls-projects-page__title-container',
-      '.ls-annotation-center-page__title-container',
-      '.ls-review-center-page__title-container',
-      '.ls-acceptance-center-page__title-container',
-      '.ls-projects-page__header',
-      '.ls-annotation-center-page__header',
-      '.ls-review-center-page__header',
-      '.ls-acceptance-center-page__header'
-    ];
-    for (var i = 0; i < sels.length; i++) {
-      var host = document.querySelector(sels[i]);
-      if (host) return host;
+  /* ★ 找到「创建项目」按钮作为锚点 */
+  function findCreateProjectBtn() {
+    var els = document.querySelectorAll('button, a');
+    for (var i = 0; i < els.length; i++) {
+      var tx = (els[i].textContent || '').replace(/\s+/g, '').trim();
+      if (/^(创建项目|新建项目)$/.test(tx)) return els[i];
     }
-    var back = document.querySelector('[class*="__back"]');
-    return back && back.parentElement ? back.parentElement : null;
+    return null;
   }
 
   function updateEntryNotice() {
@@ -252,62 +236,43 @@
     noticeEl.textContent = n ? ('本项目包内有 ' + n + ' 个卡片已隐藏') : '';
   }
 
-  function findToolbar() {
-    var els = document.querySelectorAll('button, a');
-    for (var i = 0; i < els.length; i++) {
-      var tx = (els[i].textContent || '').trim();
-      if (/^(创建项目|新建项目)$/.test(tx)) return els[i].parentElement;
-    }
-    var inp = document.querySelector('input[placeholder*="搜索"], input[placeholder*="项目名称"]');
-    if (inp) {
-      var p = inp.parentElement;
-      for (var j = 0; j < 4 && p; j++) {
-        if (p.querySelectorAll('button').length >= 1) return p;
-        p = p.parentElement;
-      }
-    }
-    return null;
-  }
-
   function ensureEntryButton() {
-    if (entryBtn && document.body.contains(entryBtn)) { updateEntryBadge(); updateEntryNotice(); return; }
-    var bar = findToolbar();
-    entryBtn = document.createElement('button');
-    entryBtn.type = 'button';
-    entryBtn.id = 'ovw-hide-entry';
-    entryBtn.className = 'ovw-hide-entry';
-    entryBtn.innerHTML = '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" style="vertical-align:-2px;margin-right:4px"><path d="M12 6c-3.98 0-7.35 2.5-8.9 6 1.55 3.5 4.92 6 8.9 6s7.35-2.5 8.9-6c-1.55-3.5-4.92-6-8.9-6zm0 10a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/></svg><span>隐藏的卡片</span> <span class="ovw-hide-entry-n">(0)</span>';
-    entryBtn.addEventListener('click', function (e) { e.stopPropagation(); togglePop(); });
-    if (bar) {
-      bar.insertBefore(entryBtn, bar.firstChild);
-    } else {
-      entryBtn.style.position = 'fixed';
-      entryBtn.style.top = '12px';
-      entryBtn.style.right = '160px';
-      entryBtn.style.zIndex = '9999';
-      document.body.appendChild(entryBtn);
+    // 入口还在 → 只刷新状态
+    if (entryBtn && document.body.contains(entryBtn)) {
+      updateEntryBadge();
+      updateEntryNotice();
+      return;
     }
+
+    // 构建 entryWrap(noticeEl + entryBtn)
     entryWrap = document.createElement('div');
     entryWrap.className = 'ovw-hide-entry-wrap';
     noticeEl = document.createElement('span');
     noticeEl.className = 'ovw-hide-notice';
     entryWrap.appendChild(noticeEl);
-    if (entryBtn.parentElement) {
-      entryBtn.parentElement.insertBefore(entryWrap, entryBtn);
-      entryWrap.appendChild(entryBtn);
+
+    entryBtn = document.createElement('button');
+    entryBtn.type = 'button';
+    entryBtn.id = 'ovw-hide-entry';
+    entryBtn.className = 'ovw-hide-entry';
+    entryBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" style="vertical-align:-2px;margin-right:4px">' +
+        '<path d="M12 6c-3.98 0-7.35 2.5-8.9 6 1.55 3.5 4.92 6 8.9 6s7.35-2.5 8.9-6c-1.55-3.5-4.92-6-8.9-6zm0 10a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/>' +
+      '</svg>' +
+      '<span>隐藏的卡片</span> <span class="ovw-hide-entry-n">(0)</span>';
+    entryBtn.addEventListener('click', function (e) { e.stopPropagation(); togglePop(); });
+    entryWrap.appendChild(entryBtn);
+
+    // ★ 插到「创建项目」按钮的左侧
+    var createBtn = findCreateProjectBtn();
+    if (createBtn && createBtn.parentElement) {
+      createBtn.parentElement.insertBefore(entryWrap, createBtn);
+      entryWrap.classList.remove('ovw-hide-entry-fallback');
+    } else {
+      entryWrap.classList.add('ovw-hide-entry-fallback');
+      document.body.appendChild(entryWrap);
     }
 
-    var host = findHeaderHost();
-    entryBtn.style.removeProperty('position');
-    entryBtn.style.removeProperty('top');
-    entryBtn.style.removeProperty('right');
-    entryBtn.style.removeProperty('z-index');
-    if (host && entryWrap) {
-      host.appendChild(entryWrap);
-      entryWrap.classList.remove('ovw-hide-entry-fallback');
-    } else if (entryWrap) {
-      entryWrap.classList.add('ovw-hide-entry-fallback');
-    }
     updateEntryBadge();
     updateEntryNotice();
   }
@@ -371,8 +336,8 @@
       ids.forEach(function (id) {
         var name = nameOf(id);
         html += '<div class="ovw-hide-pop-item">' +
-                '<span class="ovw-hide-pop-name" title="' + esc(name) + '">' + esc(name) + '</span>' +
-                '<button type="button" class="ovw-hide-pop-restore" data-id="' + esc(id) + '">恢复</button>' +
+                  '<span class="ovw-hide-pop-name" title="' + esc(name) + '">' + esc(name) + '</span>' +
+                  '<button type="button" class="ovw-hide-pop-restore" data-id="' + esc(id) + '">恢复</button>' +
                 '</div>';
       });
       html += '</div>';
@@ -396,11 +361,14 @@
       '.ovw-hide-btn{position:absolute;top:6px;left:6px;z-index:20;width:24px;height:24px;border:0;border-radius:6px;background:rgba(255,255,255,.88);color:#8c8c8c;cursor:pointer;display:none;align-items:center;justify-content:center;box-shadow:0 1px 4px rgba(0,0,0,.12);transition:all .12s;}',
       '.ls-project-card:hover .ovw-hide-btn{display:inline-flex;}',
       '.ovw-hide-btn:hover{background:#fff;color:#ff4d4f;}',
-      '.ovw-hide-entry-wrap{display:inline-flex;align-items:center;gap:10px;margin-left:16px;vertical-align:middle;}',
-      '.ovw-hide-entry-wrap.ovw-hide-entry-fallback{position:fixed;top:12px;right:160px;z-index:9999;margin-left:0;}',
+
+      /* ★ 入口容器：紧贴「创建项目」左侧，与它是同级的 flex 子项 */
+      '.ovw-hide-entry-wrap{display:inline-flex;align-items:center;gap:10px;margin-right:12px;vertical-align:middle;}',
+      '.ovw-hide-entry-wrap.ovw-hide-entry-fallback{position:fixed;top:12px;right:160px;z-index:9999;margin-right:0;}',
       '.ovw-hide-notice{display:inline-flex;align-items:center;color:#8c8c8c;font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif;white-space:nowrap;}',
-      '.ovw-hide-entry{display:inline-flex;align-items:center;height:32px;padding:0 12px;margin-right:0;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:rgba(0,0,0,.75);font:13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif;cursor:pointer;transition:all .12s;}',
+      '.ovw-hide-entry{display:inline-flex;align-items:center;height:32px;padding:0 12px;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:rgba(0,0,0,.75);font:13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif;cursor:pointer;transition:all .12s;}',
       '.ovw-hide-entry:hover{border-color:#1677ff;color:#1677ff;}',
+
       '.ovw-hide-pop{position:fixed;z-index:2147483600;background:#fff;border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.16);border:1px solid rgba(0,0,0,.06);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif;color:#262626;overflow:hidden;}',
       '.ovw-hide-pop-head{padding:10px 12px;font-weight:600;border-bottom:1px solid rgba(0,0,0,.06);}',
       '.ovw-hide-pop-n{color:#8c8c8c;font-weight:400;margin-left:2px;}',
