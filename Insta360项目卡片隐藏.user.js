@@ -1,8 +1,9 @@
 // ==UserScript==
 // @name         Insta360 项目卡片隐藏
 // @namespace    https://label.insta360.com/
-// @version      1.9.0
+// @version      2.0.0
 // @description  隐藏项目卡片并持久保存（隐藏后自动重排，不留空位），入口固定在「所有项目」左侧
+// @match        https://label.insta360.com/*
 // @match        https://label.insta360.com/workspaces/*/projects*
 // @match        https://label.insta360.com/annotation/workspaces/*
 // @match        https://label.insta360.com/review/workspaces/*
@@ -25,8 +26,8 @@
   var CARD_ITEM_SEL = '.ls-projects-page__link, .ls-annotation-center-page__link, .ls-review-center-page__link, .ls-acceptance-center-page__link';
   var HIDE_ATTR = 'data-ovw-hidden';
   var MANAGED_PATHS = [
-    /^\/workspaces\/[^/]+\/projects$/,
-    /^\/(?:annotation|review|acceptance)\/workspaces\/[^/]+$/
+    /^\/workspaces\/[^/]+\/projects\/?$/,
+    /^\/(?:annotation|review|acceptance)\/workspaces\/[^/]+\/?$/
   ];
   var active = false;
   var lastHref = location.href;
