@@ -2,7 +2,7 @@
 // @name         Insta360 项目卡片隐藏
 // @namespace    https://label.insta360.com/
 // @version      1.5.3
-// @description  隐藏项目卡片并持久保存（隐藏后自动重排，不留空位），入口位于「所有项目」左侧，可查看/恢复
+// @description  隐藏项目卡片并持久保存（隐藏后自动重排，不留空位），入口固定在「所有项目」左侧
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
@@ -219,7 +219,7 @@
     return count;
   }
 
-  /* ★ 找到搜索框组的宿主：优先 .ant-input-group-wrapper */
+  /* 找到搜索框组的宿主：优先 .ant-input-group-wrapper */
   function findSearchHost() {
     var input = document.querySelector('input[placeholder*="项目名称"]')
       || document.querySelector('input[placeholder*="搜索"]')
@@ -239,18 +239,22 @@
     noticeEl.textContent = n ? ('本项目包内有 ' + n + ' 个卡片已隐藏') : '';
   }
 
-    function ensureEntryButton() {
+  /* ★ 每次调用都校验位置：不对就挪到「所有项目」左侧 */
+  function ensureEntryButton() {
     var host = findSearchHost();
     var targetParent = (host && host.parentElement) ? host.parentElement : null;
 
-    /* 已经挂载 → 校验位置，不对就重新挪 */
+    /* 已挂载 → 校验位置 */
     if (entryBtn && entryWrap && document.body.contains(entryBtn)) {
       if (targetParent) {
         var wrongParent = entryWrap.parentElement !== targetParent;
         var wrongNext = entryWrap.nextElementSibling !== host;
         if (wrongParent || wrongNext) {
-          try { targetParent.insertBefore(entryWrap, host); } catch (e) {}
-          entryWrap.classList.remove('ovw-hide-entry-fallback');
+          try {
+            targetParent.insertBefore(entryWrap, host);
+            entryWrap.classList.remove('ovw-hide-entry-fallback');
+            log('入口位置已校正');
+          } catch (e) {}
         }
       }
       updateEntryBadge();
@@ -286,38 +290,7 @@
         document.body.appendChild(entryWrap);
       }
     } else {
-      entryWrap.classList.add('ovw-hide-entry-fallback');
-      document.body.appendChild(entryWrap);
-    }
-
-    updateEntryBadge();
-    updateEntryNotice();
-  }
-
-    entryWrap = document.createElement('div');
-    entryWrap.className = 'ovw-hide-entry-wrap';
-    noticeEl = document.createElement('span');
-    noticeEl.className = 'ovw-hide-notice';
-    entryWrap.appendChild(noticeEl);
-
-    entryBtn = document.createElement('button');
-    entryBtn.type = 'button';
-    entryBtn.id = 'ovw-hide-entry';
-    entryBtn.className = 'ovw-hide-entry';
-    entryBtn.innerHTML =
-      '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" style="vertical-align:-2px;margin-right:4px">' +
-        '<path d="M12 6c-3.98 0-7.35 2.5-8.9 6 1.55 3.5 4.92 6 8.9 6s7.35-2.5 8.9-6c-1.55-3.5-4.92-6-8.9-6zm0 10a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/>' +
-      '</svg>' +
-      '<span>隐藏的卡片</span> <span class="ovw-hide-entry-n">(0)</span>';
-    entryBtn.addEventListener('click', function (e) { e.stopPropagation(); togglePop(); });
-    entryWrap.appendChild(entryBtn);
-
-    /* ★ 插到「所有项目」下拉框的左边：host 是 .ant-input-group-wrapper（包裹了 [所有项目▾] + [搜索框]），插到 host 前面即可 */
-    var host = findSearchHost();
-    if (host && host.parentElement) {
-      host.parentElement.insertBefore(entryWrap, host);
-      entryWrap.classList.remove('ovw-hide-entry-fallback');
-    } else {
+      /* 首屏搜索框还没渲染时先放 body，后续 MutationObserver 会挪回去 */
       entryWrap.classList.add('ovw-hide-entry-fallback');
       document.body.appendChild(entryWrap);
     }
@@ -411,7 +384,7 @@
       '.ls-project-card:hover .ovw-hide-btn{display:inline-flex;}',
       '.ovw-hide-btn:hover{background:#fff;color:#ff4d4f;}',
 
-      /* ★ 入口容器：紧贴「所有项目」下拉框左侧 */
+      /* 入口容器：紧贴「所有项目」下拉框左侧 */
       '.ovw-hide-entry-wrap{display:inline-flex;align-items:center;gap:10px;margin-right:8px;vertical-align:middle;}',
       '.ovw-hide-entry-wrap.ovw-hide-entry-fallback{position:fixed;top:12px;right:160px;z-index:9999;margin-right:0;}',
       '.ovw-hide-notice{display:inline-flex;align-items:center;color:#8c8c8c;font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif;white-space:nowrap;}',
@@ -466,5 +439,12 @@
     clear: unhideAll,
     refresh: function () { injectCardButtons(); applyHidden(); ensureEntryButton(); },
     slotOf: function (card) { return locateSlot(card); },
+    locateEntry: function () {
+      return entryWrap ? {
+        parent: entryWrap.parentElement,
+        isFallback: entryWrap.classList.contains('ovw-hide-entry-fallback'),
+        next: entryWrap.nextElementSibling
+      } : '未挂载';
+    }
   };
 })();
