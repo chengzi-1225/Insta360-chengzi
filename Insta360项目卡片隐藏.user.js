@@ -1,9 +1,12 @@
 // ==UserScript==
 // @name         Insta360 项目卡片隐藏
 // @namespace    https://label.insta360.com/
-// @version      1.6.0
+// @version      1.7.0
 // @description  隐藏项目卡片并持久保存（隐藏后自动重排，不留空位），入口固定在「所有项目」左侧
-// @match        *://label.insta360.com/*
+// @match        https://label.insta360.com/workspaces/all/projects*
+// @match        https://label.insta360.com/annotation/workspaces/all*
+// @match        https://label.insta360.com/review/workspaces/all*
+// @match        https://label.insta360.com/acceptance/workspaces/all*
 // @run-at       document-idle
 // @grant        none
 // @noframes
@@ -21,6 +24,19 @@
   var CARD_SEL = '.ls-project-card';
   var CARD_ITEM_SEL = '.ls-projects-page__link, .ls-annotation-center-page__link, .ls-review-center-page__link, .ls-acceptance-center-page__link';
   var HIDE_ATTR = 'data-ovw-hidden';
+  var MANAGED_PATHS = [
+    '/workspaces/all/projects',
+    '/annotation/workspaces/all',
+    '/review/workspaces/all',
+    '/acceptance/workspaces/all'
+  ];
+  var active = false;
+
+  function isManagedPage(url) {
+    var u;
+    try { u = new URL(url || location.href, location.origin); } catch (e) { return false; }
+    return u.origin === location.origin && MANAGED_PATHS.indexOf(u.pathname) !== -1;
+  }
 
   /* ---------- 存储 ---------- */
   function loadHidden() {
@@ -184,7 +200,7 @@
     if (!id) return;
     delete hidden[id];
     saveHidden(hidden);
-    applyHidden();
+    if (active) applyHidden();
     updateEntryBadge();
     updateEntryNotice();
     renderPopList();
@@ -193,7 +209,7 @@
   function unhideAll() {
     hidden = {};
     saveHidden(hidden);
-    applyHidden();
+    if (active) applyHidden();
     updateEntryBadge();
     updateEntryNotice();
     renderPopList();
@@ -411,21 +427,64 @@
     document.head.appendChild(s);
   }
 
-  /* ---------- 启动 ---------- */
-  function boot() {
-    addStyle();
+  function removeRenderedControls() {
+    closePop();
+    document.querySelectorAll('.ovw-hide-btn').forEach(function (btn) { btn.remove(); });
+    document.querySelectorAll('[' + HIDE_ATTR + ']').forEach(function (slot) { showSlot(slot); });
+    if (entryWrap) entryWrap.remove();
+    entryBtn = null;
+    entryWrap = null;
+    noticeEl = null;
+  }
+
+  function activate() {
+    if (!isManagedPage()) return;
+    active = true;
     injectCardButtons();
     applyHidden();
     ensureEntryButton();
+  }
+
+  function deactivate() {
+    if (!active && !entryWrap && !document.querySelector('.ovw-hide-btn')) return;
+    active = false;
+    removeRenderedControls();
+  }
+
+  function syncRoute() {
+    if (isManagedPage()) activate();
+    else deactivate();
+  }
+
+  function watchHistory() {
+    ['pushState', 'replaceState'].forEach(function (method) {
+      var original = window.history[method];
+      if (typeof original !== 'function' || original.__ovwWrapped) return;
+      var wrapped = function () {
+        var result = original.apply(this, arguments);
+        window.dispatchEvent(new Event('ovw-route-change'));
+        return result;
+      };
+      wrapped.__ovwWrapped = true;
+      window.history[method] = wrapped;
+    });
+    window.addEventListener('popstate', syncRoute);
+    window.addEventListener('hashchange', syncRoute);
+    window.addEventListener('ovw-route-change', syncRoute);
+  }
+
+  /* ---------- 启动 ---------- */
+  function boot() {
+    addStyle();
+    watchHistory();
+    syncRoute();
 
     var t = null;
     var mo = new MutationObserver(function () {
       if (t) return;
       t = setTimeout(function () {
         t = null;
-        injectCardButtons();
-        applyHidden();
-        ensureEntryButton();
+        syncRoute();
         if (popEl) { renderPopList(); positionPop(); }
       }, 150);
     });
@@ -437,10 +496,10 @@
 
   window.__HIDECARDS = {
     list: function () { return Object.assign({}, hidden); },
-    hide: function (id, name) { if (id) { hidden[id] = name || hidden[id] || ('项目 #' + id); saveHidden(hidden); applyHidden(); updateEntryBadge(); } },
+    hide: function (id, name) { if (id) { hidden[id] = name || hidden[id] || ('项目 #' + id); saveHidden(hidden); if (active) applyHidden(); updateEntryBadge(); } },
     unhide: unhide,
     clear: unhideAll,
-    refresh: function () { injectCardButtons(); applyHidden(); ensureEntryButton(); },
+    refresh: function () { syncRoute(); },
     slotOf: function (card) { return locateSlot(card); },
     locateEntry: function () {
       return entryWrap ? {
