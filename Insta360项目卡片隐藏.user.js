@@ -239,12 +239,60 @@
     noticeEl.textContent = n ? ('本项目包内有 ' + n + ' 个卡片已隐藏') : '';
   }
 
-  function ensureEntryButton() {
-    if (entryBtn && document.body.contains(entryBtn)) {
+    function ensureEntryButton() {
+    var host = findSearchHost();
+    var targetParent = (host && host.parentElement) ? host.parentElement : null;
+
+    /* 已经挂载 → 校验位置，不对就重新挪 */
+    if (entryBtn && entryWrap && document.body.contains(entryBtn)) {
+      if (targetParent) {
+        var wrongParent = entryWrap.parentElement !== targetParent;
+        var wrongNext = entryWrap.nextElementSibling !== host;
+        if (wrongParent || wrongNext) {
+          try { targetParent.insertBefore(entryWrap, host); } catch (e) {}
+          entryWrap.classList.remove('ovw-hide-entry-fallback');
+        }
+      }
       updateEntryBadge();
       updateEntryNotice();
       return;
     }
+
+    /* 首次挂载 */
+    entryWrap = document.createElement('div');
+    entryWrap.className = 'ovw-hide-entry-wrap';
+    noticeEl = document.createElement('span');
+    noticeEl.className = 'ovw-hide-notice';
+    entryWrap.appendChild(noticeEl);
+
+    entryBtn = document.createElement('button');
+    entryBtn.type = 'button';
+    entryBtn.id = 'ovw-hide-entry';
+    entryBtn.className = 'ovw-hide-entry';
+    entryBtn.innerHTML =
+      '<svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" style="vertical-align:-2px;margin-right:4px">' +
+        '<path d="M12 6c-3.98 0-7.35 2.5-8.9 6 1.55 3.5 4.92 6 8.9 6s7.35-2.5 8.9-6c-1.55-3.5-4.92-6-8.9-6zm0 10a4 4 0 1 1 0-8 4 4 0 0 1 0 8z"/>' +
+      '</svg>' +
+      '<span>隐藏的卡片</span> <span class="ovw-hide-entry-n">(0)</span>';
+    entryBtn.addEventListener('click', function (e) { e.stopPropagation(); togglePop(); });
+    entryWrap.appendChild(entryBtn);
+
+    if (targetParent) {
+      try {
+        targetParent.insertBefore(entryWrap, host);
+        entryWrap.classList.remove('ovw-hide-entry-fallback');
+      } catch (e) {
+        entryWrap.classList.add('ovw-hide-entry-fallback');
+        document.body.appendChild(entryWrap);
+      }
+    } else {
+      entryWrap.classList.add('ovw-hide-entry-fallback');
+      document.body.appendChild(entryWrap);
+    }
+
+    updateEntryBadge();
+    updateEntryNotice();
+  }
 
     entryWrap = document.createElement('div');
     entryWrap.className = 'ovw-hide-entry-wrap';
