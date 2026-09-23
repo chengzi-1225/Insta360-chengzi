@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 项目卡片隐藏
 // @namespace    https://label.insta360.com/
-// @version      1.5.3
+// @version      1.6.0
 // @description  隐藏项目卡片并持久保存（隐藏后自动重排，不留空位），入口固定在「所有项目」左侧
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
@@ -385,12 +385,15 @@
       '.ovw-hide-btn:hover{background:#fff;color:#ff4d4f;}',
 
       /* 入口容器：紧贴「所有项目」下拉框左侧 */
-      '.ovw-hide-entry-wrap{display:inline-flex;align-items:center;gap:10px;margin-right:8px;vertical-align:middle;}',
+      '.ovw-hide-entry-wrap{display:inline-flex;align-items:center;gap:10px;margin-right:8px;vertical-align:middle;flex:0 0 auto;white-space:nowrap;}',
       '.ovw-hide-entry-wrap.ovw-hide-entry-fallback{position:fixed;top:12px;right:160px;z-index:9999;margin-right:0;}',
       '.ovw-hide-notice{display:inline-flex;align-items:center;color:#8c8c8c;font:13px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif;white-space:nowrap;}',
-      '.ovw-hide-entry{display:inline-flex;align-items:center;height:32px;padding:0 12px;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:rgba(0,0,0,.75);font:13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif;cursor:pointer;transition:all .12s;}',
+      '.ovw-hide-entry{display:inline-flex;align-items:center;height:32px;padding:0 12px;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:rgba(0,0,0,.75);font:13px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif;cursor:pointer;transition:all .12s;flex:0 0 auto;white-space:nowrap;min-width:max-content;}',
       '.ovw-hide-entry:hover{border-color:#1677ff;color:#1677ff;}',
 
+      /* ★ 兜底：按钮里的文字和图标都不换行 */
+      '.ovw-hide-entry span,.ovw-hide-entry svg{white-space:nowrap;flex:0 0 auto;}',
+      
       '.ovw-hide-pop{position:fixed;z-index:2147483600;background:#fff;border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.16);border:1px solid rgba(0,0,0,.06);font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif;color:#262626;overflow:hidden;}',
       '.ovw-hide-pop-head{padding:10px 12px;font-weight:600;border-bottom:1px solid rgba(0,0,0,.06);}',
       '.ovw-hide-pop-n{color:#8c8c8c;font-weight:400;margin-left:2px;}',
