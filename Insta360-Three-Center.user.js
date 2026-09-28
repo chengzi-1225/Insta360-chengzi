@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Insta360 三中心切换
 // @namespace    https://github.com/chengzi-1225/Insta360-chengzi
-// @version      6.1.0
-// @description  面板：自动填当前链接 → 点按钮切到项目/标注/审核中心（切到标注时自动去 annotation= 参数）
+// @version      6.2.0
+// @description  面板：自动填当前链接 → 点按钮切到项目/标注/审核中心（自动清理审核态参数）
 // @author       chengzi
 // @match        *://label.insta360.com/*
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360-Three-Center.user.js
@@ -21,6 +21,9 @@
   const CENTERS = [['项目',''], ['标注','/annotation'], ['审核','/review']];
   const MODE_RE = /^\/(annotation|review)(?=\/|$)/i;
   const SLOT = '.ls-menu-header__context-item_right';
+
+  // 审核页特有、切走后必须删的参数
+  const REVIEW_ONLY_PARAMS = ['annotation', 'reviewing'];
 
   /* ===== 链接清洗 ===== */
   function norm(raw) {
@@ -48,8 +51,10 @@
     if (p[0] !== '/') p = '/' + p;
     u.pathname = (prefix + p).replace(/\/{2,}/g, '/');
 
-    // 切到标注中心 → 去掉 annotation=（审核页特有参数，标注页用不到）
-    if (prefix === '/annotation') u.searchParams.delete('annotation');
+    // 目标不是审核中心 → 把审核态参数全清掉
+    if (prefix !== '/review') {
+      REVIEW_ONLY_PARAMS.forEach((k) => u.searchParams.delete(k));
+    }
 
     return { url: u.toString(), same: u.toString() === norm(raw) };
   }
@@ -200,4 +205,7 @@
       return r;
     };
   });
+
+  // 调试入口
+  window.__cs6 = { build, norm };
 })();
