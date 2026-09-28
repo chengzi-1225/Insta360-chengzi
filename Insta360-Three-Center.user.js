@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Insta360 三中心切换
 // @namespace    https://github.com/chengzi-1225/Insta360-chengzi
-// @version      6.6.0
-// @description  面板：粘贴链接 → 点【项目/标注/审核】切换前缀，query 参数原样保留
+// @version      6.6.1
+// @description  面板：粘贴链接 → 点【项目/标注/审核】切换前缀，query 参数原样保留；输入框自适应宽度
 // @author       chengzi
 // @match        *://label.insta360.com/*
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360-Three-Center.user.js
@@ -22,6 +22,7 @@
   const PREFIX_RE = /^\/(annotation|review)(?=\/|$)/i;
   const SLOT = '.ls-menu-header__context-item_right';
 
+  /* ===== 只替换前缀，query 一字不动 ===== */
   function build(raw, prefix) {
     let s = String(raw || '').trim();
     if (!s) return { err: '没有输入链接' };
@@ -47,27 +48,39 @@
   root.innerHTML = `
 <style>
   :host { all: initial; }
-  #b { display: flex; gap: 4px; align-items: center; font: 12px/1.5 system-ui,-apple-system,"Microsoft YaHei",sans-serif; }
+  #b {
+    display: flex; gap: 4px; align-items: center;
+    max-width: calc(100vw - 24px);
+    font: 12px/1.5 system-ui,-apple-system,"Microsoft YaHei",sans-serif;
+  }
   input {
-    width: 520px; max-width: 46vw;
+    flex: 1 1 120px;
+    min-width: 80px;
+    max-width: 300px;
     padding: 5px 9px; border-radius: 6px;
     background: rgba(0,0,0,.05); color: inherit;
     border: 1px solid rgba(128,128,128,.35);
     font: 12px/1.5 ui-monospace,Consolas,monospace; outline: none;
+    box-sizing: border-box;
   }
   input:focus { border-color: #2563eb; background: #fff; color: #000; box-shadow: 0 0 0 2px rgba(37,99,235,.2); }
   input::placeholder { color: #888; }
   button {
+    flex: 0 0 auto;
     padding: 5px 12px; border-radius: 6px; cursor: pointer; white-space: nowrap;
     background: transparent; color: inherit;
     border: 1px solid rgba(128,128,128,.45); font: 12px/1.4 system-ui,sans-serif;
+    box-sizing: border-box;
   }
   button:hover { background: rgba(37,99,235,.12); border-color: #2563eb; }
   button:active { transform: translateY(1px); }
   #tog { padding: 5px 11px; font-size: 14px; line-height: 1; position: relative; }
   #tog .dot { width: 6px; height: 6px; border-radius: 50%; background: #2563eb; position: absolute; top: 2px; right: 2px; display: none; }
   :host(.has-content) #tog .dot { display: block; }
-  #exp { display: none; gap: 4px; align-items: center; }
+  #exp {
+    display: none; gap: 4px; align-items: center;
+    min-width: 0; max-width: 100%;
+  }
   :host(.open) #exp { display: flex; }
   :host(.open) #tog { display: none; }
   #toast {
@@ -110,7 +123,7 @@
     toastTimer = setTimeout(() => toast.classList.remove('on'), 2600);
   }
 
-  /* ===== 展开/收起 ===== */
+  /* ===== 折叠 ===== */
   function setFold(fold) {
     host.classList.toggle('open', !fold);
     try { localStorage.setItem(FOLD_KEY, fold ? '1' : '0'); } catch (_) {}
@@ -129,13 +142,12 @@
   function syncState() {
     const v = inp.value.trim();
     host.classList.toggle('has-content', !!v);
-    inp.title = v;   // 悬停看完整内容
+    inp.title = v;
   }
   syncState();
 
   inp.addEventListener('input', syncState);
 
-  // 粘贴事件：显式处理，避免被其他扩展拦截
   inp.addEventListener('paste', (e) => {
     const txt = (e.clipboardData || window.clipboardData).getData('text');
     if (!txt) return;
@@ -192,28 +204,23 @@
 
   /* ===== 对外 API ===== */
   window.__cs6 = {
-    version: '6.6.0',
+    version: '6.6.1',
     build: build,
     open: () => setFold(false),
     close: () => setFold(true),
     toggle: toggleFold,
     value: () => inp.value,
     setValue: (v) => { inp.value = v; syncState(); },
-    /** 一键诊断，用户看不到东西时跑这个 */
     diag: () => {
       const rect = inp.getBoundingClientRect();
       const info = {
-        version: '6.6.0',
+        version: '6.6.1',
         hostExists: !!document.getElementById(HOST),
-        shadowExists: !!root,
         panelOpen: host.classList.contains('open'),
         isFixedFallback: host.classList.contains('fixed'),
         inputValue: inp.value,
         inputLength: inp.value.length,
         inputRect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
-        inputDisplay: getComputedStyle(inp).display,
-        inputVisibility: getComputedStyle(inp).visibility,
-        inputOpacity: getComputedStyle(inp).opacity,
         hostParent: host.parentNode ? (host.parentNode.className || host.parentNode.tagName) : 'none',
         leftovers: ['__cs5','__center_switcher_host','__center_bar_host','__cs_v3_host','__cs4']
           .filter(id => document.getElementById(id))
