@@ -3,11 +3,12 @@
 // @namespace    https://local/cs
 // @version      6.0.0
 // @description  在标注页显示「审核」按钮，在审核页显示「标注」按钮，点一下即切
-// @match        *://label.insta360.com/annotation/*
-// @match        *://label.insta360.com/review/*
+// @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
 // @noframes
+// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360-Three-Center.user.js
+// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360-Three-Center.user.js
 // ==/UserScript==
 
 (function () {
