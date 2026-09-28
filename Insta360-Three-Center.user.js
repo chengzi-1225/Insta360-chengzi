@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Insta360 三中心切换
 // @namespace    https://github.com/chengzi-1225/Insta360-chengzi
-// @version      6.2.0
-// @description  面板：自动填当前链接 → 点按钮切到项目/标注/审核中心（自动清理审核态参数）
+// @version      6.3.0
+// @description  只改 URL 的 /review ↔ /annotation 前缀，其他参数全部原样保留
 // @author       chengzi
 // @match        *://label.insta360.com/*
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360-Three-Center.user.js
@@ -19,44 +19,27 @@
   if (document.getElementById(HOST)) return;
 
   const CENTERS = [['项目',''], ['标注','/annotation'], ['审核','/review']];
-  const MODE_RE = /^\/(annotation|review)(?=\/|$)/i;
   const SLOT = '.ls-menu-header__context-item_right';
 
-  // 审核页特有、切走后必须删的参数
-  const REVIEW_ONLY_PARAMS = ['annotation', 'reviewing'];
-
-  /* ===== 链接清洗 ===== */
-  function norm(raw) {
-    let s = String(raw || '');
-    s = s.replace(/&amp;/g, '&');
-    s = s.replace(/\u3000/g, ' ');
-    s = s.replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '');
-    s = s.split(/[\r\n]+/).map(x => x.trim()).find(Boolean) || '';
-    return s.trim();
-  }
-
-  /* ===== 目标 URL ===== */
+  /* ===== 只做前缀替换，参数全保留 ===== */
   function build(raw, prefix) {
-    let s = norm(raw);
+    let s = String(raw || '').trim();
     if (!s) return { err: '没有输入链接' };
     if (/^\//.test(s)) s = location.origin + s;
     else if (!/^https?:\/\//i.test(s)) s = 'https://' + s.replace(/^\/+/, '');
 
     let u;
-    try { u = new URL(s); } catch (_) { return { err: '链接解析失败，可能混了空格或特殊字符' }; }
+    try { u = new URL(s); } catch (_) { return { err: '链接解析失败' }; }
     if (!/^https?:$/i.test(u.protocol)) return { err: '只支持 http / https' };
 
-    let p = (u.pathname || '/').replace(MODE_RE, '');
+    // 剥掉开头的 /annotation 或 /review，再拼目标前缀
+    let p = u.pathname.replace(/^\/(annotation|review)(?=\/|$)/i, '');
     if (!p) p = '/';
     if (p[0] !== '/') p = '/' + p;
     u.pathname = (prefix + p).replace(/\/{2,}/g, '/');
 
-    // 目标不是审核中心 → 把审核态参数全清掉
-    if (prefix !== '/review') {
-      REVIEW_ONLY_PARAMS.forEach((k) => u.searchParams.delete(k));
-    }
-
-    return { url: u.toString(), same: u.toString() === norm(raw) };
+    // 什么都不删，search 保持原样
+    return { url: u.toString(), same: u.toString() === s };
   }
 
   /* ===== UI ===== */
@@ -145,7 +128,6 @@
   if (/insta360\.com$/i.test(location.hostname)) inp.value = location.href;
   inp.addEventListener('input', () => {
     host.classList.toggle('has-content', !!inp.value.trim());
-    inp.title = norm(inp.value);
   });
   inp.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); root.querySelector('button[data-k]').click(); }
@@ -158,11 +140,11 @@
       const name = CENTERS[+btn.dataset.k][0];
       const r = build(inp.value, CENTERS[+btn.dataset.k][1]);
       if (r.err) { say('✕ ' + r.err, true); inp.style.borderColor = '#ff6b6b'; setTimeout(() => inp.style.borderColor = '', 800); return; }
-      if (r.same) { say('已经在该中心：' + name); setFold(true); return; }
+      if (r.same) { say('已经是：' + name); setFold(true); return; }
 
       let w = null;
       try { w = window.open(r.url, '_blank', 'noopener,noreferrer'); } catch (_) {}
-      if (!w) { say('⚠️ 弹窗被拦截，请允许弹出窗口', true); return; }
+      if (!w) { say('⚠️ 弹窗被拦截', true); return; }
 
       say('已打开：' + name);
       setFold(true);
@@ -191,21 +173,6 @@
   setInterval(mount, 500);
   new MutationObserver(mount).observe(document.documentElement, { childList: true, subtree: true });
 
-  ['pushState', 'replaceState'].forEach((k) => {
-    const orig = history[k];
-    history[k] = function () {
-      const r = orig.apply(this, arguments);
-      setTimeout(() => {
-        if (inp.value && inp.value === inp.dataset.auto) {
-          inp.value = location.href;
-          inp.dataset.auto = location.href;
-        }
-        mount();
-      }, 60);
-      return r;
-    };
-  });
-
   // 调试入口
-  window.__cs6 = { build, norm };
+  window.__cs6 = { build };
 })();
