@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 三中心切换
 // @namespace    https://local/cs
-// @version      5.1.0
+// @version      5.2.0
 // @description  挂进 LSF 顶栏，折叠成小按钮；点开粘贴链接切中心
 // @match        *://*/*
 // @run-at       document-idle
@@ -17,7 +17,7 @@
   const FOLD_KEY = '__cs5_folded';
   if (document.getElementById(HOST)) return;
 
-  const CENTERS = [['项目',''], ['标注','/annotation'], ['审核','/review']];
+  const CENTERS = [['管',''], ['标','/annotation'], ['审','/review']];
   const MODE_RE = /^\/(annotation|review)(?=\/|$)/i;
   const SLOT = '.ls-menu-header__context-item_right';
 
