@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 三中心切换
 // @namespace    https://github.com/chengzi-1225/Insta360-chengzi
-// @version      6.5.0
+// @version      6.6.0
 // @description  面板：粘贴链接 → 点【项目/标注/审核】切换前缀，query 参数原样保留
 // @author       chengzi
 // @match        *://label.insta360.com/*
@@ -22,7 +22,6 @@
   const PREFIX_RE = /^\/(annotation|review)(?=\/|$)/i;
   const SLOT = '.ls-menu-header__context-item_right';
 
-  /* ===== 只替换前缀，query 一字不动 ===== */
   function build(raw, prefix) {
     let s = String(raw || '').trim();
     if (!s) return { err: '没有输入链接' };
@@ -33,11 +32,9 @@
     try { u = new URL(s); } catch (_) { return { err: '链接解析失败' }; }
     if (!/^https?:$/i.test(u.protocol)) return { err: '只支持 http / https' };
 
-    // 剥掉开头的 /annotation 或 /review（没有则不变）
     let p = u.pathname.replace(PREFIX_RE, '');
     if (!p) p = '/';
     if (p[0] !== '/') p = '/' + p;
-    // 拼目标前缀（项目中心 prefix 为空 → 相当于纯剥离）
     u.pathname = (prefix + p).replace(/\/{2,}/g, '/');
 
     return { url: u.toString(), same: u.toString() === s };
@@ -52,21 +49,22 @@
   :host { all: initial; }
   #b { display: flex; gap: 4px; align-items: center; font: 12px/1.5 system-ui,-apple-system,"Microsoft YaHei",sans-serif; }
   input {
-    width: 280px; padding: 4px 8px; border-radius: 6px;
+    width: 520px; max-width: 46vw;
+    padding: 5px 9px; border-radius: 6px;
     background: rgba(0,0,0,.05); color: inherit;
     border: 1px solid rgba(128,128,128,.35);
     font: 12px/1.5 ui-monospace,Consolas,monospace; outline: none;
   }
-  input:focus { border-color: #2563eb; background: #fff; color: #000; }
+  input:focus { border-color: #2563eb; background: #fff; color: #000; box-shadow: 0 0 0 2px rgba(37,99,235,.2); }
   input::placeholder { color: #888; }
   button {
-    padding: 4px 10px; border-radius: 6px; cursor: pointer; white-space: nowrap;
+    padding: 5px 12px; border-radius: 6px; cursor: pointer; white-space: nowrap;
     background: transparent; color: inherit;
     border: 1px solid rgba(128,128,128,.45); font: 12px/1.4 system-ui,sans-serif;
   }
   button:hover { background: rgba(37,99,235,.12); border-color: #2563eb; }
   button:active { transform: translateY(1px); }
-  #tog { padding: 4px 10px; font-size: 14px; line-height: 1; position: relative; }
+  #tog { padding: 5px 11px; font-size: 14px; line-height: 1; position: relative; }
   #tog .dot { width: 6px; height: 6px; border-radius: 50%; background: #2563eb; position: absolute; top: 2px; right: 2px; display: none; }
   :host(.has-content) #tog .dot { display: block; }
   #exp { display: none; gap: 4px; align-items: center; }
@@ -94,7 +92,7 @@
 <div id="b">
   <button id="tog" title="展开（Ctrl+Shift+X）">⇄<span class="dot"></span></button>
   <div id="exp">
-    <input id="i" spellcheck="false" placeholder="粘贴链接">
+    <input id="i" spellcheck="false" autocomplete="off" placeholder="粘贴链接（Ctrl+V）">
     ${CENTERS.map(([n, k]) => `<button data-k="${k}">${n}</button>`).join('')}
     <button id="fold" title="收起（Ctrl+Shift+X）">◀</button>
   </div>
@@ -112,11 +110,11 @@
     toastTimer = setTimeout(() => toast.classList.remove('on'), 2600);
   }
 
-  /* ===== 折叠 ===== */
+  /* ===== 展开/收起 ===== */
   function setFold(fold) {
     host.classList.toggle('open', !fold);
     try { localStorage.setItem(FOLD_KEY, fold ? '1' : '0'); } catch (_) {}
-    if (!fold) setTimeout(() => { try { inp.focus(); } catch (_) {} }, 0);
+    if (!fold) setTimeout(() => { try { inp.focus(); inp.select(); } catch (_) {} }, 30);
   }
   const toggleFold = () => setFold(host.classList.contains('open'));
   root.getElementById('tog').onclick = () => setFold(false);
@@ -127,9 +125,26 @@
 
   /* ===== 输入 ===== */
   if (/insta360\.com$/i.test(location.hostname)) inp.value = location.href;
-  inp.addEventListener('input', () => {
-    host.classList.toggle('has-content', !!inp.value.trim());
+
+  function syncState() {
+    const v = inp.value.trim();
+    host.classList.toggle('has-content', !!v);
+    inp.title = v;   // 悬停看完整内容
+  }
+  syncState();
+
+  inp.addEventListener('input', syncState);
+
+  // 粘贴事件：显式处理，避免被其他扩展拦截
+  inp.addEventListener('paste', (e) => {
+    const txt = (e.clipboardData || window.clipboardData).getData('text');
+    if (!txt) return;
+    e.preventDefault();
+    inp.value = txt.trim();
+    syncState();
+    say('已粘贴 ' + inp.value.length + ' 字符');
   });
+
   inp.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') { e.preventDefault(); root.querySelector('button[data-k]').click(); }
     if (e.key === 'Escape') { e.preventDefault(); setFold(true); }
@@ -169,12 +184,42 @@
   let folded = true;
   try { folded = localStorage.getItem(FOLD_KEY) !== '0'; } catch (_) {}
   setFold(folded);
-  if (inp.value.trim()) host.classList.add('has-content');
+  syncState();
 
   mount();
   setInterval(mount, 500);
   new MutationObserver(mount).observe(document.documentElement, { childList: true, subtree: true });
 
-  // 调试入口
-  window.__cs6 = { build };
+  /* ===== 对外 API ===== */
+  window.__cs6 = {
+    version: '6.6.0',
+    build: build,
+    open: () => setFold(false),
+    close: () => setFold(true),
+    toggle: toggleFold,
+    value: () => inp.value,
+    setValue: (v) => { inp.value = v; syncState(); },
+    /** 一键诊断，用户看不到东西时跑这个 */
+    diag: () => {
+      const rect = inp.getBoundingClientRect();
+      const info = {
+        version: '6.6.0',
+        hostExists: !!document.getElementById(HOST),
+        shadowExists: !!root,
+        panelOpen: host.classList.contains('open'),
+        isFixedFallback: host.classList.contains('fixed'),
+        inputValue: inp.value,
+        inputLength: inp.value.length,
+        inputRect: { x: Math.round(rect.x), y: Math.round(rect.y), w: Math.round(rect.width), h: Math.round(rect.height) },
+        inputDisplay: getComputedStyle(inp).display,
+        inputVisibility: getComputedStyle(inp).visibility,
+        inputOpacity: getComputedStyle(inp).opacity,
+        hostParent: host.parentNode ? (host.parentNode.className || host.parentNode.tagName) : 'none',
+        leftovers: ['__cs5','__center_switcher_host','__center_bar_host','__cs_v3_host','__cs4']
+          .filter(id => document.getElementById(id))
+      };
+      console.table(info);
+      return info;
+    }
+  };
 })();
