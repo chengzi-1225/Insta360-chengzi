@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Insta360 三中心切换
 // @namespace    https://github.com/chengzi-1225/Insta360-chengzi
-// @version      6.3.0
-// @description  只改 URL 的 /review ↔ /annotation 前缀，其他参数全部原样保留
+// @version      6.5.0
+// @description  面板：粘贴链接 → 点【项目/标注/审核】切换前缀，query 参数原样保留
 // @author       chengzi
 // @match        *://label.insta360.com/*
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360-Three-Center.user.js
@@ -19,9 +19,10 @@
   if (document.getElementById(HOST)) return;
 
   const CENTERS = [['项目',''], ['标注','/annotation'], ['审核','/review']];
+  const PREFIX_RE = /^\/(annotation|review)(?=\/|$)/i;
   const SLOT = '.ls-menu-header__context-item_right';
 
-  /* ===== 只做前缀替换，参数全保留 ===== */
+  /* ===== 只替换前缀，query 一字不动 ===== */
   function build(raw, prefix) {
     let s = String(raw || '').trim();
     if (!s) return { err: '没有输入链接' };
@@ -32,13 +33,13 @@
     try { u = new URL(s); } catch (_) { return { err: '链接解析失败' }; }
     if (!/^https?:$/i.test(u.protocol)) return { err: '只支持 http / https' };
 
-    // 剥掉开头的 /annotation 或 /review，再拼目标前缀
-    let p = u.pathname.replace(/^\/(annotation|review)(?=\/|$)/i, '');
+    // 剥掉开头的 /annotation 或 /review（没有则不变）
+    let p = u.pathname.replace(PREFIX_RE, '');
     if (!p) p = '/';
     if (p[0] !== '/') p = '/' + p;
+    // 拼目标前缀（项目中心 prefix 为空 → 相当于纯剥离）
     u.pathname = (prefix + p).replace(/\/{2,}/g, '/');
 
-    // 什么都不删，search 保持原样
     return { url: u.toString(), same: u.toString() === s };
   }
 
@@ -134,11 +135,12 @@
     if (e.key === 'Escape') { e.preventDefault(); setFold(true); }
   });
 
-  /* ===== 按钮 ===== */
+  /* ===== 三按钮 ===== */
   root.querySelectorAll('button[data-k]').forEach((btn) => {
     btn.onclick = () => {
-      const name = CENTERS[+btn.dataset.k][0];
-      const r = build(inp.value, CENTERS[+btn.dataset.k][1]);
+      const prefix = btn.dataset.k;
+      const name = CENTERS.find(([n, k]) => k === prefix)[0];
+      const r = build(inp.value, prefix);
       if (r.err) { say('✕ ' + r.err, true); inp.style.borderColor = '#ff6b6b'; setTimeout(() => inp.style.borderColor = '', 800); return; }
       if (r.same) { say('已经是：' + name); setFold(true); return; }
 
