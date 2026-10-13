@@ -2,8 +2,8 @@
 // @name         Insta360 项目概览
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      3.10.0
-// @description  项目卡片统计与返修/返工入口 + 共享缓存的渐进式人员扫描 + 可靠分页和完整性检查
+// @version      3.11.1
+// @description  项目卡片统计 + 服务端筛选提速的返修/返工人员扫描 + 分页恢复 + 入口显示开关
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
@@ -37,8 +37,10 @@
     settingsKey: 'insta360-overview-fields-v2',
     fastMode: true,
     detailConcurrency: 2,
+    taskPageSizePreferred: 500,
     taskPageSize: 100,
     taskPageConcurrency: 20,
+    taskGlobalConcurrency: 8,
     taskUnknownPageConcurrency: 4,
     taskPageRetries: 2,
     taskRowsCacheTtlMs: 60 * 1000,
@@ -66,6 +68,17 @@
   var SELECTED_KEY = 'insta360-overview-selected-v1';
   var ONLY_SELECTED_KEY = 'insta360-overview-only-selected-v1';
   var TASK_ANNOTATOR_MAP_KEY = 'insta360-overview-task-annotator-map-v1';
+  var REPAIR_TOOL_VISIBLE_KEY = 'insta360-overview-repair-tool-visible-v1';
+
+  function repairToolVisibleFromStoredValue(value) { return value !== '0'; }
+  function loadRepairToolVisible() {
+    try { return repairToolVisibleFromStoredValue(localStorage.getItem(REPAIR_TOOL_VISIBLE_KEY)); }
+    catch (e) { return true; }
+  }
+  function saveRepairToolVisible(value) {
+    try { localStorage.setItem(REPAIR_TOOL_VISIBLE_KEY, value ? '1' : '0'); } catch (e) {}
+  }
+  var repairToolVisible = loadRepairToolVisible();
 
   var USER_ID_NAME_MAP = {
     '4': '杰', '5': '敏', '6': '王小芳-已停用', '7': '文禄艳', '8': '何薇',
@@ -479,6 +492,7 @@
   Pool.prototype.next = function () { if (this.active < this.limit && this.queue.length) this.queue.shift()(); };
   var detailPool = new Pool(CONFIG.detailConcurrency);
   var repairPool = new Pool(CONFIG.repairConcurrency);
+  var taskPagePool = new Pool(CONFIG.taskGlobalConcurrency);
 
   var STATUS_SET = {};
   for (var si = 0; si < STATUS_CODES.length; si++) STATUS_SET[STATUS_CODES[si]] = true;
@@ -641,10 +655,18 @@
       var res = await fetch(url, { credentials: 'include', headers: { Accept: 'application/json' }, signal: controller.signal });
       clearTimeout(timeoutId);
       if (res.status === 401) throw new Error('登录状态已失效');
-      if (!res.ok) throw new Error('HTTP ' + res.status);
+      if (!res.ok) {
+        var message = 'HTTP ' + res.status;
+        if (res.status === 429) message += '：请求过于频繁';
+        else if (res.status >= 500) message += '：服务器暂时不可用';
+        var httpError = new Error(message);
+        httpError.httpStatus = res.status;
+        throw httpError;
+      }
       return res.json();
     } catch (e) {
       clearTimeout(timeoutId);
+      if (e && e.name === 'AbortError') throw new Error('请求超时（20 秒）');
       throw e;
     }
   }
@@ -712,15 +734,19 @@
     for (var attempt = 0; attempt <= CONFIG.taskPageRetries; attempt++) {
       try {
         var url = apiUrl(CONFIG.taskPath, Object.assign({ page: page }, baseParams));
-        return await getJson(url);
+        return await taskPagePool.run(function() { return getJson(url); });
       } catch (e) {
         lastError = e;
+        if (e && (e.httpStatus === 401 || (e.httpStatus >= 400 && e.httpStatus < 500 && e.httpStatus !== 429))) break;
         if (attempt < CONFIG.taskPageRetries) {
-          await new Promise(function(resolve) { setTimeout(resolve, 150 * (attempt + 1)); });
+          await new Promise(function(resolve) { setTimeout(resolve, 200 * Math.pow(2, attempt)); });
         }
       }
     }
-    throw new Error('任务读取不完整：第 ' + page + ' 页读取失败（' + String(lastError) + '）');
+    var pageError = new Error('任务读取不完整：第 ' + page + ' 页读取失败（' + String(lastError) + '）');
+    pageError.httpStatus = lastError && lastError.httpStatus;
+    pageError.taskPage = page;
+    throw pageError;
   }
   async function loadProjectSummary(projectId) {
     var body = await getJson(apiUrl(CONFIG.projectPath, { ids: projectId, page_size: 1 }));
@@ -736,9 +762,12 @@
     return agg;
   }
 
-  // 全量拉取：使用站点支持的分页尺寸；无总数时继续读取到最后一页。
-  async function loadTasks(projectId, workspaceId) {
-    var baseParams = { project: projectId, workspace: workspaceId, page_size: CONFIG.taskPageSize };
+  // 分页拉取：支持附加 Data Manager 查询；无总数时继续读取到最后一页。
+  async function loadTasksPaged(projectId, workspaceId, extraParams, pageSize, firstPageValidator) {
+    var baseParams = Object.assign(
+      { project: projectId, workspace: workspaceId, page_size: pageSize },
+      extraParams || {}
+    );
     var firstBody = await loadTaskPage(1, baseParams);
     var firstRows = rowsFromResponse(firstBody);
     var rows = [];
@@ -746,6 +775,7 @@
     appendUniqueTaskRows(rows, seen, firstRows);
     var effectiveSize = firstRows.length || CONFIG.taskPageSize;
     var total = totalFromResponse(firstBody);
+    if (firstPageValidator) firstPageValidator({ body: firstBody, rows: firstRows, total: total });
     if (!firstRows.length || total === 0 || (total != null && rows.length >= total)) return rows;
 
     if (total != null) {
@@ -753,17 +783,56 @@
       var pageList = [];
       for (var p = 2; p <= pageCount; p++) pageList.push(p);
       var queue = pageList.slice();
+      var pageErrors = [];
       var concurrency = Math.max(1, Math.min(CONFIG.taskPageConcurrency, pageCount - 1));
       async function worker() {
         while (queue.length) {
           var page = queue.shift();
-          var body = await loadTaskPage(page, baseParams);
-          appendUniqueTaskRows(rows, seen, rowsFromResponse(body));
+          try {
+            var body = await loadTaskPage(page, baseParams);
+            appendUniqueTaskRows(rows, seen, rowsFromResponse(body));
+          } catch (e) {
+            pageErrors.push(e);
+          }
         }
       }
       var workers = [];
       for (var w = 0; w < concurrency; w++) workers.push(worker());
       await Promise.all(workers);
+
+      if (pageErrors.length) {
+        var unrecoverable = null;
+        for (var pe = 0; pe < pageErrors.length; pe++) {
+          if (pageErrors[pe].httpStatus !== 404 || pageErrors[pe].taskPage <= 1) {
+            unrecoverable = pageErrors[pe];
+            break;
+          }
+        }
+        if (unrecoverable) throw unrecoverable;
+
+        // Data Manager 的筛选视图可能在并发读取期间重建，短暂令末页返回 404。
+        // 重新确认第一页与总数，并顺序重拉，避免把两次分页快照拼在一起。
+        var refreshedFirstBody = await loadTaskPage(1, baseParams);
+        var refreshedFirstRows = rowsFromResponse(refreshedFirstBody);
+        var refreshedTotal = totalFromResponse(refreshedFirstBody);
+        if (firstPageValidator) {
+          firstPageValidator({ body: refreshedFirstBody, rows: refreshedFirstRows, total: refreshedTotal });
+        }
+        if (refreshedTotal == null) throw pageErrors[0];
+
+        rows = [];
+        seen = {};
+        appendUniqueTaskRows(rows, seen, refreshedFirstRows);
+        effectiveSize = refreshedFirstRows.length || CONFIG.taskPageSize;
+        total = refreshedTotal;
+        if (!refreshedFirstRows.length || total === 0 || rows.length >= total) return rows;
+
+        pageCount = Math.ceil(total / effectiveSize);
+        for (var rp = 2; rp <= pageCount; rp++) {
+          var refreshedBody = await loadTaskPage(rp, baseParams);
+          appendUniqueTaskRows(rows, seen, rowsFromResponse(refreshedBody));
+        }
+      }
       if (rows.length < total) {
         throw new Error('任务读取不完整：接口显示共 ' + total + ' 条，实际只读取到 ' + rows.length + ' 条');
       }
@@ -796,6 +865,77 @@
     }
   }
 
+  function shouldFallbackTaskPageSize(error) {
+    return !!error && (error.httpStatus === 400 || error.httpStatus === 413 || error.httpStatus === 422);
+  }
+
+  async function loadTasksWithParams(projectId, workspaceId, extraParams, firstPageValidator) {
+    var preferred = CONFIG.taskPageSizePreferred || CONFIG.taskPageSize;
+    try {
+      return await loadTasksPaged(projectId, workspaceId, extraParams, preferred, firstPageValidator);
+    } catch (e) {
+      if (preferred === CONFIG.taskPageSize || !shouldFallbackTaskPageSize(e)) throw e;
+      return loadTasksPaged(projectId, workspaceId, extraParams, CONFIG.taskPageSize, firstPageValidator);
+    }
+  }
+
+  async function loadTasks(projectId, workspaceId) {
+    return loadTasksWithParams(projectId, workspaceId, null, null);
+  }
+
+  function buildPendingTaskQuery() {
+    return JSON.stringify({
+      filters: {
+        conjunction: 'or',
+        items: ['REVIEWED_REJECTED', 'REWORK'].map(function(value) {
+          return {
+            filter: 'filter:tasks:state',
+            operator: 'equal',
+            value: value,
+            type: 'String'
+          };
+        })
+      },
+      ordering: [],
+      hiddenColumns: {}
+    });
+  }
+
+  function pendingTaskRows(rows) {
+    return rows.filter(function(row) {
+      var state = taskStatusOf(row);
+      return isRepairState(state) || isReworkState(state);
+    });
+  }
+
+  async function loadPendingTasks(projectId, workspaceId, pendingHint) {
+    try {
+      var filtered = await loadTasksWithParams(
+        projectId,
+        workspaceId,
+        { query: buildPendingTaskQuery() },
+        function(info) {
+          if (info.rows.some(function(row) {
+            var state = taskStatusOf(row);
+            return !isRepairState(state) && !isReworkState(state);
+          })) {
+            throw new Error('服务端未应用待返修/返工筛选');
+          }
+          if (info.total === 0 && Number(pendingHint) > 0) {
+            throw new Error('服务端筛选结果与卡片待处理数量不一致');
+          }
+        }
+      );
+      if (filtered.length !== pendingTaskRows(filtered).length) {
+        throw new Error('服务端筛选返回了非待处理任务');
+      }
+      return filtered;
+    } catch (filteredError) {
+      log('待处理任务筛选不可用，回退全量扫描', projectId, filteredError);
+      return pendingTaskRows(await loadTasks(projectId, workspaceId));
+    }
+  }
+
   var taskRowsCache = {};
   var taskRowsInflight = {};
 
@@ -823,6 +963,32 @@
     });
 
     taskRowsInflight[key] = promise;
+    return promise;
+  }
+
+  var pendingTaskRowsCache = {};
+  var pendingTaskRowsInflight = {};
+
+  function clearPendingTaskRowsCache(projectId, workspaceId) {
+    delete pendingTaskRowsCache[taskRowsCacheKey(projectId, workspaceId)];
+  }
+
+  async function loadPendingTasksShared(projectId, workspaceId, pendingHint, forceRefresh) {
+    var key = taskRowsCacheKey(projectId, workspaceId);
+    if (forceRefresh) delete pendingTaskRowsCache[key];
+
+    var cached = pendingTaskRowsCache[key];
+    if (cached && Date.now() - cached.ts < CONFIG.taskRowsCacheTtlMs) return cached.rows;
+    if (pendingTaskRowsInflight[key]) return pendingTaskRowsInflight[key];
+
+    var promise = loadPendingTasks(projectId, workspaceId, pendingHint).then(function(rows) {
+      pendingTaskRowsCache[key] = { ts: Date.now(), rows: rows };
+      return rows;
+    }).finally(function() {
+      delete pendingTaskRowsInflight[key];
+    });
+
+    pendingTaskRowsInflight[key] = promise;
     return promise;
   }
 
@@ -895,7 +1061,14 @@
 
     var p = (async function () {
       try {
-        var rows = await loadTasksShared(ctx.projectId, ctx.workspaceId, !!force);
+        var entry = cache[ctx.projectId];
+        var counts = entry && entry.aggregate && entry.aggregate.counts;
+        var rows = await loadPendingTasksShared(
+          ctx.projectId,
+          ctx.workspaceId,
+          pendingCountFromCounts(counts),
+          !!force
+        );
         var n = 0;
         for (var i = 0; i < rows.length; i++) {
           var st = taskStatusOf(rows[i]);
@@ -1353,6 +1526,17 @@
     hideAllBtnEl = hideAllBtn;
     updateHideAllBtn();
 
+    function applyRepairToolVisibility() {
+      if (!repairBtn) return;
+      repairBtn.hidden = !repairToolVisible;
+      if (!repairToolVisible) {
+        repairBtn.classList.remove('is-open');
+        var repairPanel = toolbar.querySelector('.ovw-repair-panel');
+        if (repairPanel) repairPanel.hidden = true;
+      }
+    }
+    applyRepairToolVisibility();
+
     if (repairBtn) {
       repairBtn.addEventListener('click', function (e) {
         e.stopPropagation();
@@ -1362,6 +1546,26 @@
 
     function renderList() {
       listEl.innerHTML = '';
+      var featureRow = document.createElement('label');
+      featureRow.className = 'ovw-toolbar__item ovw-toolbar__item--feature';
+      var featureCb = document.createElement('input');
+      featureCb.type = 'checkbox';
+      featureCb.className = 'ovw-toolbar__switch-input';
+      featureCb.checked = repairToolVisible;
+      var featureTrack = document.createElement('span');
+      featureTrack.className = 'ovw-toolbar__switch';
+      var featureText = document.createElement('span');
+      featureText.textContent = '显示待返修/返工';
+      featureCb.addEventListener('change', function () {
+        repairToolVisible = !!featureCb.checked;
+        saveRepairToolVisible(repairToolVisible);
+        applyRepairToolVisibility();
+      });
+      featureRow.appendChild(featureCb);
+      featureRow.appendChild(featureTrack);
+      featureRow.appendChild(featureText);
+      listEl.appendChild(featureRow);
+
       for (var i = 0; i < FIELD_DEFS.length; i++) {
         var def = FIELD_DEFS[i];
         var row = document.createElement('label');
@@ -1411,11 +1615,16 @@
 
   var repairCache = {};
 
-  function repairScanPriorityFromCounts(counts) {
-    if (!counts || typeof counts !== 'object') return 1;
-    var pending = (Number(counts.REVIEWED_REJECTED) || 0)
+  function pendingCountFromCounts(counts) {
+    if (!counts || typeof counts !== 'object') return null;
+    return (Number(counts.REVIEWED_REJECTED) || 0)
       + (Number(counts.REWORK) || 0)
       + (Number(counts.REPAIR) || 0);
+  }
+
+  function repairScanPriorityFromCounts(counts) {
+    if (!counts || typeof counts !== 'object') return 1;
+    var pending = pendingCountFromCounts(counts);
     return pending > 0 ? 0 : 2;
   }
 
@@ -1561,11 +1770,13 @@
     var entry = cache[ctx.projectId];
     var agg = entry && entry.aggregate;
     var cardRejected = 0;
+    var pendingHint = null;
     if (agg && agg.counts) {
       var n1 = Number(agg.counts.REVIEWED_REJECTED) || 0;
       var n2 = Number(agg.counts.REWORK) || 0;
       var n3 = Number(agg.counts.REPAIR) || 0;
       cardRejected = n1;
+      pendingHint = n1 + n2 + n3;
       if (!n1 && !n2 && !n3) {
         var emptyResult = {
           workspaceId: ctx.workspaceId,
@@ -1583,7 +1794,7 @@
     // ★ v3.8.9 全量拉取任务，客户端过滤
     var rows;
     try {
-      rows = await loadTasksShared(ctx.projectId, ctx.workspaceId, !!forceRefresh);
+      rows = await loadPendingTasksShared(ctx.projectId, ctx.workspaceId, pendingHint, !!forceRefresh);
     } catch (e) {
       return {
         workspaceId: ctx.workspaceId,
@@ -1754,14 +1965,9 @@
     var count = Number(item[kind + 'TaskCount']) || 0;
     var people = item[kind] || [];
     var ids = item[kind + 'TaskIds'] || [];
-    var url = buildProjectDataUrl(item, mode);
     var html = '<div class="ovw-repair-lane ovw-repair-lane--' + mode + '">';
     html += '<div class="ovw-repair-lane-head">';
-    if (url) {
-      html += '<a class="ovw-repair-tag ovw-repair-tag--' + mode + '" href="' + escapeHtml(url) + '">' + label + '</a>';
-    } else {
-      html += '<span class="ovw-repair-tag ovw-repair-tag--' + mode + '">' + label + '</span>';
-    }
+    html += '<span class="ovw-repair-tag ovw-repair-tag--' + mode + '">' + label + '</span>';
     html += '<span class="ovw-repair-lane-count">' + count + ' 条</span>';
     html += '</div>';
 
@@ -1799,12 +2005,23 @@
     return html;
   }
 
+  function repairFailureHtml(item) {
+    var name = item && item.name ? item.name : ('项目 ' + ((item && item.projectId) || '未知'));
+    var message = String((item && item.error) || '未知错误').replace(/^Error:\s*/, '');
+    var html = '<div class="ovw-repair-failure">';
+    html += '<strong>' + escapeHtml(name) + '</strong>';
+    html += '<span>' + escapeHtml(message) + '</span>';
+    html += '</div>';
+    return html;
+  }
+
   function renderRepairResults(bodyEl, results, scanTotal, done, complete) {
     if (!bodyEl) return;
     var valid = results.filter(function(r) { return r; });
     var withTask = valid.filter(function(r) { return !r.empty && !r.error; });
+    var failures = valid.filter(function(r) { return r.error; });
     var emptyCount = valid.filter(function(r) { return r.empty; }).length;
-    var errorCount = valid.filter(function(r) { return r.error; }).length;
+    var errorCount = failures.length;
     var html = '<div class="ovw-repair-sum">';
     html += '<span>已完成 ' + done + '/' + scanTotal + '</span>';
     html += '<span>待处理项目 ' + withTask.length + '</span>';
@@ -1812,11 +2029,12 @@
     if (errorCount) html += '<span class="ovw-repair-err">读取失败 ' + errorCount + '</span>';
     html += '</div>';
 
+    for (var f = 0; f < failures.length; f++) html += repairFailureHtml(failures[f]);
     for (var i = 0; i < withTask.length; i++) html += repairProjectHtml(withTask[i]);
 
     if (!complete && done < scanTotal) {
       html += '<div class="ovw-repair-loading">正在扫描，剩余 ' + (scanTotal - done) + ' 个项目</div>';
-    } else if (!withTask.length) {
+    } else if (!withTask.length && !errorCount) {
       html += '<div class="ovw-repair-empty">当前范围内没有待返修或待返工任务</div>';
     }
     bodyEl.innerHTML = html;
@@ -1848,6 +2066,7 @@
         delete repairCache[refreshCtx.projectId];
         delete reworkTotalCache[refreshCtx.projectId];
         clearTaskRowsCache(refreshCtx.projectId, refreshCtx.workspaceId);
+        clearPendingTaskRowsCache(refreshCtx.projectId, refreshCtx.workspaceId);
       }
     }
 
@@ -2088,6 +2307,7 @@
 
     '.ovw-toolbar{position:relative;display:inline-block;vertical-align:middle;margin-left:8px;font:14px/1.5 Roboto,Arial,sans-serif;white-space:nowrap;flex:0 0 auto;}',
     '.ovw-toolbar__btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;margin-left:8px;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:rgba(0,0,0,.88);cursor:pointer;font-size:13px;line-height:1;white-space:nowrap;transition:all .15s ease;font-family:inherit;}',
+    '.ovw-toolbar__btn[hidden]{display:none!important;}',
     '.ovw-toolbar__btn:hover,.ovw-toolbar__btn.is-open{color:#1677ff;border-color:#1677ff;background:rgba(22,119,255,.03);}',
     '.ovw-toolbar__panel{position:absolute;top:calc(100% + 6px);right:0;z-index:1000000;min-width:320px;padding:0;border:1px solid rgba(0,0,0,.06);border-radius:10px;background:#fff;box-shadow:0 8px 28px rgba(0,0,0,.13);overflow:hidden;}',
     '.ovw-toolbar__panel-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 14px 8px;font-size:12px;color:#8c8c8c;border-bottom:1px solid rgba(0,0,0,.04);}',
@@ -2102,6 +2322,13 @@
     '.ovw-toolbar__panel-list{max-height:340px;overflow-y:auto;padding:4px 0;}',
     '.ovw-toolbar__item{display:flex;align-items:center;gap:9px;padding:7px 14px;cursor:pointer;font-size:13px;color:rgba(0,0,0,.88);}',
     '.ovw-toolbar__item:hover{background:rgba(22,119,255,.05);}',
+    '.ovw-toolbar__item--feature{padding-top:10px;padding-bottom:10px;border-bottom:1px solid rgba(0,0,0,.06);}',
+    '.ovw-toolbar__switch-input{position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;}',
+    '.ovw-toolbar__switch{position:relative;display:inline-block;width:32px;height:18px;border-radius:9px;background:#bfbfbf;box-shadow:inset 0 0 0 1px rgba(0,0,0,.04);transition:background .15s ease;flex:0 0 32px;}',
+    '.ovw-toolbar__switch::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.25);transition:transform .15s ease;}',
+    '.ovw-toolbar__switch-input:checked+.ovw-toolbar__switch{background:#1677ff;}',
+    '.ovw-toolbar__switch-input:checked+.ovw-toolbar__switch::after{transform:translateX(14px);}',
+    '.ovw-toolbar__switch-input:focus-visible+.ovw-toolbar__switch{outline:2px solid rgba(22,119,255,.3);outline-offset:2px;}',
     '.ovw-toolbar__dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:0 0 8px;}',
 
     '.ovw-global-toggle{display:inline-flex;align-items:center;height:32px;padding:0 14px;margin-left:8px;border:1px solid #1677ff;border-radius:6px;background:#1677ff;color:#fff;cursor:pointer;font-size:13px;font-family:inherit;white-space:nowrap;flex:0 0 auto;transition:all .15s ease;}',
@@ -2134,6 +2361,9 @@
     '.ovw-repair-refresh:hover{color:#0958d9;}',
     '.ovw-repair-sum{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:0 0 8px;margin-bottom:2px;border-bottom:1px solid rgba(0,0,0,.06);font-size:12px;color:#595959;}',
     '.ovw-repair-sum>span:first-child{font-weight:600;color:rgba(0,0,0,.88);}',
+    '.ovw-repair-failure{display:grid;grid-template-columns:minmax(120px,auto) minmax(0,1fr);gap:10px;padding:9px 0;border-bottom:1px solid rgba(255,77,79,.14);font-size:12px;line-height:1.45;color:#cf1322;}',
+    '.ovw-repair-failure strong{min-width:0;color:rgba(0,0,0,.88);font-weight:600;overflow-wrap:anywhere;}',
+    '.ovw-repair-failure span{min-width:0;overflow-wrap:anywhere;}',
     '.ovw-repair-empty{padding:28px 0;text-align:center;color:#52c41a;font-size:13px;}',
     '.ovw-repair-empty--warn{color:#fa8c16;}',
     '.ovw-repair-item{padding:11px 0 12px;border-bottom:1px solid rgba(0,0,0,.06);}',
@@ -2155,7 +2385,7 @@
     '.ovw-repair-person b{font-size:10.5px;font-weight:600;color:#8c8c8c;font-variant-numeric:tabular-nums;}',
     '.ovw-repair-none{min-width:0;color:#bfbfbf;font-size:12px;overflow-wrap:anywhere;}',
     '.ovw-copy-id{cursor:pointer;text-decoration:underline;}',
-    '@media (max-width:640px){.ovw-repair-panel{right:-8px;width:calc(100vw - 24px);padding:11px 12px;}.ovw-repair-grid{grid-template-columns:minmax(0,1fr);gap:9px;}.ovw-repair-lane{padding-right:0;}.ovw-repair-lane+.ovw-repair-lane{padding:9px 0 0;border-left:0;border-top:1px solid rgba(0,0,0,.06);}}'
+    '@media (max-width:640px){.ovw-repair-panel{right:-8px;width:calc(100vw - 24px);padding:11px 12px;}.ovw-repair-failure{grid-template-columns:minmax(0,1fr);gap:3px;}.ovw-repair-grid{grid-template-columns:minmax(0,1fr);gap:9px;}.ovw-repair-lane{padding-right:0;}.ovw-repair-lane+.ovw-repair-lane{padding:9px 0 0;border-left:0;border-top:1px solid rgba(0,0,0,.06);}}'
   ].join('');
 
   function addStyle() {
@@ -2424,6 +2654,10 @@
     document.querySelectorAll('.ovw-card--sel').forEach(function (el) { el.classList.remove('ovw-card--sel'); });
     cache = {};
     repairCache = {};
+    taskRowsCache = {};
+    taskRowsInflight = {};
+    pendingTaskRowsCache = {};
+    pendingTaskRowsInflight = {};
     reworkTotalCache = {};
     reworkTotalInflight = {};
     hideAllBtnEl = null;
