@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Insta360 项目概览（测试）
+// @name         Insta360 项目概览
 // @namespace    https://label.insta360.com/
 // @author       chengzi
 // @version      3.11.4
-// @description  项目卡片统计 + 自动补全人员姓名 + 服务端筛选提速 + 分页恢复 + 入口显示开关
+// @description  项目卡片统计
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
