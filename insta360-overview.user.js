@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Insta360 项目概览
+// @name         Insta360 项目概览（测试）
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      3.11.1
-// @description  项目卡片统计 + 服务端筛选提速的返修/返工人员扫描 + 分页恢复 + 入口显示开关
+// @version      3.11.4
+// @description  项目卡片统计 + 自动补全人员姓名 + 服务端筛选提速 + 分页恢复 + 入口显示开关
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
@@ -34,6 +34,7 @@
     cacheTtlMs: 60 * 1000,
     projectPath: '/api/projects',
     taskPath: '/api/dm/tasks',
+    userPath: '/api/users',
     settingsKey: 'insta360-overview-fields-v2',
     fastMode: true,
     detailConcurrency: 2,
@@ -182,6 +183,107 @@
       return n ? n : s;
     }
     return s;
+  }
+
+  var userDirectoryLoaded = false;
+  var userDirectoryInflight = null;
+  var projectUserDirectoryLoaded = {};
+  var projectUserDirectoryInflight = {};
+
+  function userDirectoryName(user) {
+    if (!user || typeof user !== 'object') return '';
+    var fullName = '';
+    if (user.first_name != null || user.last_name != null) {
+      fullName = (String(user.first_name || '') + String(user.last_name || '')).trim();
+    }
+    return fullName || user.name || user.displayName || user.display_name ||
+      user.nickname || user.username || user.email || user.login || '';
+  }
+
+  function mergeUserDirectory(body) {
+    var rows = Array.isArray(body) ? body : [];
+    if (!rows.length && body && typeof body === 'object') {
+      rows = body.results || body.users || body.items || body.data || [];
+    }
+    if (!Array.isArray(rows)) return 0;
+    var added = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var record = rows[i];
+      if (!record || typeof record !== 'object') continue;
+      var user = record.user && typeof record.user === 'object' ? record.user : record;
+      var id = user.id;
+      if (id == null) id = user.user_id;
+      if (id == null) id = record.user_id;
+      var name = userDirectoryName(user);
+      if (id == null || !name) continue;
+      USER_ID_NAME_MAP[String(id)] = String(name).trim();
+      added++;
+    }
+    return added;
+  }
+
+  function currentOrganizationId() {
+    var settings = window.APP_SETTINGS || {};
+    var user = settings.user || {};
+    return user.organizationID || user.organization_id || settings.organizationID || settings.organization_id || null;
+  }
+
+  function loadUserDirectory() {
+    if (userDirectoryLoaded) return Promise.resolve(0);
+    if (userDirectoryInflight) return userDirectoryInflight;
+    userDirectoryInflight = (async function () {
+      var requests = [apiUrl(CONFIG.userPath, { page: 1, page_size: -1 })];
+      var organizationId = currentOrganizationId();
+      if (organizationId != null) {
+        requests.push(apiUrl('/api/organizations/' + encodeURIComponent(organizationId) + '/memberships', {
+          page: 1, page_size: -1, active: true, pending: false
+        }));
+      }
+      var lastError = null;
+      for (var i = 0; i < requests.length; i++) {
+        try {
+          var added = mergeUserDirectory(await getJson(requests[i]));
+          if (added > 0) {
+            userDirectoryLoaded = true;
+            return added;
+          }
+        } catch (e) {
+          lastError = e;
+        }
+      }
+      userDirectoryLoaded = true;
+      if (lastError) log('用户目录读取失败', lastError);
+      return 0;
+    })().then(function (count) {
+      userDirectoryInflight = null;
+      return count;
+    }, function (error) {
+      userDirectoryInflight = null;
+      userDirectoryLoaded = true;
+      log('用户目录读取失败', error);
+      return 0;
+    });
+    return userDirectoryInflight;
+  }
+
+  function loadProjectUserDirectory(projectId) {
+    var key = String(projectId || '');
+    if (!key || projectUserDirectoryLoaded[key]) return Promise.resolve(0);
+    if (projectUserDirectoryInflight[key]) return projectUserDirectoryInflight[key];
+    projectUserDirectoryInflight[key] = getJson(apiUrl('/api/projects/' + encodeURIComponent(key) + '/members', {
+      active: true
+    })).then(function(body) {
+      projectUserDirectoryLoaded[key] = true;
+      return mergeUserDirectory(body);
+    }).catch(function(error) {
+      projectUserDirectoryLoaded[key] = true;
+      log('项目成员目录读取失败', key, error);
+      return 0;
+    }).then(function(count) {
+      delete projectUserDirectoryInflight[key];
+      return count;
+    });
+    return projectUserDirectoryInflight[key];
   }
 
   // ========== 数据页 DOM 抓取 ==========
@@ -1230,7 +1332,7 @@
   function counterActionForKey(key) {
     if (key === 'REPAIR') return { type: 'stream', mode: 'repair' };
     if (key === 'REWORK') return { type: 'stream', mode: 'rework' };
-    if (key === 'reworkTotal') return null;
+    if (key === 'reworkTotal') return { type: 'filter', code: 'REWORK' };
     if (FILTERABLE[key]) return { type: 'filter', code: key };
     return null;
   }
@@ -1761,6 +1863,7 @@
           repair: d.repair, rework: d.rework,
           repairTaskCount: d.repairTaskCount, reworkTaskCount: d.reworkTaskCount,
           repairTaskIds: d.repairTaskIds, reworkTaskIds: d.reworkTaskIds,
+          repairUnknownTaskIds: d.repairUnknownTaskIds, reworkUnknownTaskIds: d.reworkUnknownTaskIds,
           cardRejected: d.cardRejected,
           empty: d.empty, error: d.error
         };
@@ -1784,6 +1887,7 @@
           repair: [], rework: [], empty: true,
           repairTaskCount: 0, reworkTaskCount: 0,
           repairTaskIds: [], reworkTaskIds: [],
+          repairUnknownTaskIds: [], reworkUnknownTaskIds: [],
           cardRejected: 0
         };
         repairCache[ctx.projectId] = { ts: Date.now(), data: emptyResult };
@@ -1794,7 +1898,11 @@
     // ★ v3.8.9 全量拉取任务，客户端过滤
     var rows;
     try {
-      rows = await loadPendingTasksShared(ctx.projectId, ctx.workspaceId, pendingHint, !!forceRefresh);
+      var loaded = await Promise.all([
+        loadUserDirectory(),
+        loadPendingTasksShared(ctx.projectId, ctx.workspaceId, pendingHint, !!forceRefresh)
+      ]);
+      rows = loaded[1];
     } catch (e) {
       return {
         workspaceId: ctx.workspaceId,
@@ -1806,8 +1914,14 @@
       };
     }
 
+    var needsProjectDirectory = rows.some(function(task) {
+      return extractPeople(task).some(function(person) { return isNumericId(person); });
+    });
+    if (needsProjectDirectory) await loadProjectUserDirectory(ctx.projectId);
+
     var repairMap = {}, reworkMap = {};
     var repairTaskIds = [], reworkTaskIds = [];
+    var repairUnknownTaskIds = [], reworkUnknownTaskIds = [];
     var repairTaskCount = 0, reworkTaskCount = 0;
 
     var taskAnnotatorMap = loadTaskAnnotatorMap();
@@ -1821,11 +1935,14 @@
 
       var pp = extractPeople(t);
       var finalPeople = [];
+      var unresolvedPerson = pp.length === 0;
 
       for (var p = 0; p < pp.length; p++) {
         var person = pp[p];
         if (isNumericId(person) && taskId && taskAnnotatorMap[taskId]) {
           finalPeople.push(taskAnnotatorMap[taskId]);
+        } else if (isNumericId(person)) {
+          unresolvedPerson = true;
         } else {
           finalPeople.push(person);
         }
@@ -1833,6 +1950,7 @@
 
       if (finalPeople.length === 0 && taskId && taskAnnotatorMap[taskId]) {
         finalPeople.push(taskAnnotatorMap[taskId]);
+        unresolvedPerson = false;
       }
 
       var seenPeople = {};
@@ -1847,12 +1965,14 @@
       if (isRepairState(st)) {
         repairTaskCount++;
         if (repairTaskIds.length < 20) repairTaskIds.push(taskId || '(no-id)');
+        if (unresolvedPerson && repairUnknownTaskIds.length < 20) repairUnknownTaskIds.push(taskId || '(no-id)');
         for (var r = 0; r < uniquePeople.length; r++) {
           repairMap[uniquePeople[r]] = (repairMap[uniquePeople[r]] || 0) + 1;
         }
       } else if (isReworkState(st)) {
         reworkTaskCount++;
         if (reworkTaskIds.length < 20) reworkTaskIds.push(taskId || '(no-id)');
+        if (unresolvedPerson && reworkUnknownTaskIds.length < 20) reworkUnknownTaskIds.push(taskId || '(no-id)');
         for (var w = 0; w < uniquePeople.length; w++) {
           reworkMap[uniquePeople[w]] = (reworkMap[uniquePeople[w]] || 0) + 1;
         }
@@ -1873,6 +1993,8 @@
       reworkTaskCount: reworkTaskCount,
       repairTaskIds: repairTaskIds,
       reworkTaskIds: reworkTaskIds,
+      repairUnknownTaskIds: repairUnknownTaskIds,
+      reworkUnknownTaskIds: reworkUnknownTaskIds,
       cardRejected: cardRejected,
       empty: (repairTaskCount + reworkTaskCount) === 0
     };
@@ -1964,19 +2086,34 @@
     var mode = isRepair ? 'repair' : 'rework';
     var count = Number(item[kind + 'TaskCount']) || 0;
     var people = item[kind] || [];
+    var namedPeople = people.filter(function(x) {
+      return x && x.name != null && !isNumericId(x.name);
+    });
+    var namedCount = namedPeople.reduce(function(total, x) {
+      return total + (Number(x.count) || 0);
+    }, 0);
     var ids = item[kind + 'TaskIds'] || [];
+    var unknownIds = item[kind + 'UnknownTaskIds'] || [];
     var html = '<div class="ovw-repair-lane ovw-repair-lane--' + mode + '">';
     html += '<div class="ovw-repair-lane-head">';
     html += '<span class="ovw-repair-tag ovw-repair-tag--' + mode + '">' + label + '</span>';
     html += '<span class="ovw-repair-lane-count">' + count + ' 条</span>';
     html += '</div>';
 
-    if (people.length) {
-      html += '<div class="ovw-repair-people">' + people.map(function(x) {
+    if (namedPeople.length) {
+      html += '<div class="ovw-repair-people">' + namedPeople.map(function(x) {
         return '<span class="ovw-repair-person">' + escapeHtml(x.name) + '<b>' + x.count + '</b></span>';
       }).join('') + '</div>';
+      if (namedCount < count) {
+        var partialIds = unknownIds.slice(0, CONFIG.showTaskIdLimit).join(', ');
+        html += '<div class="ovw-repair-none">另有 ' + (count - namedCount) + ' 条未获取到姓名';
+        if (partialIds) {
+          html += '，任务 ID：<span class="ovw-copy-id" data-clipboard-text="' + escapeHtml(partialIds) + '">' + escapeHtml(partialIds) + '</span>';
+        }
+        html += '</div>';
+      }
     } else if (count > 0) {
-      var shownIds = ids.slice(0, CONFIG.showTaskIdLimit).join(', ');
+      var shownIds = (unknownIds.length ? unknownIds : ids).slice(0, CONFIG.showTaskIdLimit).join(', ');
       html += '<div class="ovw-repair-none">未获取到姓名';
       if (shownIds) {
         html += '，任务 ID：<span class="ovw-copy-id" data-clipboard-text="' + escapeHtml(shownIds) + '">' + escapeHtml(shownIds) + '</span>';
