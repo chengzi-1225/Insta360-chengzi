@@ -1,15 +1,15 @@
 // ==UserScript==
 // @name         Insta360 项目概览工具箱
 // @namespace    https://label.insta360.com/
-// @author       chengzi
-// @version      4.3.0
+// @author       chengzi / Codex
+// @version      4.4.1
 // @description  项目概览、项目权限、成员快速分配与卡片隐藏
 // @match        *://label.insta360.com/*
+// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
+// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
 // @run-at       document-idle
 // @grant        none
 // @noframes
-// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
-// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
 // ==/UserScript==
 
 /* MODULE: core */
@@ -136,6 +136,22 @@
     return Array.isArray(children) ? children.filter(Boolean) : [];
   }
 
+  function selectedContextKeys(button) {
+    var submenu = button && button.closest('.ovw-suite-project-submenu');
+    if (!submenu) return [];
+    return [].slice.call(submenu.querySelectorAll('[data-context-selectable][aria-checked="true"]')).map(function (selected) {
+      return selected.getAttribute('data-context-child');
+    });
+  }
+
+  function syncContextSubmitButtons(submenu) {
+    if (!submenu) return;
+    var hasSelection = Boolean(submenu.querySelector('[data-context-selectable][aria-checked="true"]'));
+    submenu.querySelectorAll('[data-context-submit]').forEach(function (button) {
+      button.disabled = !hasSelection;
+    });
+  }
+
   function ensureProjectContextMenu() {
     if (projectContextMenu && document.body.contains(projectContextMenu)) return;
     projectContextMenu = document.createElement('div');
@@ -156,8 +172,17 @@
       var selected = childKey
         ? children.find(function (child) { return String(child.key) === childKey; })
         : action;
+      if (selected && selected.selectable) {
+        var checked = button.getAttribute('aria-checked') === 'true';
+        button.setAttribute('aria-checked', checked ? 'false' : 'true');
+        button.classList.toggle('is-selected', !checked);
+        syncContextSubmitButtons(button.closest('.ovw-suite-project-submenu'));
+        return;
+      }
+      var selectedKeys = selected && selected.submitSelection ? selectedContextKeys(button) : [];
+      if (selected && selected.submitSelection && !selectedKeys.length) return;
       closeProjectContextMenu();
-      if (selected && typeof selected.onClick === 'function') selected.onClick(project, event);
+      if (selected && typeof selected.onClick === 'function') selected.onClick(project, event, selectedKeys);
     });
     document.body.appendChild(projectContextMenu);
   }
@@ -203,8 +228,22 @@
         childButton.dataset.contextAction = item.key;
         childButton.setAttribute('data-context-child', String(child.key));
         childButton.textContent = child.label || child.key;
+        if (child.selectable) {
+          var selected = child.selected !== false;
+          childButton.setAttribute('data-context-selectable', 'true');
+          childButton.setAttribute('role', 'menuitemcheckbox');
+          childButton.setAttribute('aria-checked', selected ? 'true' : 'false');
+          childButton.className = 'ovw-suite-project-selectable' + (selected ? ' is-selected' : '');
+        } else {
+          childButton.setAttribute('role', 'menuitem');
+        }
+        if (child.submitSelection) {
+          childButton.setAttribute('data-context-submit', 'true');
+          childButton.classList.add('ovw-suite-project-submit');
+        }
         submenu.appendChild(childButton);
       });
+      syncContextSubmitButtons(submenu);
       wrapper.appendChild(submenu);
       projectContextMenu.appendChild(wrapper);
     });
@@ -317,8 +356,10 @@
       '.ovw-suite-project-menu button:hover{background:#eff6ff;color:#1d4ed8}',
       '.ovw-suite-project-menu-item{position:relative}.ovw-suite-project-menu-item>button{display:flex;align-items:center;justify-content:space-between;width:100%;gap:18px}.ovw-suite-project-menu-parent span{font-size:16px;line-height:1;color:#94a3b8}',
       '.ovw-suite-project-submenu{position:absolute;display:none;top:-4px;left:calc(100% + 4px);min-width:170px;padding:4px;border:1px solid #dfe4ea;border-radius:6px;background:#fff;box-shadow:0 12px 30px rgba(15,23,42,.2)}',
-      '.ovw-suite-project-submenu button{display:block;width:100%}.ovw-suite-project-menu-item:hover>.ovw-suite-project-submenu,.ovw-suite-project-menu-item:focus-within>.ovw-suite-project-submenu,.ovw-suite-project-menu-item.is-expanded>.ovw-suite-project-submenu{display:block}',
+      '.ovw-suite-project-submenu button{display:flex;align-items:center;width:100%}.ovw-suite-project-menu-item:hover>.ovw-suite-project-submenu,.ovw-suite-project-menu-item:focus-within>.ovw-suite-project-submenu,.ovw-suite-project-menu-item.is-expanded>.ovw-suite-project-submenu{display:block}',
       '.ovw-suite-project-menu-item.opens-left>.ovw-suite-project-submenu{right:calc(100% + 4px);left:auto}',
+      '.ovw-suite-project-selectable{gap:8px}.ovw-suite-project-selectable:before{display:inline-flex;flex:0 0 15px;align-items:center;justify-content:center;box-sizing:border-box;width:15px;height:15px;border:1px solid #cbd5e1;border-radius:3px;background:#fff;color:#fff;font-size:11px;line-height:1;content:""}.ovw-suite-project-selectable[aria-checked="true"]:before{border-color:#2563eb;background:#2563eb;content:"✓"}',
+      '.ovw-suite-project-submit{justify-content:center;margin-top:4px;background:#2563eb!important;color:#fff!important;font-weight:650}.ovw-suite-project-submit:hover{background:#1d4ed8!important;color:#fff!important}.ovw-suite-project-submit:disabled{background:#e2e8f0!important;color:#94a3b8!important;cursor:not-allowed}',
     ].join('');
     document.head.appendChild(style);
   }
@@ -3358,7 +3399,8 @@
   function switchButton(field, item) {
     var button = document.createElement('button');
     var error = item.errors && item.errors[field];
-    var loading = item.loading || item.saving === field;
+    var savingFields = Array.isArray(item.saving) ? item.saving : [item.saving];
+    var loading = item.loading || savingFields.indexOf(field) !== -1;
     var value = item[field];
     var status = error ? 'error' : loading ? 'loading' : value === true ? 'on' : value === false ? 'off' : 'unknown';
     var label = field === 'reviewer' ? '审核员' : '标注员';
@@ -3591,10 +3633,36 @@
     }
   }
 
-  async function enableForProject(project, field) {
+  function buildEnablePatch(item, fields) {
+    var body = {};
+    var changedFields = [];
+    var seen = {};
+    (Array.isArray(fields) ? fields : [fields]).forEach(function (field) {
+      if (!FIELDS[field] || seen[field]) return;
+      seen[field] = true;
+      if (item[field] === true) return;
+      changedFields.push(field);
+      body[FIELDS[field]] = true;
+    });
+    return { fields: changedFields, body: body };
+  }
+
+  async function enableForProject(project, fields) {
     var item = ensureProjectState(project);
     if (!item) return;
     var id = String(project.id);
+    var requestedFields = [];
+    var seen = {};
+    (Array.isArray(fields) ? fields : [fields]).forEach(function (field) {
+      if (!FIELDS[field] || seen[field]) return;
+      seen[field] = true;
+      requestedFields.push(field);
+    });
+    if (!requestedFields.length) {
+      suite.toast('请至少选择一项权限', 'error');
+      return;
+    }
+    if (item.saving || bulk.field) return;
     if (item.loading && !pending.has(id)) {
       pending.add(id);
       try {
@@ -3603,7 +3671,39 @@
         pending.delete(id);
       }
     }
-    await setOne(id, field, true);
+    if (item.loading || item.error) {
+      suite.toast('读取项目权限失败，请稍后重试', 'error');
+      return;
+    }
+    var patch = buildEnablePatch(item, requestedFields);
+    if (!patch.fields.length) {
+      suite.toast(item.name + ' · 所选权限已经开启', 'success');
+      return;
+    }
+    var previous = {};
+    item.errors = item.errors || {};
+    patch.fields.forEach(function (field) {
+      previous[field] = item[field];
+      item[field] = true;
+      item.errors[field] = null;
+    });
+    item.saving = patch.fields.slice();
+    render();
+    try {
+      await patchProject(id, patch.body);
+      var labels = requestedFields.map(function (field) { return field === 'reviewer' ? '审核员' : '标注员'; });
+      suite.toast(item.name + ' · ' + labels.join('、') + '权限 已开启', 'success');
+    } catch (error) {
+      var message = String(error.message || error);
+      patch.fields.forEach(function (field) {
+        item[field] = previous[field];
+        item.errors[field] = message;
+      });
+      suite.toast('保存失败：' + message, 'error');
+    } finally {
+      item.saving = null;
+      render();
+    }
   }
 
   function ensurePanel() {
@@ -3685,8 +3785,9 @@
     suite.addProjectContextAction('project-permissions', {
       label: '项目权限',
       children: [
-        { key: 'reviewer-on', label: '开启审核员权限', onClick: function (project) { enableForProject(project, 'reviewer'); } },
-        { key: 'annotator-on', label: '开启标注员权限', onClick: function (project) { enableForProject(project, 'annotator'); } },
+        { key: 'reviewer', label: '审核员权限', selectable: true, selected: true },
+        { key: 'annotator', label: '标注员权限', selectable: true, selected: true },
+        { key: 'apply', label: '开启所选权限', submitSelection: true, onClick: function (project, event, fields) { enableForProject(project, fields); } },
         { key: 'panel', label: '打开权限面板', onClick: openForProject },
       ],
     });
