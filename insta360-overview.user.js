@@ -1,16 +1,294 @@
 // ==UserScript==
-// @name         Insta360 项目概览
+// @name         Insta360 项目概览工具箱
 // @namespace    https://label.insta360.com/
-// @author       chengzi
-// @version      3.11.4
-// @description  项目卡片统计
+// @author       chengzi / Codex
+// @version      4.1.0
+// @description  项目概览、项目权限、成员快速分配与卡片隐藏
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
 // @noframes
-// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
-// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
 // ==/UserScript==
+
+/* MODULE: core */
+(function () {
+  'use strict';
+
+  if (window.__INSTA360_SUITE__) return;
+
+  var modules = new Map();
+  var toolbarExtensions = new Map();
+  var FEATURE_SETTINGS_KEY = 'insta360-overview-features-v1';
+  var routeTimer = null;
+  var toastTimer = null;
+
+  function loadFeatureSettings() {
+    try {
+      var stored = JSON.parse(localStorage.getItem(FEATURE_SETTINGS_KEY) || '{}');
+      return stored && typeof stored === 'object' && !Array.isArray(stored) ? stored : {};
+    } catch (error) {
+      return {};
+    }
+  }
+
+  var featureSettings = loadFeatureSettings();
+
+  function featureEnabled(name) {
+    return featureSettings[name] !== false;
+  }
+
+  function setFeatureEnabled(name, value) {
+    featureSettings[name] = value !== false;
+    try { localStorage.setItem(FEATURE_SETTINGS_KEY, JSON.stringify(featureSettings)); } catch (error) {}
+    window.dispatchEvent(new CustomEvent('insta360-suite:feature-change', {
+      detail: { name: name, enabled: featureSettings[name] },
+    }));
+    sync();
+  }
+
+  function listPage() {
+    return /^\/workspaces\/[^/]+\/projects\/?$/.test(location.pathname);
+  }
+
+  function workspaceId() {
+    var match = location.pathname.match(/^\/workspaces\/([^/]+)/);
+    return match ? match[1] : null;
+  }
+
+  function csrfToken() {
+    var match = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+    if (match) return decodeURIComponent(match[1]);
+    var meta = document.querySelector('meta[name="csrf-token"]');
+    return meta ? meta.content : '';
+  }
+
+  async function api(path, options) {
+    options = options || {};
+    var headers = Object.assign({}, options.headers || {});
+    if (options.body != null && !headers['Content-Type']) headers['Content-Type'] = 'application/json';
+    var csrf = csrfToken();
+    if (csrf) headers['X-CSRFToken'] = csrf;
+    var response = await fetch(path, {
+      method: options.method || 'GET',
+      credentials: 'include',
+      headers: headers,
+      body: options.body == null || typeof options.body === 'string' ? options.body : JSON.stringify(options.body),
+    });
+    var text = await response.text();
+    if (!response.ok) throw new Error('HTTP ' + response.status + (text ? ' ' + text.slice(0, 180) : ''));
+    if (!text) return null;
+    try { return JSON.parse(text); } catch (e) { return text; }
+  }
+
+  function projectId(card) {
+    if (!card) return '';
+    if (card.dataset && (card.dataset.projectId || card.dataset.id)) {
+      return String(card.dataset.projectId || card.dataset.id);
+    }
+    var dataset = card.dataset || {};
+    for (var key in dataset) {
+      if (!Object.prototype.hasOwnProperty.call(dataset, key)) continue;
+      if (/project/i.test(key) && /^\d+$/.test(String(dataset[key]))) return String(dataset[key]);
+    }
+    var links = [];
+    var wrappingLink = card.closest && card.closest('a[href]');
+    if (wrappingLink) links.push(wrappingLink);
+    if (card.matches && card.matches('a[href]') && links.indexOf(card) === -1) links.push(card);
+    if (card.querySelectorAll) links = links.concat([].slice.call(card.querySelectorAll('a[href]')));
+    for (var i = 0; i < links.length; i++) {
+      var match = String(links[i].getAttribute('href') || '').match(/\/projects\/(\d+)/);
+      if (match) return match[1];
+    }
+    return '';
+  }
+
+  function projectName(card) {
+    if (!card) return '';
+    var selectors = ['.ls-project-card__title', '.ls-project-card__name', '[class*="project-card__title"]', 'h2', 'h3', 'h4'];
+    for (var i = 0; i < selectors.length; i++) {
+      var element = card.querySelector(selectors[i]);
+      var text = element && (element.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text) return text;
+    }
+    return '项目 #' + projectId(card);
+  }
+
+  function findSearchInput() {
+    var selectors = [
+      'input[type="search"]',
+      'input[placeholder*="搜索"]',
+      'input[placeholder*="项目名称"]',
+      'input[placeholder*="search" i]',
+    ];
+    for (var s = 0; s < selectors.length; s++) {
+      var list = document.querySelectorAll(selectors[s]);
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].offsetParent !== null || list[i].getClientRects().length) return list[i];
+      }
+    }
+    return null;
+  }
+
+  function overviewToolbar() {
+    return document.querySelector('.ovw-toolbar');
+  }
+
+  function addToolbarButton(key, options) {
+    toolbarExtensions.set(key, options);
+    return mountToolbarButton(key);
+  }
+
+  function removeToolbarButton(key) {
+    toolbarExtensions.delete(key);
+    document.querySelectorAll('[data-suite-tool="' + key + '"]').forEach(function (button) {
+      if (button.parentNode) button.parentNode.removeChild(button);
+    });
+  }
+
+  function mountToolbarButton(key) {
+    var options = toolbarExtensions.get(key);
+    if (!options || !listPage()) return null;
+    var toolbar = overviewToolbar();
+    if (!toolbar) return null;
+    var selector = '[data-suite-tool="' + key + '"]';
+    var existing = toolbar.querySelector(selector);
+    if (existing) {
+      if (options.badge) options.badge(existing);
+      return existing;
+    }
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'ovw-toolbar__btn ovw-suite-tool';
+    button.dataset.suiteTool = key;
+    button.title = options.title || options.label || key;
+    button.innerHTML = (options.icon || '') + '<span>' + escapeHtml(options.label || key) + '</span>' +
+      (options.badge ? '<span class="ovw-suite-tool__badge" hidden></span>' : '');
+    button.addEventListener('click', function (event) {
+      event.preventDefault();
+      event.stopPropagation();
+      options.onClick(button, event);
+    });
+    var panel = toolbar.querySelector('.ovw-toolbar__panel');
+    toolbar.insertBefore(button, panel || null);
+    if (options.badge) options.badge(button);
+    return button;
+  }
+
+  function refreshToolbarButtons() {
+    toolbarExtensions.forEach(function (_options, key) { mountToolbarButton(key); });
+  }
+
+  function escapeHtml(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, function (character) {
+      return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character];
+    });
+  }
+
+  function toast(message, type) {
+    var element = document.getElementById('ovw-suite-toast');
+    if (!element) {
+      element = document.createElement('div');
+      element.id = 'ovw-suite-toast';
+      document.body.appendChild(element);
+    }
+    element.className = 'ovw-suite-toast is-' + (type || 'info');
+    element.textContent = message;
+    element.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { element.hidden = true; }, 2600);
+  }
+
+  function injectCoreStyle() {
+    if (document.getElementById('ovw-suite-core-style')) return;
+    var style = document.createElement('style');
+    style.id = 'ovw-suite-core-style';
+    style.textContent = [
+      '.ovw-suite-tool{position:relative}',
+      '.ovw-suite-tool__badge{display:inline-flex;align-items:center;justify-content:center;min-width:15px;height:15px;padding:0 4px;border-radius:8px;background:#2563eb;color:#fff;font-size:9px;font-weight:700}',
+      '.ovw-suite-tool__badge[hidden]{display:none}',
+      '.ovw-suite-toast{position:fixed;top:18px;left:50%;transform:translateX(-50%);z-index:2147483647;max-width:min(560px,calc(100vw - 32px));padding:9px 14px;border:1px solid #dbe3ed;border-radius:7px;background:#fff;color:#334155;box-shadow:0 10px 30px rgba(15,23,42,.18);font:12.5px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}',
+      '.ovw-suite-toast.is-success{border-color:#86efac;background:#f0fdf4;color:#15803d}',
+      '.ovw-suite-toast.is-error{border-color:#fca5a5;background:#fef2f2;color:#b91c1c}',
+      '.ovw-suite-toast[hidden]{display:none}',
+    ].join('');
+    document.head.appendChild(style);
+  }
+
+  function register(name, module) {
+    modules.set(name, module);
+    syncModule(name, module);
+  }
+
+  function syncModule(name, module) {
+    try {
+      var shouldRun = !module.match || module.match(location);
+      if (shouldRun) {
+        if (!module.__active && module.mount) module.mount();
+        module.__active = true;
+        if (module.scan) module.scan();
+      } else if (module.__active) {
+        if (module.unmount) module.unmount();
+        module.__active = false;
+      }
+    } catch (error) {
+      console.error('[Insta360 Suite] module failed:', name, error);
+    }
+  }
+
+  function sync() {
+    injectCoreStyle();
+    modules.forEach(function (module, name) { syncModule(name, module); });
+    refreshToolbarButtons();
+  }
+
+  function scheduleSync() {
+    clearTimeout(routeTimer);
+    routeTimer = setTimeout(function () {
+      window.dispatchEvent(new CustomEvent('insta360-suite:route'));
+      sync();
+    }, 0);
+  }
+
+  ['pushState', 'replaceState'].forEach(function (method) {
+    var original = history[method];
+    if (typeof original !== 'function' || original.__insta360SuiteWrapped) return;
+    var wrapped = function () {
+      var result = original.apply(this, arguments);
+      scheduleSync();
+      return result;
+    };
+    wrapped.__insta360SuiteWrapped = true;
+    history[method] = wrapped;
+  });
+  window.addEventListener('popstate', scheduleSync);
+  window.addEventListener('hashchange', scheduleSync);
+  window.addEventListener('insta360-suite:overview-toolbar', refreshToolbarButtons);
+
+  window.__INSTA360_SUITE__ = {
+    addToolbarButton: addToolbarButton,
+    api: api,
+    csrfToken: csrfToken,
+    escapeHtml: escapeHtml,
+    featureEnabled: featureEnabled,
+    findSearchInput: findSearchInput,
+    listPage: listPage,
+    overviewToolbar: overviewToolbar,
+    projectId: projectId,
+    projectName: projectName,
+    refreshToolbarButtons: refreshToolbarButtons,
+    register: register,
+    removeToolbarButton: removeToolbarButton,
+    scheduleSync: scheduleSync,
+    setFeatureEnabled: setFeatureEnabled,
+    toast: toast,
+    workspaceId: workspaceId,
+  };
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', sync, { once: true });
+  else sync();
+})();
+
+/* MODULE: overview v3.11.4 */
 
 (function () {
   'use strict';
@@ -1607,7 +1885,7 @@
       '</button>' +
       '<div class="ovw-toolbar__panel" hidden>' +
         '<div class="ovw-toolbar__panel-head">' +
-          '<span>卡片显示</span>' +
+          '<span>功能与卡片显示</span>' +
           '<span class="ovw-toolbar__acts">' +
             '<button type="button" class="ovw-toolbar__closestat" title="已统计的卡片回到「点击统计本项目」">关闭已统计</button>' +
             '<button type="button" class="ovw-toolbar__hideall" title="所有卡片彻底不显示（含待点击态）">全部关闭</button>' +
@@ -1617,6 +1895,7 @@
         '<div class="ovw-toolbar__panel-list"></div>' +
       '</div>';
     host.parentElement.insertBefore(toolbar, host.nextSibling);
+    window.dispatchEvent(new CustomEvent('insta360-suite:overview-toolbar'));
     var btn = toolbar.querySelector('.ovw-toolbar__btn--fields');
     var repairBtn = toolbar.querySelector('.ovw-toolbar__btn--repair');
     var panel = toolbar.querySelector('.ovw-toolbar__panel');
@@ -1648,25 +1927,35 @@
 
     function renderList() {
       listEl.innerHTML = '';
-      var featureRow = document.createElement('label');
-      featureRow.className = 'ovw-toolbar__item ovw-toolbar__item--feature';
-      var featureCb = document.createElement('input');
-      featureCb.type = 'checkbox';
-      featureCb.className = 'ovw-toolbar__switch-input';
-      featureCb.checked = repairToolVisible;
-      var featureTrack = document.createElement('span');
-      featureTrack.className = 'ovw-toolbar__switch';
-      var featureText = document.createElement('span');
-      featureText.textContent = '显示待返修/返工';
-      featureCb.addEventListener('change', function () {
-        repairToolVisible = !!featureCb.checked;
+      function appendFeatureSwitch(label, checked, onChange) {
+        var featureRow = document.createElement('label');
+        featureRow.className = 'ovw-toolbar__item ovw-toolbar__item--feature';
+        var featureCb = document.createElement('input');
+        featureCb.type = 'checkbox';
+        featureCb.className = 'ovw-toolbar__switch-input';
+        featureCb.checked = checked;
+        var featureTrack = document.createElement('span');
+        featureTrack.className = 'ovw-toolbar__switch';
+        var featureText = document.createElement('span');
+        featureText.textContent = label;
+        featureCb.addEventListener('change', function () { onChange(!!featureCb.checked); });
+        featureRow.appendChild(featureCb);
+        featureRow.appendChild(featureTrack);
+        featureRow.appendChild(featureText);
+        listEl.appendChild(featureRow);
+      }
+
+      appendFeatureSwitch('显示待返修/返工', repairToolVisible, function (enabled) {
+        repairToolVisible = enabled;
         saveRepairToolVisible(repairToolVisible);
         applyRepairToolVisibility();
       });
-      featureRow.appendChild(featureCb);
-      featureRow.appendChild(featureTrack);
-      featureRow.appendChild(featureText);
-      listEl.appendChild(featureRow);
+      appendFeatureSwitch('显示项目权限', window.__INSTA360_SUITE__.featureEnabled('project-permissions'), function (enabled) {
+        window.__INSTA360_SUITE__.setFeatureEnabled('project-permissions', enabled);
+      });
+      appendFeatureSwitch('显示成员分配', window.__INSTA360_SUITE__.featureEnabled('member-assignment'), function (enabled) {
+        window.__INSTA360_SUITE__.setFeatureEnabled('member-assignment', enabled);
+      });
 
       for (var i = 0; i < FIELD_DEFS.length; i++) {
         var def = FIELD_DEFS[i];
@@ -2807,13 +3096,7 @@
     if (isDataPage()) { addStyle(); runDataPageFilterExecutor(); startDataScrapeObserver(); }
     else stopDataScrapeObserver();
   }
-  (function hookRouter() {
-    var op = history.pushState;
-    history.pushState = function () { var r = op.apply(this, arguments); setTimeout(checkRoute, 0); return r; };
-    var or = history.replaceState;
-    history.replaceState = function () { var r = or.apply(this, arguments); setTimeout(checkRoute, 0); return r; };
-    window.addEventListener('popstate', function () { setTimeout(checkRoute, 0); });
-  })();
+  window.addEventListener('insta360-suite:route', function () { setTimeout(checkRoute, 0); });
 
   if (DEBUG) {
     window.__OVW = {
@@ -2843,4 +3126,1331 @@
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', checkRoute, { once: true });
   else checkRoute();
+})();
+
+/* MODULE: project-permissions */
+(function () {
+  'use strict';
+
+  var suite = window.__INSTA360_SUITE__;
+  if (!suite) return;
+
+  var FIELDS = {
+    reviewer: 'show_tasks_to_reviewer',
+    annotator: 'show_tasks_to_annotator',
+  };
+  var state = new Map();
+  var pending = new Set();
+  var panel = null;
+  var entryButton = null;
+  var bulk = { field: null, done: 0, total: 0, failed: 0, changed: 0 };
+
+  function visibleProjects() {
+    var seen = new Set();
+    var projects = [];
+    document.querySelectorAll('.ls-project-card, [class*="project-card"]').forEach(function (card) {
+      var id = suite.projectId(card);
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      var name = suite.projectName(card);
+      projects.push({ id: id, name: name });
+      if (!state.has(id)) {
+        state.set(id, { name: name, reviewer: null, annotator: null, loading: true, saving: null, errors: {} });
+      } else {
+        state.get(id).name = name || state.get(id).name;
+      }
+    });
+    return projects;
+  }
+
+  function booleanValue(object, key) {
+    return object && typeof object[key] === 'boolean' ? object[key] : null;
+  }
+
+  async function patchProject(id, body) {
+    return suite.api('/api/projects/' + encodeURIComponent(id), { method: 'PATCH', body: body });
+  }
+
+  async function runConcurrent(items, worker, concurrency) {
+    var cursor = 0;
+    await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async function () {
+      while (cursor < items.length) {
+        var index = cursor++;
+        await worker(items[index]);
+      }
+    }));
+  }
+
+  async function fetchStatesBatch(ids) {
+    if (!ids.length) return;
+    var chunks = [];
+    for (var i = 0; i < ids.length; i += 50) chunks.push(ids.slice(i, i + 50));
+
+    for (var c = 0; c < chunks.length; c++) {
+      var chunk = chunks[c];
+      var batched = false;
+      try {
+        var response = await suite.api('/api/projects?ids=' + chunk.join(',') +
+          '&include=id,' + FIELDS.reviewer + ',' + FIELDS.annotator + '&page_size=' + chunk.length);
+        var rows = Array.isArray(response) ? response : ((response && (response.results || response.projects)) || []);
+        if (rows.length && (FIELDS.reviewer in rows[0] || FIELDS.annotator in rows[0])) {
+          batched = true;
+          rows.forEach(function (project) {
+            var item = state.get(String(project.id));
+            if (!item) return;
+            item.reviewer = booleanValue(project, FIELDS.reviewer);
+            item.annotator = booleanValue(project, FIELDS.annotator);
+            item.loading = false;
+            item.error = null;
+          });
+        }
+      } catch (error) {
+        console.warn('[Suite Permissions] batch load failed, falling back', error);
+      }
+
+      if (!batched) {
+        await runConcurrent(chunk, async function (id) {
+          var item = state.get(id);
+          if (!item) return;
+          try {
+            var project = await suite.api('/api/projects/' + encodeURIComponent(id));
+            item.reviewer = booleanValue(project, FIELDS.reviewer);
+            item.annotator = booleanValue(project, FIELDS.annotator);
+            item.error = null;
+          } catch (error) {
+            item.error = String(error.message || error);
+          } finally {
+            item.loading = false;
+          }
+        }, 4);
+      }
+      chunk.forEach(function (id) {
+        var item = state.get(id);
+        if (item) item.loading = false;
+      });
+      render();
+    }
+  }
+
+  function switchButton(field, item) {
+    var button = document.createElement('button');
+    var error = item.errors && item.errors[field];
+    var loading = item.loading || item.saving === field;
+    var value = item[field];
+    var status = error ? 'error' : loading ? 'loading' : value === true ? 'on' : value === false ? 'off' : 'unknown';
+    var label = field === 'reviewer' ? '审核员' : '标注员';
+    button.type = 'button';
+    button.className = 'ovw-suite-perm-switch';
+    button.dataset.field = field;
+    button.dataset.state = status;
+    button.disabled = Boolean(item.saving || bulk.field);
+    button.title = error ? label + '：保存失败 - ' + error : label + '：' + (value ? '已开启' : '已关闭');
+    button.setAttribute('aria-pressed', value === true ? 'true' : value === false ? 'false' : 'mixed');
+    button.innerHTML = '<span><i></i></span>';
+    return button;
+  }
+
+  function updateEntryBadge() {
+    if (!entryButton) return;
+    var badge = entryButton.querySelector('.ovw-suite-tool__badge');
+    if (!badge) return;
+    var enabled = visibleProjects().reduce(function (count, project) {
+      var item = state.get(project.id) || {};
+      return count + (item.reviewer === true ? 1 : 0) + (item.annotator === true ? 1 : 0);
+    }, 0);
+    badge.textContent = String(enabled);
+    badge.hidden = enabled === 0;
+  }
+
+  function render() {
+    updateEntryBadge();
+    if (!panel || panel.hidden) return;
+    var list = panel.querySelector('.ovw-suite-perm-list');
+    var info = panel.querySelector('.ovw-suite-perm-info');
+    var projects = visibleProjects();
+    list.innerHTML = '';
+    if (!projects.length) {
+      list.innerHTML = '<div class="ovw-suite-perm-empty">当前页未找到项目卡片</div>';
+      info.textContent = '';
+      return;
+    }
+    projects.forEach(function (project) {
+      var item = state.get(project.id);
+      var row = document.createElement('div');
+      row.className = 'ovw-suite-perm-row';
+      row.dataset.id = project.id;
+      var name = document.createElement('div');
+      name.className = 'ovw-suite-perm-name';
+      name.title = item.name + ' #' + project.id;
+      name.innerHTML = '<span>' + suite.escapeHtml(item.name) + '</span><small>#' + suite.escapeHtml(project.id) + '</small>';
+      row.appendChild(name);
+      row.appendChild(switchButton('reviewer', item));
+      row.appendChild(switchButton('annotator', item));
+      list.appendChild(row);
+    });
+
+    if (bulk.field) {
+      info.innerHTML = '批量处理中 <b>' + bulk.done + '/' + bulk.total + '</b>' +
+        (bulk.failed ? '，失败 <b class="is-error">' + bulk.failed + '</b>' : '');
+    } else {
+      var reviewerOn = 0;
+      var annotatorOn = 0;
+      projects.forEach(function (project) {
+        var item = state.get(project.id);
+        if (item.reviewer === true) reviewerOn++;
+        if (item.annotator === true) annotatorOn++;
+      });
+      info.innerHTML = '本页 <b>' + projects.length + '</b> 个，审核员开 <b>' + reviewerOn + '</b>，标注员开 <b>' + annotatorOn + '</b>';
+    }
+    panel.querySelectorAll('[data-act]').forEach(function (button) { button.disabled = Boolean(bulk.field); });
+  }
+
+  async function toggleOne(id, field) {
+    var item = state.get(id);
+    if (!item || item.saving || bulk.field) return;
+    var previous = item[field];
+    var next = previous !== true;
+    item[field] = next;
+    item.saving = field;
+    item.errors[field] = null;
+    render();
+    try {
+      var body = {};
+      body[FIELDS[field]] = next;
+      await patchProject(id, body);
+      suite.toast(item.name + ' · ' + (field === 'reviewer' ? '审核员' : '标注员') + (next ? ' 已开启' : ' 已关闭'), 'success');
+    } catch (error) {
+      item[field] = previous;
+      item.errors[field] = String(error.message || error);
+      suite.toast('保存失败：' + item.errors[field], 'error');
+    } finally {
+      item.saving = null;
+      render();
+    }
+  }
+
+  async function bulkToggle(field, value) {
+    if (bulk.field) return;
+    var ids = visibleProjects().map(function (project) { return project.id; });
+    bulk = { field: field, done: 0, total: ids.length, failed: 0, changed: 0 };
+    render();
+    await runConcurrent(ids, async function (id) {
+      var item = state.get(id);
+      if (!item || item[field] === value) {
+        bulk.done++;
+        render();
+        return;
+      }
+      var previous = item[field];
+      item[field] = value;
+      item.saving = field;
+      item.errors[field] = null;
+      render();
+      try {
+        var body = {};
+        body[FIELDS[field]] = value;
+        await patchProject(id, body);
+        bulk.changed++;
+      } catch (error) {
+        item[field] = previous;
+        item.errors[field] = String(error.message || error);
+        bulk.failed++;
+      } finally {
+        item.saving = null;
+        bulk.done++;
+        render();
+      }
+    }, 4);
+    var summary = { changed: bulk.changed, failed: bulk.failed, total: bulk.total };
+    bulk = { field: null, done: 0, total: 0, failed: 0, changed: 0 };
+    render();
+    suite.toast('批量完成：' + summary.changed + ' 项已更新' + (summary.failed ? '，失败 ' + summary.failed + ' 项' : '') + '（共 ' + summary.total + ' 项）', summary.failed ? 'error' : 'success');
+  }
+
+  async function reload() {
+    var projects = visibleProjects();
+    projects.forEach(function (project) {
+      var item = state.get(project.id);
+      item.loading = true;
+      item.error = null;
+    });
+    render();
+    await fetchStatesBatch(projects.map(function (project) { return project.id; }));
+    suite.toast('项目权限已刷新', 'success');
+  }
+
+  function positionPanel() {
+    if (!panel || panel.hidden || !entryButton) return;
+    var rect = entryButton.getBoundingClientRect();
+    var width = Math.min(440, window.innerWidth - 24);
+    var left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12));
+    panel.style.width = width + 'px';
+    panel.style.left = left + 'px';
+    panel.style.top = Math.min(rect.bottom + 8, window.innerHeight - Math.min(panel.offsetHeight || 500, window.innerHeight - 24) - 12) + 'px';
+  }
+
+  function closePanel() {
+    if (panel) panel.hidden = true;
+    if (entryButton) entryButton.classList.remove('is-open');
+  }
+
+  function togglePanel() {
+    ensurePanel();
+    var opening = panel.hidden;
+    panel.hidden = !opening;
+    entryButton.classList.toggle('is-open', opening);
+    if (!opening) return;
+    render();
+    positionPanel();
+    var ids = visibleProjects().filter(function (project) {
+      var item = state.get(project.id);
+      return item && item.loading && !pending.has(project.id);
+    }).map(function (project) { return project.id; });
+    ids.forEach(function (id) { pending.add(id); });
+    fetchStatesBatch(ids).finally(function () { ids.forEach(function (id) { pending.delete(id); }); });
+  }
+
+  function ensurePanel() {
+    if (panel && document.body.contains(panel)) return;
+    panel = document.createElement('section');
+    panel.className = 'ovw-suite-perm-panel';
+    panel.hidden = true;
+    panel.innerHTML =
+      '<header><strong>项目权限</strong><span>工作区 ' + suite.escapeHtml(suite.workspaceId() || '') + '</span>' +
+        '<button type="button" data-act="reload">刷新</button><button type="button" class="ovw-suite-perm-close" aria-label="关闭">×</button></header>' +
+      '<div class="ovw-suite-perm-hint">开关即时保存，无需进入设置页。</div>' +
+      '<div class="ovw-suite-perm-cols"><span>项目</span><span>审核员</span><span>标注员</span></div>' +
+      '<div class="ovw-suite-perm-list"></div>' +
+      '<footer><div class="ovw-suite-perm-info"></div>' +
+        '<div class="ovw-suite-perm-actions">' +
+          '<span>审核员</span><button type="button" data-act="rv-on">全开</button><button type="button" data-act="rv-off">全关</button>' +
+          '<span>标注员</span><button type="button" data-act="an-on">全开</button><button type="button" data-act="an-off">全关</button>' +
+        '</div></footer>';
+    panel.addEventListener('click', function (event) {
+      event.stopPropagation();
+      var target = event.target;
+      var switchElement = target.closest('.ovw-suite-perm-switch');
+      if (switchElement) {
+        var row = switchElement.closest('.ovw-suite-perm-row');
+        if (row) toggleOne(row.dataset.id, switchElement.dataset.field);
+        return;
+      }
+      if (target.closest('.ovw-suite-perm-close')) return closePanel();
+      var action = target.closest('[data-act]');
+      if (!action) return;
+      if (action.dataset.act === 'reload') reload();
+      if (action.dataset.act === 'rv-on') bulkToggle('reviewer', true);
+      if (action.dataset.act === 'rv-off') bulkToggle('reviewer', false);
+      if (action.dataset.act === 'an-on') bulkToggle('annotator', true);
+      if (action.dataset.act === 'an-off') bulkToggle('annotator', false);
+    });
+    document.body.appendChild(panel);
+  }
+
+  function addStyle() {
+    if (document.getElementById('ovw-suite-permissions-style')) return;
+    var style = document.createElement('style');
+    style.id = 'ovw-suite-permissions-style';
+    style.textContent = [
+      '.ovw-suite-perm-panel{position:fixed;z-index:2147483645;box-sizing:border-box;background:#fff;border:1px solid #dfe4ea;border-radius:8px;box-shadow:0 16px 44px rgba(15,23,42,.18);overflow:hidden;color:#1f2937;font:12.5px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}',
+      '.ovw-suite-perm-panel[hidden]{display:none}',
+      '.ovw-suite-perm-panel header{display:grid;grid-template-columns:auto 1fr auto auto;align-items:center;gap:7px;padding:9px 12px;background:#f8fafc;border-bottom:1px solid #e9edf2}',
+      '.ovw-suite-perm-panel header strong{font-size:13px}.ovw-suite-perm-panel header span{color:#94a3b8;font-size:11px}',
+      '.ovw-suite-perm-panel button{font:inherit}.ovw-suite-perm-panel header button,.ovw-suite-perm-actions button{padding:3px 8px;border:1px solid #d9e0e8;border-radius:5px;background:#fff;color:#475569;cursor:pointer}',
+      '.ovw-suite-perm-close{font-size:17px!important;border:0!important;background:transparent!important;padding:0 4px!important}',
+      '.ovw-suite-perm-hint{padding:6px 12px;background:#fffbeb;border-bottom:1px solid #fde68a;color:#92400e;font-size:11px}',
+      '.ovw-suite-perm-cols,.ovw-suite-perm-row{display:grid;grid-template-columns:minmax(0,1fr) 68px 68px;align-items:center;gap:8px}',
+      '.ovw-suite-perm-cols{padding:6px 12px;background:#fbfcfd;border-bottom:1px solid #e9edf2;color:#94a3b8;font-size:10px;font-weight:650}.ovw-suite-perm-cols span:not(:first-child){text-align:center}',
+      '.ovw-suite-perm-list{max-height:320px;overflow:auto}.ovw-suite-perm-row{height:32px;padding:0 12px;border-bottom:1px solid #f1f3f5}.ovw-suite-perm-row:hover{background:#f8fafc}',
+      '.ovw-suite-perm-name{display:flex;gap:6px;min-width:0;align-items:baseline}.ovw-suite-perm-name span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ovw-suite-perm-name small{color:#aab2bd}',
+      '.ovw-suite-perm-switch{display:flex;justify-content:center;padding:0;border:0;background:transparent;cursor:pointer}.ovw-suite-perm-switch>span{position:relative;width:30px;height:17px;border-radius:9px;background:#d1d5db}.ovw-suite-perm-switch i{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .18s}.ovw-suite-perm-switch[data-state="on"]>span{background:#3b82f6}.ovw-suite-perm-switch[data-state="on"] i,.ovw-suite-perm-switch[data-state="loading"] i{transform:translateX(13px)}.ovw-suite-perm-switch[data-state="loading"]>span{background:#93c5fd}.ovw-suite-perm-switch[data-state="error"]>span{background:#fca5a5}',
+      '.ovw-suite-perm-panel footer{padding:8px 12px 10px;background:#fafbfc;border-top:1px solid #e9edf2}.ovw-suite-perm-info{margin-bottom:7px;color:#6b7280;font-size:11px}.ovw-suite-perm-info b{color:#1f2937}.ovw-suite-perm-info .is-error{color:#b91c1c}',
+      '.ovw-suite-perm-actions{display:grid;grid-template-columns:1fr auto auto;gap:5px;align-items:center}.ovw-suite-perm-actions span{color:#64748b;font-size:11px}.ovw-suite-perm-actions button:disabled{opacity:.5;cursor:not-allowed}',
+      '.ovw-suite-perm-empty{padding:36px 12px;text-align:center;color:#a8b0bb}',
+    ].join('');
+    document.head.appendChild(style);
+  }
+
+  function toolbarOptions() {
+    return {
+      label: '项目权限',
+      title: '批量控制审核员和标注员查看任务列表',
+      icon: '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 6c-4 0-7.4 2.5-8.9 6 1.5 3.5 4.9 6 8.9 6s7.4-2.5 8.9-6C19.4 8.5 16 6 12 6zm0 9.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5z"/></svg>',
+      badge: updateEntryBadge,
+      onClick: function (button) { entryButton = button; togglePanel(); },
+    };
+  }
+
+  function mount() {
+    addStyle();
+    entryButton = suite.addToolbarButton('permissions', toolbarOptions());
+    ensurePanel();
+  }
+
+  function scan() {
+    entryButton = suite.addToolbarButton('permissions', toolbarOptions()) || entryButton;
+    if (panel && !panel.hidden) render();
+  }
+
+  function unmount() {
+    closePanel();
+    suite.removeToolbarButton('permissions');
+    entryButton = null;
+    if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
+    panel = null;
+    state.clear();
+    pending.clear();
+    bulk = { field: null, done: 0, total: 0, failed: 0, changed: 0 };
+  }
+
+  document.addEventListener('click', function (event) {
+    if (!panel || panel.hidden) return;
+    if (panel.contains(event.target) || (entryButton && entryButton.contains(event.target))) return;
+    closePanel();
+  }, true);
+  window.addEventListener('resize', positionPanel);
+  window.addEventListener('scroll', positionPanel, true);
+
+  suite.register('project-permissions', {
+    match: function () { return suite.listPage() && suite.featureEnabled('project-permissions'); },
+    mount: mount,
+    scan: scan,
+    unmount: unmount,
+  });
+})();
+
+/* MODULE: member-assignment */
+(function () {
+  'use strict';
+
+  var suite = window.__INSTA360_SUITE__;
+  if (!suite) return;
+
+  var dialog = null;
+  var overlay = null;
+  var contextMenu = null;
+  var currentProject = null;
+  var allUsers = [];
+  var memberships = new Map();
+  var initialRightIds = new Set();
+  var pendingAddIds = new Set();
+  var pendingRemoveIds = new Set();
+  var leftSelected = new Set();
+  var rightSelected = new Set();
+  var mentionSelectedIds = new Set();
+  var mentionSummary = null;
+  var organizationCache = { id: null, loadedAt: 0, users: [] };
+  var loading = false;
+  var saving = false;
+  var observer = null;
+  var scanTimer = null;
+
+  function projectListMatch() {
+    return suite.listPage() && suite.featureEnabled('member-assignment');
+  }
+
+  function userId(value) {
+    if (value == null) return null;
+    if (typeof value === 'object') return value.id || value.pk || null;
+    return value;
+  }
+
+  function displayName(user) {
+    var full = [user.first_name, user.last_name].filter(Boolean).join(' ').trim();
+    return full || user.username || user.email || ('用户 #' + user.id);
+  }
+
+  function normalizeUser(raw, membership) {
+    var source = raw && raw.user && typeof raw.user === 'object'
+      ? raw.user
+      : (raw && typeof raw === 'object' ? raw : {});
+    var role = membership && membership.role != null ? membership.role : source.role;
+    var roleName = '';
+    if (role && typeof role === 'object') roleName = role.name || role.title || '';
+    else if (typeof role === 'string') roleName = role;
+    roleName = roleName || (membership && (membership.role_name || membership.roleName)) || '';
+    return {
+      id: Number(userId(source)),
+      username: source.username || '',
+      first_name: source.first_name || '',
+      last_name: source.last_name || '',
+      email: source.email || '',
+      roleName: roleName,
+      active: !membership || membership.is_active !== false,
+    };
+  }
+
+  async function currentOrganizationId() {
+    var bodyId = document.body && (document.body.dataset.organizationId || document.body.dataset.orgId);
+    if (bodyId) return bodyId;
+    try {
+      var who = await suite.api('/api/current-user/whoami');
+      var id = userId(who && (who.active_organization || who.organization));
+      if (!id && who && Array.isArray(who.organizations) && who.organizations.length) id = userId(who.organizations[0]);
+      if (id) return id;
+    } catch (error) {
+      console.warn('[Suite Members] unable to read current organization', error);
+    }
+    return '1';
+  }
+
+  async function getOrganizationMembers() {
+    var organizationId = await currentOrganizationId();
+    if (organizationCache.id === String(organizationId) && Date.now() - organizationCache.loadedAt < 5 * 60 * 1000) {
+      return organizationCache.users.slice();
+    }
+    var rows = [];
+    var nextUrl = '/api/organizations/' + encodeURIComponent(organizationId) + '/memberships?page=1&page_size=100';
+    var pages = 0;
+    while (nextUrl) {
+      var response = await suite.api(nextUrl);
+      var pageRows = Array.isArray(response) ? response : ((response && response.results) || []);
+      rows = rows.concat(pageRows);
+      nextUrl = response && !Array.isArray(response) ? response.next : null;
+      pages++;
+      if (pages > 100) throw new Error('组织成员分页超过 100 页，已停止以避免死循环');
+    }
+    var map = new Map();
+    rows.forEach(function (membership) {
+      var normalized = normalizeUser(membership, membership);
+      if (normalized.id && normalized.active) map.set(normalized.id, normalized);
+    });
+    var users = Array.from(map.values()).sort(function (a, b) {
+      return displayName(a).localeCompare(displayName(b), 'zh-CN');
+    });
+    organizationCache = { id: String(organizationId), loadedAt: Date.now(), users: users.slice() };
+    return users;
+  }
+
+  async function getProjectMembers(projectId) {
+    var response = await suite.api('/api/projects/' + encodeURIComponent(projectId) + '/members?active=true');
+    var rows = Array.isArray(response) ? response : ((response && (response.results || response.members)) || []);
+    return rows.map(function (membership) {
+      var rawUser = membership.user != null ? membership.user : (membership.user_id != null ? membership.user_id : membership);
+      var id = Number(userId(rawUser));
+      var membershipId = membership.membership_id || membership.project_membership_id ||
+        (membership.user && typeof membership.user === 'object' ? membership.id : null);
+      return { userId: id, membershipId: membershipId, raw: membership };
+    }).filter(function (item) { return item.userId; });
+  }
+
+  async function addMembersToProject(projectId, ids) {
+    if (!ids.length) return;
+    await suite.api('/api/projects/' + encodeURIComponent(projectId) + '/members', {
+      method: 'POST',
+      body: { users: ids },
+    });
+  }
+
+  async function removeMembersFromProject(projectId, ids) {
+    if (!ids.length) return;
+    try {
+      await suite.api('/api/projects/' + encodeURIComponent(projectId) + '/members', {
+        method: 'DELETE',
+        body: { users: ids },
+      });
+      return;
+    } catch (bulkError) {
+      var failures = [];
+      for (var i = 0; i < ids.length; i++) {
+        var membership = memberships.get(ids[i]);
+        var membershipId = membership && membership.membershipId;
+        if (!membershipId) {
+          failures.push('用户 #' + ids[i] + ' 缺少 membershipId');
+          continue;
+        }
+        try {
+          await suite.api('/api/projects/' + encodeURIComponent(projectId) + '/members/' + encodeURIComponent(membershipId), {
+            method: 'DELETE',
+          });
+        } catch (error) {
+          failures.push('用户 #' + ids[i] + '：' + (error.message || error));
+        }
+      }
+      if (failures.length) throw new Error(failures.join('；'));
+    }
+  }
+
+  function finalRightIds() {
+    var ids = new Set(initialRightIds);
+    pendingRemoveIds.forEach(function (id) { ids.delete(id); });
+    pendingAddIds.forEach(function (id) { ids.add(id); });
+    return ids;
+  }
+
+  function keywords(value) {
+    return String(value || '').trim().toLowerCase().split(/\s+/).filter(Boolean);
+  }
+
+  function normalizeSearchValue(value) {
+    return String(value || '').trim().toLowerCase().replace(/\s+/g, '');
+  }
+
+  function mentionNames(value) {
+    var tokens = String(value || '').trim().split(/[\s,，;；]+/).filter(Boolean);
+    if (!tokens.length || tokens.some(function (token) { return token.charAt(0) !== '@' || token.length < 2; })) return [];
+    var seen = new Set();
+    return tokens.map(function (token) { return normalizeSearchValue(token.slice(1)); }).filter(function (name) {
+      if (!name || seen.has(name)) return false;
+      seen.add(name);
+      return true;
+    });
+  }
+
+  function userAliases(user) {
+    var values = [
+      displayName(user),
+      [user.first_name, user.last_name].filter(Boolean).join(''),
+      [user.last_name, user.first_name].filter(Boolean).join(''),
+      user.username,
+      user.email,
+      String(user.id),
+    ];
+    var seen = new Set();
+    return values.map(normalizeSearchValue).filter(function (value) {
+      if (!value || seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    });
+  }
+
+  function matches(user, query) {
+    var mentions = mentionNames(query);
+    if (mentions.length) {
+      var aliases = userAliases(user);
+      return mentions.some(function (name) { return aliases.indexOf(name) !== -1; });
+    }
+    var terms = keywords(query);
+    if (!terms.length) return true;
+    var haystack = [displayName(user), user.username, user.email, user.roleName, String(user.id)].join(' ').toLowerCase();
+    var compactHaystack = normalizeSearchValue(haystack);
+    return terms.every(function (term) {
+      return haystack.indexOf(term) !== -1 || compactHaystack.indexOf(normalizeSearchValue(term)) !== -1;
+    });
+  }
+
+  function resolveMentionSelection(users, rightIds, query) {
+    var names = mentionNames(query);
+    if (!names.length) return null;
+    var selectedIds = new Set();
+    var assignedNames = [];
+    var ambiguousNames = [];
+    var missingNames = [];
+    names.forEach(function (name) {
+      var found = users.filter(function (user) { return userAliases(user).indexOf(name) !== -1; });
+      if (!found.length) {
+        missingNames.push(name);
+      } else if (found.length > 1) {
+        ambiguousNames.push(name);
+      } else if (rightIds.has(found[0].id)) {
+        assignedNames.push(name);
+      } else {
+        selectedIds.add(found[0].id);
+      }
+    });
+    return {
+      selectedIds: Array.from(selectedIds),
+      assignedNames: assignedNames,
+      ambiguousNames: ambiguousNames,
+      missingNames: missingNames,
+    };
+  }
+
+  function applyMentionSelection(query) {
+    mentionSelectedIds.forEach(function (id) { leftSelected.delete(id); });
+    mentionSelectedIds = new Set();
+    mentionSummary = resolveMentionSelection(allUsers, finalRightIds(), query);
+    if (mentionSummary) {
+      mentionSummary.selectedIds.forEach(function (id) {
+        if (!leftSelected.has(id)) mentionSelectedIds.add(id);
+        leftSelected.add(id);
+      });
+    }
+    renderLists();
+  }
+
+  function mentionStatusText() {
+    if (!mentionSummary) return '';
+    var parts = [];
+    if (mentionSummary.selectedIds.length) parts.push('已匹配并选中 ' + mentionSummary.selectedIds.length + ' 人');
+    if (mentionSummary.assignedNames.length) parts.push('已在项目中：' + mentionSummary.assignedNames.join('、'));
+    if (mentionSummary.ambiguousNames.length) parts.push('存在同名，请手动选择：' + mentionSummary.ambiguousNames.join('、'));
+    if (mentionSummary.missingNames.length) parts.push('未找到：' + mentionSummary.missingNames.join('、'));
+    return parts.join('；');
+  }
+
+  function userById(id) {
+    return allUsers.find(function (user) { return user.id === Number(id); });
+  }
+
+  function rowHtml(user, selected, change) {
+    return '<button type="button" class="ovw-suite-assign-row' + (selected ? ' is-selected' : '') + '" data-user-id="' + user.id + '">' +
+      '<span class="ovw-suite-assign-check">' + (selected ? '✓' : '') + '</span>' +
+      '<span class="ovw-suite-assign-person"><strong>' + suite.escapeHtml(displayName(user)) + '</strong><small>' + suite.escapeHtml(user.email || user.username || ('#' + user.id)) + '</small></span>' +
+      (user.roleName ? '<span class="ovw-suite-assign-role">' + suite.escapeHtml(user.roleName) + '</span>' : '') +
+      (change ? '<span class="ovw-suite-assign-change is-' + change + '">' + (change === 'add' ? '待添加' : '待移除') + '</span>' : '') +
+    '</button>';
+  }
+
+  function renderLists() {
+    if (!dialog) return;
+    var rightIds = finalRightIds();
+    var leftQuery = dialog.querySelector('.ovw-suite-assign-search-left').value;
+    var rightQuery = dialog.querySelector('.ovw-suite-assign-search-right').value;
+    var leftUsers = allUsers.filter(function (user) { return !rightIds.has(user.id) && matches(user, leftQuery); });
+    var rightUsers = Array.from(rightIds).map(userById).filter(Boolean).filter(function (user) { return matches(user, rightQuery); });
+    var leftList = dialog.querySelector('.ovw-suite-assign-left');
+    var rightList = dialog.querySelector('.ovw-suite-assign-right');
+    leftList.innerHTML = leftUsers.length ? leftUsers.map(function (user) {
+      return rowHtml(user, leftSelected.has(user.id), pendingRemoveIds.has(user.id) ? 'remove' : '');
+    }).join('') : '<div class="ovw-suite-assign-empty">无匹配成员</div>';
+    rightList.innerHTML = rightUsers.length ? rightUsers.map(function (user) {
+      return rowHtml(user, rightSelected.has(user.id), pendingAddIds.has(user.id) ? 'add' : '');
+    }).join('') : '<div class="ovw-suite-assign-empty">暂无已分配成员</div>';
+    dialog.querySelector('.ovw-suite-assign-left-count').textContent = String(leftUsers.length);
+    dialog.querySelector('.ovw-suite-assign-right-count').textContent = String(rightUsers.length);
+    dialog.querySelector('.ovw-suite-assign-add').disabled = !leftSelected.size || loading || saving;
+    dialog.querySelector('.ovw-suite-assign-remove').disabled = !rightSelected.size || loading || saving;
+    dialog.querySelector('.ovw-suite-assign-save').disabled = (!pendingAddIds.size && !pendingRemoveIds.size) || loading || saving;
+    dialog.querySelector('.ovw-suite-assign-status').textContent = pendingAddIds.size || pendingRemoveIds.size
+      ? '待添加 ' + pendingAddIds.size + ' 人，待移除 ' + pendingRemoveIds.size + ' 人'
+      : (mentionStatusText() || '没有未保存的修改');
+  }
+
+  function resetChanges(projectMembers) {
+    memberships = new Map();
+    initialRightIds = new Set();
+    projectMembers.forEach(function (item) {
+      initialRightIds.add(item.userId);
+      memberships.set(item.userId, item);
+      if (!userById(item.userId)) {
+        var raw = item.raw && item.raw.user && typeof item.raw.user === 'object' ? item.raw.user : item.raw;
+        var normalized = normalizeUser(raw || { id: item.userId });
+        if (normalized.id) allUsers.push(normalized);
+      }
+    });
+    pendingAddIds = new Set();
+    pendingRemoveIds = new Set();
+    leftSelected = new Set();
+    rightSelected = new Set();
+    mentionSelectedIds = new Set();
+    mentionSummary = null;
+    allUsers.sort(function (a, b) { return displayName(a).localeCompare(displayName(b), 'zh-CN'); });
+  }
+
+  async function loadDialog() {
+    loading = true;
+    dialog.classList.add('is-loading');
+    dialog.querySelector('.ovw-suite-assign-status').textContent = '正在加载组织成员和项目成员…';
+    renderLists();
+    try {
+      var results = await Promise.all([getOrganizationMembers(), getProjectMembers(currentProject.id)]);
+      allUsers = results[0];
+      resetChanges(results[1]);
+      renderLists();
+    } catch (error) {
+      dialog.querySelector('.ovw-suite-assign-status').textContent = '加载失败：' + (error.message || error);
+      suite.toast('成员加载失败：' + (error.message || error), 'error');
+    } finally {
+      loading = false;
+      dialog.classList.remove('is-loading');
+      renderLists();
+    }
+  }
+
+  function moveRight() {
+    leftSelected.forEach(function (id) {
+      if (initialRightIds.has(id)) pendingRemoveIds.delete(id);
+      else pendingAddIds.add(id);
+    });
+    leftSelected.clear();
+    mentionSelectedIds.clear();
+    mentionSummary = null;
+    renderLists();
+  }
+
+  function moveLeft() {
+    rightSelected.forEach(function (id) {
+      if (pendingAddIds.has(id)) pendingAddIds.delete(id);
+      else if (initialRightIds.has(id)) pendingRemoveIds.add(id);
+    });
+    rightSelected.clear();
+    renderLists();
+  }
+
+  async function saveChanges() {
+    if (saving || !currentProject) return;
+    saving = true;
+    renderLists();
+    dialog.querySelector('.ovw-suite-assign-status').textContent = '正在保存成员分配…';
+    var additions = Array.from(pendingAddIds);
+    var removals = Array.from(pendingRemoveIds);
+    var errors = [];
+    try {
+      if (additions.length) await addMembersToProject(currentProject.id, additions);
+    } catch (error) {
+      errors.push('添加失败：' + (error.message || error));
+    }
+    try {
+      if (removals.length) await removeMembersFromProject(currentProject.id, removals);
+    } catch (error) {
+      errors.push('移除失败：' + (error.message || error));
+    }
+    try {
+      var actual = await getProjectMembers(currentProject.id);
+      resetChanges(actual);
+    } catch (reloadError) {
+      errors.push('刷新结果失败：' + (reloadError.message || reloadError));
+    }
+    saving = false;
+    renderLists();
+    if (errors.length) {
+      dialog.querySelector('.ovw-suite-assign-status').textContent = errors.join('；');
+      suite.toast(errors.join('；'), 'error');
+    } else {
+      suite.toast('项目成员分配已保存', 'success');
+      closeDialog();
+    }
+  }
+
+  function closeDialog() {
+    if (overlay) overlay.hidden = true;
+    if (dialog) dialog.hidden = true;
+  }
+
+  function openDialog(project, readOnly) {
+    if (!suite.featureEnabled('member-assignment')) return;
+    ensureDialog();
+    currentProject = project;
+    dialog.dataset.readOnly = readOnly ? '1' : '0';
+    dialog.querySelector('h3').textContent = (readOnly ? '查看项目成员 · ' : '分配项目成员 · ') + project.name;
+    dialog.querySelector('.ovw-suite-assign-save').hidden = Boolean(readOnly);
+    dialog.querySelector('.ovw-suite-assign-arrows').hidden = Boolean(readOnly);
+    mentionSelectedIds = new Set();
+    mentionSummary = null;
+    overlay.hidden = false;
+    dialog.hidden = false;
+    dialog.querySelectorAll('input').forEach(function (input) { input.value = ''; });
+    loadDialog();
+  }
+
+  function ensureDialog() {
+    if (dialog && document.body.contains(dialog)) return;
+    overlay = document.createElement('div');
+    overlay.className = 'ovw-suite-assign-overlay';
+    overlay.hidden = true;
+    dialog = document.createElement('section');
+    dialog.className = 'ovw-suite-assign-dialog';
+    dialog.hidden = true;
+    dialog.innerHTML =
+      '<header><h3>分配项目成员</h3><button type="button" class="ovw-suite-assign-close" aria-label="关闭">×</button></header>' +
+      '<div class="ovw-suite-assign-body">' +
+        '<section class="ovw-suite-assign-column"><div class="ovw-suite-assign-title">可分配成员 <span class="ovw-suite-assign-left-count">0</span></div><input class="ovw-suite-assign-search-left" placeholder="姓名或邮箱；批量输入 @姓名 @姓名"><div class="ovw-suite-assign-list ovw-suite-assign-left"></div></section>' +
+        '<div class="ovw-suite-assign-arrows"><button type="button" class="ovw-suite-assign-add" title="添加选中成员">→</button><button type="button" class="ovw-suite-assign-remove" title="移除选中成员">←</button></div>' +
+        '<section class="ovw-suite-assign-column"><div class="ovw-suite-assign-title">已分配成员 <span class="ovw-suite-assign-right-count">0</span></div><input class="ovw-suite-assign-search-right" placeholder="搜索已分配成员"><div class="ovw-suite-assign-list ovw-suite-assign-right"></div></section>' +
+      '</div>' +
+      '<footer><span class="ovw-suite-assign-status"></span><button type="button" class="ovw-suite-assign-cancel">取消</button><button type="button" class="ovw-suite-assign-save">保存分配</button></footer>';
+    overlay.addEventListener('click', closeDialog);
+    dialog.querySelector('.ovw-suite-assign-close').addEventListener('click', closeDialog);
+    dialog.querySelector('.ovw-suite-assign-cancel').addEventListener('click', closeDialog);
+    dialog.querySelector('.ovw-suite-assign-add').addEventListener('click', moveRight);
+    dialog.querySelector('.ovw-suite-assign-remove').addEventListener('click', moveLeft);
+    dialog.querySelector('.ovw-suite-assign-save').addEventListener('click', saveChanges);
+    dialog.querySelector('.ovw-suite-assign-search-left').addEventListener('input', function (event) {
+      applyMentionSelection(event.target.value);
+    });
+    dialog.querySelector('.ovw-suite-assign-search-right').addEventListener('input', renderLists);
+    dialog.addEventListener('click', function (event) {
+      if (dialog.dataset.readOnly === '1') return;
+      var row = event.target.closest('.ovw-suite-assign-row');
+      if (!row) return;
+      var id = Number(row.dataset.userId);
+      var selected = row.closest('.ovw-suite-assign-left') ? leftSelected : rightSelected;
+      if (selected.has(id)) selected.delete(id); else selected.add(id);
+      if (selected === leftSelected) mentionSelectedIds.delete(id);
+      renderLists();
+    });
+    document.body.appendChild(overlay);
+    document.body.appendChild(dialog);
+  }
+
+  function actionDock(card) {
+    var dock = card.querySelector(':scope > .ovw-suite-card-actions');
+    if (!dock) {
+      dock = document.createElement('div');
+      dock.className = 'ovw-suite-card-actions';
+      card.appendChild(dock);
+    }
+    return dock;
+  }
+
+  function projectFromCard(card) {
+    return { id: suite.projectId(card), name: suite.projectName(card), card: card };
+  }
+
+  function injectCardActions() {
+    document.querySelectorAll('.ls-project-card').forEach(function (card) {
+      if (!suite.projectId(card)) return;
+      if (getComputedStyle(card).position === 'static') card.style.position = 'relative';
+      var dock = actionDock(card);
+      if (!dock.querySelector('.ovw-suite-assign-card')) {
+        var button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'ovw-suite-card-action ovw-suite-assign-card';
+        button.title = '快速分配项目成员';
+        button.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M15 12c2.2 0 4-1.8 4-4s-1.8-4-4-4-4 1.8-4 4 1.8 4 4 4zM6 10V7H4v3H1v2h3v3h2v-3h3v-2H6zm9 4c-2.7 0-8 1.3-8 4v2h16v-2c0-2.7-5.3-4-8-4z"/></svg>';
+        button.addEventListener('mousedown', function (event) { event.stopPropagation(); });
+        button.addEventListener('click', function (event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (!suite.featureEnabled('member-assignment')) return;
+          openDialog(projectFromCard(card), false);
+        });
+        dock.appendChild(button);
+      }
+      if (!card.dataset.ovwSuiteAssignContext) {
+        card.dataset.ovwSuiteAssignContext = '1';
+        card.addEventListener('contextmenu', function (event) {
+          if (!suite.featureEnabled('member-assignment')) return;
+          event.preventDefault();
+          event.stopPropagation();
+          openContextMenu(event.clientX, event.clientY, projectFromCard(card));
+        });
+      }
+    });
+  }
+
+  function openContextMenu(x, y, project) {
+    if (!suite.featureEnabled('member-assignment')) return;
+    ensureContextMenu();
+    contextMenu.dataset.projectId = project.id;
+    contextMenu.__project = project;
+    contextMenu.hidden = false;
+    contextMenu.style.left = Math.min(x, window.innerWidth - contextMenu.offsetWidth - 8) + 'px';
+    contextMenu.style.top = Math.min(y, window.innerHeight - contextMenu.offsetHeight - 8) + 'px';
+  }
+
+  function ensureContextMenu() {
+    if (contextMenu && document.body.contains(contextMenu)) return;
+    contextMenu = document.createElement('div');
+    contextMenu.className = 'ovw-suite-assign-menu';
+    contextMenu.hidden = true;
+    contextMenu.innerHTML = '<button type="button" data-action="assign">分配人员</button><button type="button" data-action="view">查看成员</button>';
+    contextMenu.addEventListener('click', function (event) {
+      if (!suite.featureEnabled('member-assignment')) {
+        contextMenu.hidden = true;
+        return;
+      }
+      var action = event.target.closest('[data-action]');
+      if (!action || !contextMenu.__project) return;
+      var project = contextMenu.__project;
+      contextMenu.hidden = true;
+      openDialog(project, action.dataset.action === 'view');
+    });
+    document.body.appendChild(contextMenu);
+  }
+
+  function addStyle() {
+    if (document.getElementById('ovw-suite-assignment-style')) return;
+    var style = document.createElement('style');
+    style.id = 'ovw-suite-assignment-style';
+    style.textContent = [
+      '.ovw-suite-card-actions{position:absolute;top:6px;left:6px;z-index:24;display:none;align-items:center;gap:4px}.ls-project-card:hover>.ovw-suite-card-actions{display:flex}.ovw-suite-card-action{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:1px solid rgba(0,0,0,.08);border-radius:5px;background:rgba(255,255,255,.94);color:#64748b;box-shadow:0 1px 4px rgba(0,0,0,.12);cursor:pointer}.ovw-suite-card-action:hover{color:#2563eb;border-color:#93c5fd}',
+      '.ovw-suite-assign-overlay{position:fixed;inset:0;z-index:2147483644;background:rgba(15,23,42,.46)}.ovw-suite-assign-overlay[hidden],.ovw-suite-assign-dialog[hidden]{display:none}',
+      '.ovw-suite-assign-dialog{position:fixed;z-index:2147483645;top:50%;left:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;width:min(860px,calc(100vw - 32px));height:min(620px,calc(100vh - 32px));background:#fff;border:1px solid #dfe4ea;border-radius:8px;box-shadow:0 24px 70px rgba(15,23,42,.3);overflow:hidden;color:#1f2937;font:13px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}',
+      '.ovw-suite-assign-dialog>header{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;background:#f8fafc;border-bottom:1px solid #e5eaf0}.ovw-suite-assign-dialog h3{margin:0;font-size:15px}.ovw-suite-assign-close{border:0;background:transparent;color:#94a3b8;font-size:22px;cursor:pointer}',
+      '.ovw-suite-assign-body{display:grid;grid-template-columns:minmax(0,1fr) 46px minmax(0,1fr);gap:12px;min-height:0;flex:1;padding:14px}.ovw-suite-assign-column{display:flex;min-width:0;min-height:0;flex-direction:column;padding:10px;border:1px solid #e5eaf0;border-radius:7px;background:#f8fafc}.ovw-suite-assign-title{display:flex;justify-content:space-between;margin-bottom:8px;font-weight:650}.ovw-suite-assign-title span{color:#64748b;font-weight:500}',
+      '.ovw-suite-assign-column input{box-sizing:border-box;width:100%;margin-bottom:8px;padding:7px 9px;border:1px solid #d9e0e8;border-radius:5px;background:#fff;outline:none}.ovw-suite-assign-column input:focus{border-color:#60a5fa;box-shadow:0 0 0 2px rgba(96,165,250,.16)}.ovw-suite-assign-list{min-height:0;flex:1;overflow:auto;padding:4px;border:1px solid #e5e7eb;border-radius:5px;background:#fff}',
+      '.ovw-suite-assign-row{display:flex;align-items:center;gap:8px;width:100%;padding:7px;border:0;border-radius:5px;background:transparent;text-align:left;cursor:pointer;color:#334155}.ovw-suite-assign-row:hover{background:#f1f5f9}.ovw-suite-assign-row.is-selected{background:#dbeafe}.ovw-suite-assign-check{display:flex;align-items:center;justify-content:center;width:16px;height:16px;border:1px solid #cbd5e1;border-radius:3px;color:#fff;font-size:10px}.is-selected>.ovw-suite-assign-check{border-color:#2563eb;background:#2563eb}.ovw-suite-assign-person{display:flex;min-width:0;flex:1;flex-direction:column}.ovw-suite-assign-person strong,.ovw-suite-assign-person small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ovw-suite-assign-person strong{font-size:12.5px}.ovw-suite-assign-person small{color:#94a3b8;font-size:10.5px}.ovw-suite-assign-role,.ovw-suite-assign-change{flex:none;padding:2px 5px;border-radius:4px;background:#eef2ff;color:#4f46e5;font-size:10px}.ovw-suite-assign-change.is-remove{background:#fef2f2;color:#b91c1c}.ovw-suite-assign-change.is-add{background:#f0fdf4;color:#15803d}',
+      '.ovw-suite-assign-arrows{display:flex;flex-direction:column;justify-content:center;gap:8px}.ovw-suite-assign-arrows button{width:34px;height:34px;border:1px solid #bfdbfe;border-radius:5px;background:#eff6ff;color:#2563eb;cursor:pointer}.ovw-suite-assign-arrows button:disabled{opacity:.35;cursor:not-allowed}.ovw-suite-assign-empty{padding:32px 10px;text-align:center;color:#94a3b8}',
+      '.ovw-suite-assign-dialog>footer{display:flex;align-items:center;gap:8px;padding:11px 14px;border-top:1px solid #e5eaf0;background:#f8fafc}.ovw-suite-assign-status{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#64748b;font-size:11px}.ovw-suite-assign-dialog>footer button{padding:6px 14px;border:1px solid #d9e0e8;border-radius:5px;background:#fff;color:#475569;cursor:pointer}.ovw-suite-assign-dialog>footer .ovw-suite-assign-save{border-color:#2563eb;background:#2563eb;color:#fff}.ovw-suite-assign-dialog>footer button:disabled{opacity:.45;cursor:not-allowed}',
+      '.ovw-suite-assign-arrows[hidden],.ovw-suite-assign-save[hidden]{display:none!important}.ovw-suite-assign-dialog[data-read-only="1"] .ovw-suite-assign-body{display:block}.ovw-suite-assign-dialog[data-read-only="1"] .ovw-suite-assign-column:first-child{display:none}.ovw-suite-assign-dialog[data-read-only="1"] .ovw-suite-assign-column:last-child{height:100%;box-sizing:border-box}',
+      '.ovw-suite-assign-menu{position:fixed;z-index:2147483646;display:flex;flex-direction:column;min-width:150px;padding:4px;border:1px solid #dfe4ea;border-radius:6px;background:#fff;box-shadow:0 12px 30px rgba(15,23,42,.2)}.ovw-suite-assign-menu[hidden]{display:none}.ovw-suite-assign-menu button{padding:7px 10px;border:0;border-radius:4px;background:transparent;text-align:left;color:#334155;cursor:pointer}.ovw-suite-assign-menu button:hover{background:#eff6ff;color:#1d4ed8}',
+      '@media (max-width:700px){.ovw-suite-assign-body{grid-template-columns:1fr;overflow:auto}.ovw-suite-assign-arrows{flex-direction:row}.ovw-suite-assign-column{min-height:260px}.ovw-suite-assign-dialog[data-read-only="1"] .ovw-suite-assign-body{grid-template-columns:1fr}}',
+    ].join('');
+    document.head.appendChild(style);
+  }
+
+  function mount() {
+    addStyle();
+    ensureDialog();
+    ensureContextMenu();
+    injectCardActions();
+    if (!observer) {
+      observer = new MutationObserver(function () {
+        if (scanTimer) return;
+        scanTimer = setTimeout(function () {
+          scanTimer = null;
+          injectCardActions();
+        }, 150);
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
+  }
+
+  function unmount() {
+    closeDialog();
+    if (contextMenu) contextMenu.hidden = true;
+    if (observer) {
+      observer.disconnect();
+      observer = null;
+    }
+    if (scanTimer) {
+      clearTimeout(scanTimer);
+      scanTimer = null;
+    }
+    document.querySelectorAll('.ovw-suite-assign-card').forEach(function (button) {
+      var dock = button.parentElement;
+      button.remove();
+      if (dock && dock.classList.contains('ovw-suite-card-actions') && !dock.children.length) dock.remove();
+    });
+  }
+
+  document.addEventListener('click', function (event) {
+    if (contextMenu && !contextMenu.hidden && !contextMenu.contains(event.target)) contextMenu.hidden = true;
+  }, true);
+
+  suite.register('member-assignment', {
+    match: projectListMatch,
+    mount: mount,
+    scan: injectCardActions,
+    unmount: unmount,
+  });
+})();
+
+/* MODULE: hidden-cards */
+(function () {
+  'use strict';
+
+  var suite = window.__INSTA360_SUITE__;
+  if (!suite) return;
+
+  var STORE_KEY = 'insta360-hidden-cards-v1';
+  var HIDE_ATTR = 'data-ovw-suite-hidden';
+  var CARD_SELECTOR = '.ls-project-card';
+  var ITEM_SELECTOR = '.ls-projects-page__link, .ls-annotation-center-page__link, .ls-review-center-page__link, .ls-acceptance-center-page__link';
+  var hidden = loadHidden();
+  var entryButton = null;
+  var fallbackEntry = null;
+  var popover = null;
+  var observer = null;
+  var scanTimer = null;
+
+  function managedPage() {
+    var path = location.pathname.replace(/\/+$/, '');
+    return /^\/workspaces\/[^/]+\/projects$/.test(path) ||
+      /^\/(?:annotation|review|acceptance)\/workspaces\/[^/]+$/.test(path);
+  }
+
+  function loadHidden() {
+    try {
+      var parsed = JSON.parse(localStorage.getItem(STORE_KEY) || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (error) {
+      return {};
+    }
+  }
+
+  function saveHidden() {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(hidden)); } catch (error) {}
+  }
+
+  function hiddenName(id) {
+    var value = hidden[id];
+    if (typeof value === 'string' && value) return value;
+    if (value && typeof value === 'object' && value.title) return value.title;
+    return '项目 #' + id;
+  }
+
+  function cardItem(card) {
+    if (!card) return null;
+    var item = card.closest(ITEM_SELECTOR);
+    if (item) return item;
+    var node = card;
+    while (node && node.parentElement && node !== document.body) {
+      var parent = node.parentElement;
+      var display = '';
+      try { display = getComputedStyle(parent).display || ''; } catch (error) {}
+      if (display.indexOf('grid') !== -1 || display.indexOf('flex') !== -1) return node;
+      node = parent;
+    }
+    return card;
+  }
+
+  function hideSlot(slot) {
+    if (!slot) return;
+    slot.style.setProperty('display', 'none', 'important');
+    slot.setAttribute(HIDE_ATTR, '1');
+  }
+
+  function showSlot(slot) {
+    if (!slot) return;
+    slot.style.removeProperty('display');
+    slot.removeAttribute(HIDE_ATTR);
+  }
+
+  function applyHidden() {
+    document.querySelectorAll('[' + HIDE_ATTR + ']').forEach(function (slot) {
+      var card = slot.matches(CARD_SELECTOR) ? slot : slot.querySelector(CARD_SELECTOR);
+      var id = suite.projectId(card);
+      if (!id || !hidden[id]) showSlot(slot);
+    });
+    document.querySelectorAll(CARD_SELECTOR).forEach(function (card) {
+      var id = suite.projectId(card);
+      if (id && hidden[id]) hideSlot(cardItem(card));
+    });
+  }
+
+  function currentPageIds() {
+    var ids = new Set();
+    document.querySelectorAll(CARD_SELECTOR).forEach(function (card) {
+      var id = suite.projectId(card);
+      if (id) ids.add(id);
+    });
+    return ids;
+  }
+
+  function currentHiddenCount() {
+    var ids = currentPageIds();
+    return Object.keys(hidden).filter(function (id) { return ids.has(id); }).length;
+  }
+
+  function hideCard(card) {
+    var id = suite.projectId(card);
+    if (!id) return;
+    hidden[id] = suite.projectName(card) || ('项目 #' + id);
+    saveHidden();
+    hideSlot(cardItem(card));
+    updateEntry();
+    renderPopover();
+  }
+
+  function restoreCard(id) {
+    if (!id) return;
+    delete hidden[id];
+    saveHidden();
+    applyHidden();
+    updateEntry();
+    renderPopover();
+  }
+
+  function restoreAll() {
+    hidden = {};
+    saveHidden();
+    applyHidden();
+    updateEntry();
+    renderPopover();
+    suite.toast('已恢复全部隐藏项目', 'success');
+  }
+
+  function actionDock(card) {
+    var dock = card.querySelector(':scope > .ovw-suite-card-actions');
+    if (!dock) {
+      dock = document.createElement('div');
+      dock.className = 'ovw-suite-card-actions';
+      card.appendChild(dock);
+    }
+    return dock;
+  }
+
+  function injectCardButtons() {
+    document.querySelectorAll(CARD_SELECTOR).forEach(function (card) {
+      if (!suite.projectId(card)) return;
+      if (getComputedStyle(card).position === 'static') card.style.position = 'relative';
+      var dock = actionDock(card);
+      if (dock.querySelector('.ovw-suite-hide-card')) return;
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'ovw-suite-card-action ovw-suite-hide-card';
+      button.title = '隐藏此项目卡片';
+      button.innerHTML = '<svg viewBox="0 0 24 24" width="15" height="15" fill="currentColor"><path d="M2.1 3.5 3.5 2.1l18.4 18.4-1.4 1.4-3-3C15.8 19.6 14 20 12 20c-5 0-9.3-3.1-11-8 1-2.2 2.4-4.1 4.2-5.5L2.1 3.5zm5.2 5.2A5 5 0 0 0 14.9 16l-1.6-1.6a3 3 0 0 1-3.7-3.7L7.3 8.7zM12 4c5 0 9.3 3.1 11 8-.6 1.4-1.4 2.6-2.4 3.7l-3.1-3.1c0-.2.1-.4.1-.6A5.6 5.6 0 0 0 12 6.4c-.2 0-.4 0-.6.1L9.2 4.3C10.1 4.1 11 4 12 4z"/></svg>';
+      button.addEventListener('mousedown', function (event) { event.stopPropagation(); });
+      button.addEventListener('click', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        hideCard(card);
+      });
+      dock.appendChild(button);
+    });
+  }
+
+  function toolbarOptions() {
+    return {
+      label: '隐藏项目',
+      title: '查看和恢复已隐藏的项目卡片',
+      icon: '<svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M12 6c-4 0-7.4 2.5-8.9 6 1.5 3.5 4.9 6 8.9 6s7.4-2.5 8.9-6C19.4 8.5 16 6 12 6zm0 9.5A3.5 3.5 0 1 1 12 8a3.5 3.5 0 0 1 0 7.5z"/></svg>',
+      badge: updateEntryBadge,
+      onClick: function (button) {
+        entryButton = button;
+        togglePopover(button);
+      },
+    };
+  }
+
+  function updateEntryBadge(button) {
+    button = button || entryButton || fallbackEntry;
+    if (!button) return;
+    var badge = button.querySelector('.ovw-suite-tool__badge, .ovw-suite-hide-fallback-badge');
+    var total = Object.keys(hidden).length;
+    if (badge) {
+      badge.textContent = String(total);
+      badge.hidden = total === 0;
+    }
+    var here = currentHiddenCount();
+    button.classList.toggle('has-current-hidden', here > 0);
+    button.title = here ? '本页有 ' + here + ' 个隐藏项目，点击恢复' : '查看和恢复已隐藏的项目卡片';
+  }
+
+  function updateEntry() {
+    updateEntryBadge(entryButton);
+    updateEntryBadge(fallbackEntry);
+  }
+
+  function ensureFallbackEntry() {
+    if (suite.listPage()) {
+      if (fallbackEntry) fallbackEntry.hidden = true;
+      return;
+    }
+    if (!fallbackEntry) {
+      fallbackEntry = document.createElement('button');
+      fallbackEntry.type = 'button';
+      fallbackEntry.className = 'ovw-suite-hide-fallback';
+      fallbackEntry.innerHTML = '<span>隐藏项目</span><b class="ovw-suite-hide-fallback-badge" hidden></b>';
+      fallbackEntry.addEventListener('click', function (event) {
+        event.stopPropagation();
+        togglePopover(fallbackEntry);
+      });
+      document.body.appendChild(fallbackEntry);
+    }
+    fallbackEntry.hidden = false;
+    updateEntryBadge(fallbackEntry);
+  }
+
+  function closePopover() {
+    if (popover) {
+      popover.remove();
+      popover = null;
+    }
+  }
+
+  function togglePopover(anchor) {
+    if (popover) return closePopover();
+    popover = document.createElement('section');
+    popover.className = 'ovw-suite-hide-popover';
+    popover.__anchor = anchor;
+    document.body.appendChild(popover);
+    popover.addEventListener('click', function (event) {
+      event.stopPropagation();
+      var restore = event.target.closest('[data-restore-id]');
+      if (restore) return restoreCard(restore.dataset.restoreId);
+      if (event.target.closest('.ovw-suite-hide-restore-all')) restoreAll();
+    });
+    renderPopover();
+    positionPopover();
+  }
+
+  function renderPopover() {
+    if (!popover) return;
+    var ids = Object.keys(hidden);
+    var current = currentPageIds();
+    var currentCount = ids.filter(function (id) { return current.has(id); }).length;
+    var html = '<header><strong>已隐藏的项目</strong><span>' + ids.length + '</span>' +
+      (currentCount ? '<em>本页 ' + currentCount + '</em>' : '') + '</header>';
+    if (!ids.length) {
+      html += '<div class="ovw-suite-hide-empty">暂无隐藏项目</div>';
+    } else {
+      html += '<div class="ovw-suite-hide-list">' + ids.map(function (id) {
+        return '<div class="ovw-suite-hide-row"><span class="' + (current.has(id) ? 'is-current' : '') + '" title="' + suite.escapeHtml(hiddenName(id)) + '">' + suite.escapeHtml(hiddenName(id)) + '</span><button type="button" data-restore-id="' + suite.escapeHtml(id) + '">恢复</button></div>';
+      }).join('') + '</div><footer><button type="button" class="ovw-suite-hide-restore-all">全部恢复</button></footer>';
+    }
+    popover.innerHTML = html;
+  }
+
+  function positionPopover() {
+    if (!popover || !popover.__anchor) return;
+    var rect = popover.__anchor.getBoundingClientRect();
+    var width = 300;
+    popover.style.width = width + 'px';
+    popover.style.left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8)) + 'px';
+    var below = rect.bottom + 7;
+    popover.style.top = Math.min(below, window.innerHeight - Math.min(popover.offsetHeight || 420, window.innerHeight - 16) - 8) + 'px';
+  }
+
+  function addStyle() {
+    if (document.getElementById('ovw-suite-hidden-style')) return;
+    var style = document.createElement('style');
+    style.id = 'ovw-suite-hidden-style';
+    style.textContent = [
+      '.ovw-suite-card-actions{position:absolute;top:6px;left:6px;z-index:24;display:none;align-items:center;gap:4px}.ls-project-card:hover>.ovw-suite-card-actions{display:flex}.ovw-suite-card-action{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:1px solid rgba(0,0,0,.08);border-radius:5px;background:rgba(255,255,255,.94);color:#64748b;box-shadow:0 1px 4px rgba(0,0,0,.12);cursor:pointer}.ovw-suite-hide-card:hover{color:#dc2626;border-color:#fca5a5}',
+      '.ovw-suite-tool.has-current-hidden,.ovw-suite-hide-fallback.has-current-hidden{border-color:#f59e0b!important;background:#fffbeb!important;color:#b45309!important}',
+      '.ovw-suite-hide-fallback{position:fixed;right:18px;bottom:18px;z-index:2147483643;display:inline-flex;align-items:center;gap:6px;padding:7px 10px;border:1px solid #d7dce3;border-radius:6px;background:#fff;color:#475569;box-shadow:0 8px 24px rgba(15,23,42,.14);cursor:pointer}.ovw-suite-hide-fallback[hidden]{display:none}.ovw-suite-hide-fallback-badge{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:#2563eb;color:#fff;font-size:10px}.ovw-suite-hide-fallback-badge[hidden]{display:none}',
+      '.ovw-suite-hide-popover{position:fixed;z-index:2147483646;overflow:hidden;border:1px solid #dfe4ea;border-radius:7px;background:#fff;box-shadow:0 14px 38px rgba(15,23,42,.2);color:#334155;font:12.5px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}.ovw-suite-hide-popover header{display:flex;align-items:center;gap:6px;padding:10px 11px;border-bottom:1px solid #e9edf2;background:#f8fafc}.ovw-suite-hide-popover header span{color:#94a3b8}.ovw-suite-hide-popover header em{margin-left:auto;padding:1px 6px;border-radius:8px;background:#fff7e6;color:#b45309;font-style:normal;font-size:10px}.ovw-suite-hide-list{max-height:320px;overflow:auto;padding:4px}.ovw-suite-hide-row{display:flex;align-items:center;gap:6px;padding:6px;border-radius:5px}.ovw-suite-hide-row:hover{background:#f8fafc}.ovw-suite-hide-row span{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ovw-suite-hide-row span.is-current{font-weight:650;color:#b45309}.ovw-suite-hide-row button,.ovw-suite-hide-popover footer button{border:0;background:transparent;color:#2563eb;cursor:pointer}.ovw-suite-hide-popover footer{padding:7px 9px;border-top:1px solid #e9edf2;text-align:right}.ovw-suite-hide-empty{padding:30px 12px;text-align:center;color:#94a3b8}',
+    ].join('');
+    document.head.appendChild(style);
+  }
+
+  function scan() {
+    injectCardButtons();
+    applyHidden();
+    if (suite.listPage()) entryButton = suite.addToolbarButton('hidden-cards', toolbarOptions()) || entryButton;
+    ensureFallbackEntry();
+    updateEntry();
+    if (popover) positionPopover();
+  }
+
+  function scheduleScan() {
+    if (scanTimer) return;
+    scanTimer = setTimeout(function () {
+      scanTimer = null;
+      scan();
+    }, 150);
+  }
+
+  function mount() {
+    addStyle();
+    scan();
+    if (!observer) {
+      observer = new MutationObserver(scheduleScan);
+      observer.observe(document.body, { childList: true, subtree: true });
+    }
+  }
+
+  function unmount() {
+    closePopover();
+    if (observer) {
+      observer.disconnect();
+      observer = null;
+    }
+    if (scanTimer) {
+      clearTimeout(scanTimer);
+      scanTimer = null;
+    }
+    document.querySelectorAll('[' + HIDE_ATTR + ']').forEach(showSlot);
+    document.querySelectorAll('.ovw-suite-hide-card').forEach(function (button) { button.remove(); });
+    if (fallbackEntry) fallbackEntry.hidden = true;
+  }
+
+  document.addEventListener('click', function (event) {
+    if (!popover) return;
+    var anchor = popover.__anchor;
+    if (popover.contains(event.target) || (anchor && anchor.contains(event.target))) return;
+    closePopover();
+  }, true);
+  window.addEventListener('resize', positionPopover);
+  window.addEventListener('scroll', positionPopover, true);
+
+  suite.register('hidden-cards', {
+    match: managedPage,
+    mount: mount,
+    scan: scan,
+    unmount: unmount,
+  });
+
+  window.__HIDECARDS = {
+    list: function () { return Object.assign({}, hidden); },
+    hide: function (id, name) { if (id) { hidden[id] = name || ('项目 #' + id); saveHidden(); scan(); } },
+    unhide: restoreCard,
+    clear: restoreAll,
+    refresh: scan,
+  };
 })();
