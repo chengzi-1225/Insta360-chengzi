@@ -8,6 +8,8 @@
 // @run-at       document-idle
 // @grant        none
 // @noframes
+// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
+// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
 // ==/UserScript==
 
 /* MODULE: core */
