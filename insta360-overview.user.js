@@ -2,7 +2,7 @@
 // @name         Insta360 项目概览工具箱
 // @namespace    https://label.insta360.com/
 // @author       chengzi / Codex
-// @version      4.4.1
+// @version      4.5.0
 // @description  项目概览、项目权限、成员快速分配与卡片隐藏
 // @match        *://label.insta360.com/*
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
@@ -148,7 +148,9 @@
     if (!submenu) return;
     var hasSelection = Boolean(submenu.querySelector('[data-context-selectable][aria-checked="true"]'));
     submenu.querySelectorAll('[data-context-submit]').forEach(function (button) {
-      button.disabled = !hasSelection;
+      var allowEmpty = button.getAttribute('data-context-allow-empty') === 'true';
+      var baseDisabled = button.getAttribute('data-context-base-disabled') === 'true';
+      button.disabled = baseDisabled || (!allowEmpty && !hasSelection);
     });
   }
 
@@ -180,7 +182,7 @@
         return;
       }
       var selectedKeys = selected && selected.submitSelection ? selectedContextKeys(button) : [];
-      if (selected && selected.submitSelection && !selectedKeys.length) return;
+      if (selected && selected.submitSelection && !selected.allowEmptySelection && !selectedKeys.length) return;
       closeProjectContextMenu();
       if (selected && typeof selected.onClick === 'function') selected.onClick(project, event, selectedKeys);
     });
@@ -240,12 +242,29 @@
         if (child.submitSelection) {
           childButton.setAttribute('data-context-submit', 'true');
           childButton.classList.add('ovw-suite-project-submit');
+          if (child.allowEmptySelection) childButton.setAttribute('data-context-allow-empty', 'true');
+        }
+        if (child.disabled) {
+          childButton.disabled = true;
+          childButton.setAttribute('data-context-base-disabled', 'true');
+        } else {
+          childButton.setAttribute('data-context-base-disabled', 'false');
         }
         submenu.appendChild(childButton);
       });
       syncContextSubmitButtons(submenu);
       wrapper.appendChild(submenu);
       projectContextMenu.appendChild(wrapper);
+      if (typeof item.options.onSubmenuOpen === 'function') {
+        try {
+          var hydration = item.options.onSubmenuOpen(project, submenu);
+          if (hydration && typeof hydration.catch === 'function') {
+            hydration.catch(function (error) { console.error('[Insta360 Suite] submenu load failed:', item.key, error); });
+          }
+        } catch (error) {
+          console.error('[Insta360 Suite] submenu load failed:', item.key, error);
+        }
+      }
     });
     projectContextMenu.__project = project;
     projectContextMenu.hidden = false;
@@ -354,6 +373,7 @@
       '.ovw-suite-project-menu[hidden]{display:none}',
       '.ovw-suite-project-menu button{padding:7px 10px;border:0;border-radius:4px;background:transparent;text-align:left;color:#334155;cursor:pointer}',
       '.ovw-suite-project-menu button:hover{background:#eff6ff;color:#1d4ed8}',
+      '.ovw-suite-project-menu button:disabled{opacity:.55;cursor:wait}',
       '.ovw-suite-project-menu-item{position:relative}.ovw-suite-project-menu-item>button{display:flex;align-items:center;justify-content:space-between;width:100%;gap:18px}.ovw-suite-project-menu-parent span{font-size:16px;line-height:1;color:#94a3b8}',
       '.ovw-suite-project-submenu{position:absolute;display:none;top:-4px;left:calc(100% + 4px);min-width:170px;padding:4px;border:1px solid #dfe4ea;border-radius:6px;background:#fff;box-shadow:0 12px 30px rgba(15,23,42,.2)}',
       '.ovw-suite-project-submenu button{display:flex;align-items:center;width:100%}.ovw-suite-project-menu-item:hover>.ovw-suite-project-submenu,.ovw-suite-project-menu-item:focus-within>.ovw-suite-project-submenu,.ovw-suite-project-menu-item.is-expanded>.ovw-suite-project-submenu{display:block}',
@@ -3304,6 +3324,7 @@
   };
   var state = new Map();
   var pending = new Set();
+  var stateLoads = new Map();
   var panel = null;
   var entryButton = null;
   var focusedProjectId = null;
@@ -3611,6 +3632,38 @@
     return state.get(id);
   }
 
+  function loadProjectState(project) {
+    var item = ensureProjectState(project);
+    if (!item) return Promise.reject(new Error('无法识别项目'));
+    var id = String(project.id);
+    if (stateLoads.has(id)) return stateLoads.get(id);
+
+    item.loading = true;
+    item.error = null;
+    render();
+    var request = (async function () {
+      try {
+        var response = await suite.api('/api/projects/' + encodeURIComponent(id));
+        var reviewer = booleanValue(response, FIELDS.reviewer);
+        var annotator = booleanValue(response, FIELDS.annotator);
+        if (reviewer === null || annotator === null) throw new Error('项目权限字段缺失');
+        item.reviewer = reviewer;
+        item.annotator = annotator;
+        item.error = null;
+        return item;
+      } catch (error) {
+        item.error = String(error.message || error);
+        throw error;
+      } finally {
+        item.loading = false;
+        stateLoads.delete(id);
+        render();
+      }
+    })();
+    stateLoads.set(id, request);
+    return request;
+  }
+
   function openForProject(project) {
     if (!project || !project.id) return;
     var id = String(project.id);
@@ -3622,87 +3675,126 @@
     render();
     positionPanel();
     focusProjectRow(id);
-    var item = state.get(id);
-    if (item && item.loading && !pending.has(id)) {
-      pending.add(id);
-      fetchStatesBatch([id]).finally(function () {
-        pending.delete(id);
-        render();
-        focusProjectRow(id);
-      });
-    }
+    loadProjectState(project).then(function () {
+      render();
+      focusProjectRow(id);
+    }).catch(function () {
+      suite.toast('读取项目权限失败，请稍后重试', 'error');
+    });
   }
 
-  function buildEnablePatch(item, fields) {
+  function buildPermissionPatch(item, target) {
+    var fields = [];
     var body = {};
-    var changedFields = [];
-    var seen = {};
-    (Array.isArray(fields) ? fields : [fields]).forEach(function (field) {
-      if (!FIELDS[field] || seen[field]) return;
-      seen[field] = true;
-      if (item[field] === true) return;
-      changedFields.push(field);
-      body[FIELDS[field]] = true;
+    ['reviewer', 'annotator'].forEach(function (field) {
+      var next = target[field] === true;
+      body[FIELDS[field]] = next;
+      if (item[field] !== next) fields.push(field);
     });
-    return { fields: changedFields, body: body };
+    return { fields: fields, body: body };
   }
 
-  async function enableForProject(project, fields) {
+  async function savePermissionsForProject(project, selectedFields) {
     var item = ensureProjectState(project);
-    if (!item) return;
+    if (!item || item.saving || bulk.field) return;
     var id = String(project.id);
-    var requestedFields = [];
-    var seen = {};
-    (Array.isArray(fields) ? fields : [fields]).forEach(function (field) {
-      if (!FIELDS[field] || seen[field]) return;
-      seen[field] = true;
-      requestedFields.push(field);
-    });
-    if (!requestedFields.length) {
-      suite.toast('请至少选择一项权限', 'error');
-      return;
-    }
-    if (item.saving || bulk.field) return;
-    if (item.loading && !pending.has(id)) {
-      pending.add(id);
+    if (item.loading) {
       try {
-        await fetchStatesBatch([id]);
-      } finally {
-        pending.delete(id);
+        await (stateLoads.get(id) || loadProjectState(project));
+      } catch (error) {
+        suite.toast('读取项目权限失败，请稍后重试', 'error');
+        return;
       }
     }
-    if (item.loading || item.error) {
+    if (item.error) {
       suite.toast('读取项目权限失败，请稍后重试', 'error');
       return;
     }
-    var patch = buildEnablePatch(item, requestedFields);
+
+    var fields = Array.isArray(selectedFields) ? selectedFields : [];
+    var target = {
+      reviewer: fields.indexOf('reviewer') !== -1,
+      annotator: fields.indexOf('annotator') !== -1,
+    };
+    var patch = buildPermissionPatch(item, target);
     if (!patch.fields.length) {
-      suite.toast(item.name + ' · 所选权限已经开启', 'success');
+      suite.toast(item.name + ' · 权限未发生变化', 'success');
       return;
     }
-    var previous = {};
+
+    var previous = { reviewer: item.reviewer, annotator: item.annotator };
+    item.reviewer = target.reviewer;
+    item.annotator = target.annotator;
     item.errors = item.errors || {};
-    patch.fields.forEach(function (field) {
-      previous[field] = item[field];
-      item[field] = true;
-      item.errors[field] = null;
-    });
-    item.saving = patch.fields.slice();
+    item.errors.reviewer = null;
+    item.errors.annotator = null;
+    item.saving = ['reviewer', 'annotator'];
     render();
     try {
       await patchProject(id, patch.body);
-      var labels = requestedFields.map(function (field) { return field === 'reviewer' ? '审核员' : '标注员'; });
-      suite.toast(item.name + ' · ' + labels.join('、') + '权限 已开启', 'success');
+      suite.toast(item.name + ' · 项目权限已保存', 'success');
     } catch (error) {
       var message = String(error.message || error);
-      patch.fields.forEach(function (field) {
-        item[field] = previous[field];
-        item.errors[field] = message;
-      });
+      item.reviewer = previous.reviewer;
+      item.annotator = previous.annotator;
+      patch.fields.forEach(function (field) { item.errors[field] = message; });
       suite.toast('保存失败：' + message, 'error');
     } finally {
       item.saving = null;
       render();
+    }
+  }
+
+  function permissionContextChildren(project) {
+    var item = ensureProjectState(project) || {};
+    var disabled = item.loading || Boolean(item.error) || Boolean(item.saving);
+    return [
+      { key: 'reviewer', label: '审核员权限', selectable: true, selected: item.reviewer === true, disabled: disabled },
+      { key: 'annotator', label: '标注员权限', selectable: true, selected: item.annotator === true, disabled: disabled },
+      {
+        key: 'apply',
+        label: '保存权限',
+        submitSelection: true,
+        allowEmptySelection: true,
+        disabled: disabled,
+        onClick: function (targetProject, event, selected) {
+          savePermissionsForProject(targetProject, selected);
+        },
+      },
+      { key: 'panel', label: '打开权限面板', onClick: openForProject },
+    ];
+  }
+
+  function setPermissionSubmenuButton(button, disabled) {
+    if (!button) return;
+    button.disabled = disabled;
+    button.setAttribute('data-context-base-disabled', disabled ? 'true' : 'false');
+  }
+
+  function syncPermissionSubmenu(project, submenu) {
+    if (!submenu) return;
+    var item = ensureProjectState(project) || {};
+    var disabled = item.loading || Boolean(item.error) || Boolean(item.saving);
+    ['reviewer', 'annotator'].forEach(function (field) {
+      var button = submenu.querySelector('[data-context-child="' + field + '"]');
+      if (!button) return;
+      var selected = item[field] === true;
+      button.setAttribute('aria-checked', selected ? 'true' : 'false');
+      button.classList.toggle('is-selected', selected);
+      setPermissionSubmenuButton(button, disabled);
+    });
+    setPermissionSubmenuButton(submenu.querySelector('[data-context-child="apply"]'), disabled);
+  }
+
+  async function hydratePermissionSubmenu(project, submenu) {
+    var request = loadProjectState(project);
+    syncPermissionSubmenu(project, submenu);
+    try {
+      await request;
+    } catch (error) {
+      suite.toast('读取项目权限失败，请稍后重试', 'error');
+    } finally {
+      syncPermissionSubmenu(project, submenu);
     }
   }
 
@@ -3784,12 +3876,8 @@
     ensurePanel();
     suite.addProjectContextAction('project-permissions', {
       label: '项目权限',
-      children: [
-        { key: 'reviewer', label: '审核员权限', selectable: true, selected: true },
-        { key: 'annotator', label: '标注员权限', selectable: true, selected: true },
-        { key: 'apply', label: '开启所选权限', submitSelection: true, onClick: function (project, event, fields) { enableForProject(project, fields); } },
-        { key: 'panel', label: '打开权限面板', onClick: openForProject },
-      ],
+      children: permissionContextChildren,
+      onSubmenuOpen: hydratePermissionSubmenu,
     });
   }
 
@@ -3807,6 +3895,7 @@
     panel = null;
     state.clear();
     pending.clear();
+    stateLoads.clear();
     bulk = { field: null, done: 0, total: 0, failed: 0, changed: 0 };
   }
 
