@@ -1,15 +1,13 @@
 // ==UserScript==
 // @name         Insta360 项目概览工具箱
 // @namespace    https://label.insta360.com/
-// @author       chengzi
-// @version      4.1.0
+// @author       chengzi / Codex
+// @version      4.2.0
 // @description  项目概览、项目权限、成员快速分配与卡片隐藏
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
 // @noframes
-// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
-// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
 // ==/UserScript==
 
 /* MODULE: core */
@@ -20,6 +18,8 @@
 
   var modules = new Map();
   var toolbarExtensions = new Map();
+  var projectContextActions = new Map();
+  var projectContextMenu = null;
   var FEATURE_SETTINGS_KEY = 'insta360-overview-features-v1';
   var routeTimer = null;
   var toastTimer = null;
@@ -113,6 +113,61 @@
       if (text) return text;
     }
     return '项目 #' + projectId(card);
+  }
+
+  function addProjectContextAction(key, options) {
+    projectContextActions.set(key, options || {});
+  }
+
+  function removeProjectContextAction(key) {
+    projectContextActions.delete(key);
+    if (!projectContextActions.size) closeProjectContextMenu();
+  }
+
+  function closeProjectContextMenu() {
+    if (projectContextMenu) projectContextMenu.hidden = true;
+  }
+
+  function ensureProjectContextMenu() {
+    if (projectContextMenu && document.body.contains(projectContextMenu)) return;
+    projectContextMenu = document.createElement('div');
+    projectContextMenu.className = 'ovw-suite-project-menu';
+    projectContextMenu.hidden = true;
+    projectContextMenu.addEventListener('click', function (event) {
+      var button = event.target.closest('[data-context-action]');
+      if (!button || !projectContextMenu.__project) return;
+      var action = projectContextActions.get(button.dataset.contextAction);
+      var project = projectContextMenu.__project;
+      closeProjectContextMenu();
+      if (action && typeof action.onClick === 'function') action.onClick(project, event);
+    });
+    document.body.appendChild(projectContextMenu);
+  }
+
+  function openProjectContextMenu(event, card) {
+    var project = { id: projectId(card), name: projectName(card), card: card };
+    if (!project.id) return;
+    var actions = [];
+    projectContextActions.forEach(function (options, key) {
+      if (!options || (typeof options.when === 'function' && !options.when(project))) return;
+      actions.push({ key: key, options: options });
+    });
+    if (!actions.length) return;
+    event.preventDefault();
+    event.stopPropagation();
+    ensureProjectContextMenu();
+    projectContextMenu.innerHTML = '';
+    actions.forEach(function (item) {
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.dataset.contextAction = item.key;
+      button.textContent = item.options.label || item.key;
+      projectContextMenu.appendChild(button);
+    });
+    projectContextMenu.__project = project;
+    projectContextMenu.hidden = false;
+    projectContextMenu.style.left = Math.max(8, Math.min(event.clientX, window.innerWidth - projectContextMenu.offsetWidth - 8)) + 'px';
+    projectContextMenu.style.top = Math.max(8, Math.min(event.clientY, window.innerHeight - projectContextMenu.offsetHeight - 8)) + 'px';
   }
 
   function findSearchInput() {
@@ -212,6 +267,10 @@
       '.ovw-suite-toast.is-success{border-color:#86efac;background:#f0fdf4;color:#15803d}',
       '.ovw-suite-toast.is-error{border-color:#fca5a5;background:#fef2f2;color:#b91c1c}',
       '.ovw-suite-toast[hidden]{display:none}',
+      '.ovw-suite-project-menu{position:fixed;z-index:2147483646;display:flex;flex-direction:column;min-width:150px;padding:4px;border:1px solid #dfe4ea;border-radius:6px;background:#fff;box-shadow:0 12px 30px rgba(15,23,42,.2);font:12.5px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}',
+      '.ovw-suite-project-menu[hidden]{display:none}',
+      '.ovw-suite-project-menu button{padding:7px 10px;border:0;border-radius:4px;background:transparent;text-align:left;color:#334155;cursor:pointer}',
+      '.ovw-suite-project-menu button:hover{background:#eff6ff;color:#1d4ed8}',
     ].join('');
     document.head.appendChild(style);
   }
@@ -265,8 +324,20 @@
   window.addEventListener('popstate', scheduleSync);
   window.addEventListener('hashchange', scheduleSync);
   window.addEventListener('insta360-suite:overview-toolbar', refreshToolbarButtons);
+  document.addEventListener('contextmenu', function (event) {
+    if (!listPage() || !event.target || !event.target.closest) return;
+    var card = event.target.closest('.ls-project-card, article[class*="project-card"], [data-project-id]');
+    if (card) openProjectContextMenu(event, card);
+  });
+  document.addEventListener('click', function (event) {
+    if (!projectContextMenu || projectContextMenu.hidden || projectContextMenu.contains(event.target)) return;
+    closeProjectContextMenu();
+  }, true);
+  window.addEventListener('resize', closeProjectContextMenu);
+  window.addEventListener('scroll', closeProjectContextMenu, true);
 
   window.__INSTA360_SUITE__ = {
+    addProjectContextAction: addProjectContextAction,
     addToolbarButton: addToolbarButton,
     api: api,
     csrfToken: csrfToken,
@@ -279,6 +350,7 @@
     projectName: projectName,
     refreshToolbarButtons: refreshToolbarButtons,
     register: register,
+    removeProjectContextAction: removeProjectContextAction,
     removeToolbarButton: removeToolbarButton,
     scheduleSync: scheduleSync,
     setFeatureEnabled: setFeatureEnabled,
@@ -3145,6 +3217,7 @@
   var pending = new Set();
   var panel = null;
   var entryButton = null;
+  var focusedProjectId = null;
   var bulk = { field: null, done: 0, total: 0, failed: 0, changed: 0 };
 
   function visibleProjects() {
@@ -3281,6 +3354,7 @@
       var row = document.createElement('div');
       row.className = 'ovw-suite-perm-row';
       row.dataset.id = project.id;
+      if (project.id === focusedProjectId) row.classList.add('is-focused');
       var name = document.createElement('div');
       name.className = 'ovw-suite-perm-name';
       name.title = item.name + ' #' + project.id;
@@ -3382,18 +3456,23 @@
   }
 
   function positionPanel() {
-    if (!panel || panel.hidden || !entryButton) return;
-    var rect = entryButton.getBoundingClientRect();
+    if (!panel || panel.hidden) return;
     var width = Math.min(440, window.innerWidth - 24);
-    var left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12));
+    var rect = entryButton ? entryButton.getBoundingClientRect() : null;
+    var left = rect
+      ? Math.max(12, Math.min(rect.left, window.innerWidth - width - 12))
+      : Math.max(12, window.innerWidth - width - 12);
     panel.style.width = width + 'px';
     panel.style.left = left + 'px';
-    panel.style.top = Math.min(rect.bottom + 8, window.innerHeight - Math.min(panel.offsetHeight || 500, window.innerHeight - 24) - 12) + 'px';
+    panel.style.top = rect
+      ? Math.min(rect.bottom + 8, window.innerHeight - Math.min(panel.offsetHeight || 500, window.innerHeight - 24) - 12) + 'px'
+      : '12px';
   }
 
   function closePanel() {
     if (panel) panel.hidden = true;
     if (entryButton) entryButton.classList.remove('is-open');
+    focusedProjectId = null;
   }
 
   function togglePanel() {
@@ -3402,6 +3481,7 @@
     panel.hidden = !opening;
     entryButton.classList.toggle('is-open', opening);
     if (!opening) return;
+    focusedProjectId = null;
     render();
     positionPanel();
     var ids = visibleProjects().filter(function (project) {
@@ -3410,6 +3490,39 @@
     }).map(function (project) { return project.id; });
     ids.forEach(function (id) { pending.add(id); });
     fetchStatesBatch(ids).finally(function () { ids.forEach(function (id) { pending.delete(id); }); });
+  }
+
+  function focusProjectRow(id) {
+    setTimeout(function () {
+      if (!panel || panel.hidden || focusedProjectId !== id) return;
+      var row = panel.querySelector('.ovw-suite-perm-row[data-id="' + id + '"]');
+      if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
+    }, 0);
+  }
+
+  function openForProject(project) {
+    if (!project || !project.id) return;
+    var id = String(project.id);
+    visibleProjects();
+    if (!state.has(id)) {
+      state.set(id, { name: project.name || ('项目 #' + id), reviewer: null, annotator: null, loading: true, saving: null, errors: {} });
+    }
+    focusedProjectId = id;
+    ensurePanel();
+    panel.hidden = false;
+    if (entryButton) entryButton.classList.add('is-open');
+    render();
+    positionPanel();
+    focusProjectRow(id);
+    var item = state.get(id);
+    if (item && item.loading && !pending.has(id)) {
+      pending.add(id);
+      fetchStatesBatch([id]).finally(function () {
+        pending.delete(id);
+        render();
+        focusProjectRow(id);
+      });
+    }
   }
 
   function ensurePanel() {
@@ -3464,6 +3577,7 @@
       '.ovw-suite-perm-cols,.ovw-suite-perm-row{display:grid;grid-template-columns:minmax(0,1fr) 68px 68px;align-items:center;gap:8px}',
       '.ovw-suite-perm-cols{padding:6px 12px;background:#fbfcfd;border-bottom:1px solid #e9edf2;color:#94a3b8;font-size:10px;font-weight:650}.ovw-suite-perm-cols span:not(:first-child){text-align:center}',
       '.ovw-suite-perm-list{max-height:320px;overflow:auto}.ovw-suite-perm-row{height:32px;padding:0 12px;border-bottom:1px solid #f1f3f5}.ovw-suite-perm-row:hover{background:#f8fafc}',
+      '.ovw-suite-perm-row.is-focused{background:#eff6ff;box-shadow:inset 3px 0 #3b82f6}',
       '.ovw-suite-perm-name{display:flex;gap:6px;min-width:0;align-items:baseline}.ovw-suite-perm-name span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ovw-suite-perm-name small{color:#aab2bd}',
       '.ovw-suite-perm-switch{display:flex;justify-content:center;padding:0;border:0;background:transparent;cursor:pointer}.ovw-suite-perm-switch>span{position:relative;width:30px;height:17px;border-radius:9px;background:#d1d5db}.ovw-suite-perm-switch i{position:absolute;top:2px;left:2px;width:13px;height:13px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:transform .18s}.ovw-suite-perm-switch[data-state="on"]>span{background:#3b82f6}.ovw-suite-perm-switch[data-state="on"] i,.ovw-suite-perm-switch[data-state="loading"] i{transform:translateX(13px)}.ovw-suite-perm-switch[data-state="loading"]>span{background:#93c5fd}.ovw-suite-perm-switch[data-state="error"]>span{background:#fca5a5}',
       '.ovw-suite-perm-panel footer{padding:8px 12px 10px;background:#fafbfc;border-top:1px solid #e9edf2}.ovw-suite-perm-info{margin-bottom:7px;color:#6b7280;font-size:11px}.ovw-suite-perm-info b{color:#1f2937}.ovw-suite-perm-info .is-error{color:#b91c1c}',
@@ -3487,6 +3601,10 @@
     addStyle();
     entryButton = suite.addToolbarButton('permissions', toolbarOptions());
     ensurePanel();
+    suite.addProjectContextAction('project-permissions', {
+      label: '项目权限',
+      onClick: openForProject,
+    });
   }
 
   function scan() {
@@ -3496,6 +3614,7 @@
 
   function unmount() {
     closePanel();
+    suite.removeProjectContextAction('project-permissions');
     suite.removeToolbarButton('permissions');
     entryButton = null;
     if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
@@ -3530,7 +3649,6 @@
 
   var dialog = null;
   var overlay = null;
-  var contextMenu = null;
   var currentProject = null;
   var allUsers = [];
   var memberships = new Map();
@@ -4010,46 +4128,7 @@
         });
         dock.appendChild(button);
       }
-      if (!card.dataset.ovwSuiteAssignContext) {
-        card.dataset.ovwSuiteAssignContext = '1';
-        card.addEventListener('contextmenu', function (event) {
-          if (!suite.featureEnabled('member-assignment')) return;
-          event.preventDefault();
-          event.stopPropagation();
-          openContextMenu(event.clientX, event.clientY, projectFromCard(card));
-        });
-      }
     });
-  }
-
-  function openContextMenu(x, y, project) {
-    if (!suite.featureEnabled('member-assignment')) return;
-    ensureContextMenu();
-    contextMenu.dataset.projectId = project.id;
-    contextMenu.__project = project;
-    contextMenu.hidden = false;
-    contextMenu.style.left = Math.min(x, window.innerWidth - contextMenu.offsetWidth - 8) + 'px';
-    contextMenu.style.top = Math.min(y, window.innerHeight - contextMenu.offsetHeight - 8) + 'px';
-  }
-
-  function ensureContextMenu() {
-    if (contextMenu && document.body.contains(contextMenu)) return;
-    contextMenu = document.createElement('div');
-    contextMenu.className = 'ovw-suite-assign-menu';
-    contextMenu.hidden = true;
-    contextMenu.innerHTML = '<button type="button" data-action="assign">分配人员</button><button type="button" data-action="view">查看成员</button>';
-    contextMenu.addEventListener('click', function (event) {
-      if (!suite.featureEnabled('member-assignment')) {
-        contextMenu.hidden = true;
-        return;
-      }
-      var action = event.target.closest('[data-action]');
-      if (!action || !contextMenu.__project) return;
-      var project = contextMenu.__project;
-      contextMenu.hidden = true;
-      openDialog(project, action.dataset.action === 'view');
-    });
-    document.body.appendChild(contextMenu);
   }
 
   function addStyle() {
@@ -4067,7 +4146,6 @@
       '.ovw-suite-assign-arrows{display:flex;flex-direction:column;justify-content:center;gap:8px}.ovw-suite-assign-arrows button{width:34px;height:34px;border:1px solid #bfdbfe;border-radius:5px;background:#eff6ff;color:#2563eb;cursor:pointer}.ovw-suite-assign-arrows button:disabled{opacity:.35;cursor:not-allowed}.ovw-suite-assign-empty{padding:32px 10px;text-align:center;color:#94a3b8}',
       '.ovw-suite-assign-dialog>footer{display:flex;align-items:center;gap:8px;padding:11px 14px;border-top:1px solid #e5eaf0;background:#f8fafc}.ovw-suite-assign-status{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#64748b;font-size:11px}.ovw-suite-assign-dialog>footer button{padding:6px 14px;border:1px solid #d9e0e8;border-radius:5px;background:#fff;color:#475569;cursor:pointer}.ovw-suite-assign-dialog>footer .ovw-suite-assign-save{border-color:#2563eb;background:#2563eb;color:#fff}.ovw-suite-assign-dialog>footer button:disabled{opacity:.45;cursor:not-allowed}',
       '.ovw-suite-assign-arrows[hidden],.ovw-suite-assign-save[hidden]{display:none!important}.ovw-suite-assign-dialog[data-read-only="1"] .ovw-suite-assign-body{display:block}.ovw-suite-assign-dialog[data-read-only="1"] .ovw-suite-assign-column:first-child{display:none}.ovw-suite-assign-dialog[data-read-only="1"] .ovw-suite-assign-column:last-child{height:100%;box-sizing:border-box}',
-      '.ovw-suite-assign-menu{position:fixed;z-index:2147483646;display:flex;flex-direction:column;min-width:150px;padding:4px;border:1px solid #dfe4ea;border-radius:6px;background:#fff;box-shadow:0 12px 30px rgba(15,23,42,.2)}.ovw-suite-assign-menu[hidden]{display:none}.ovw-suite-assign-menu button{padding:7px 10px;border:0;border-radius:4px;background:transparent;text-align:left;color:#334155;cursor:pointer}.ovw-suite-assign-menu button:hover{background:#eff6ff;color:#1d4ed8}',
       '@media (max-width:700px){.ovw-suite-assign-body{grid-template-columns:1fr;overflow:auto}.ovw-suite-assign-arrows{flex-direction:row}.ovw-suite-assign-column{min-height:260px}.ovw-suite-assign-dialog[data-read-only="1"] .ovw-suite-assign-body{grid-template-columns:1fr}}',
     ].join('');
     document.head.appendChild(style);
@@ -4076,7 +4154,14 @@
   function mount() {
     addStyle();
     ensureDialog();
-    ensureContextMenu();
+    suite.addProjectContextAction('assign-members', {
+      label: '分配人员',
+      onClick: function (project) { openDialog(project, false); },
+    });
+    suite.addProjectContextAction('view-members', {
+      label: '查看成员',
+      onClick: function (project) { openDialog(project, true); },
+    });
     injectCardActions();
     if (!observer) {
       observer = new MutationObserver(function () {
@@ -4092,7 +4177,8 @@
 
   function unmount() {
     closeDialog();
-    if (contextMenu) contextMenu.hidden = true;
+    suite.removeProjectContextAction('assign-members');
+    suite.removeProjectContextAction('view-members');
     if (observer) {
       observer.disconnect();
       observer = null;
@@ -4107,10 +4193,6 @@
       if (dock && dock.classList.contains('ovw-suite-card-actions') && !dock.children.length) dock.remove();
     });
   }
-
-  document.addEventListener('click', function (event) {
-    if (contextMenu && !contextMenu.hidden && !contextMenu.contains(event.target)) contextMenu.hidden = true;
-  }, true);
 
   suite.register('member-assignment', {
     match: projectListMatch,
