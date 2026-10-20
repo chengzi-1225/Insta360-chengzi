@@ -5,6 +5,8 @@
 // @description  只看本人：按日期统计标注、审核工作量，汇总个人返修和返工并直达原生处理流程
 // @author       chengzi / Codex
 // @match        *://label.insta360.com/*
+// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360 我的工作台.user.js
+// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360 我的工作台.user.js
 // @run-at       document-idle
 // @grant        none
 // @noframes
