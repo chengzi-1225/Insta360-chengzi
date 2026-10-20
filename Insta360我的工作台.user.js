@@ -2,8 +2,8 @@
 // @name         Insta360 我的工作台（标注员 / 审核员）
 // @namespace    https://label.insta360.com/personal-toolbox/
 // @version      1.7.0
-// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360 我的工作台.user.js
-// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360 我的工作台.user.js
+// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360我的工作台.user.js
+// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360我的工作台.user.js
 // @description  只看本人：按日期统计标注、审核工作量，汇总个人返修和返工并直达原生处理流程
 // @author       chengzi / Codex
 // @match        *://label.insta360.com/*
