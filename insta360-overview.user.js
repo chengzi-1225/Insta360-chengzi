@@ -2,7 +2,7 @@
 // @name         Insta360 项目概览工具箱
 // @namespace    https://label.insta360.com/
 // @author       chengzi / Codex
-// @version      4.5.0
+// @version      4.6.1
 // @description  项目概览、项目权限、成员快速分配与卡片隐藏
 // @match        *://label.insta360.com/*
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
@@ -1450,7 +1450,7 @@
     return JSON.stringify({
       filters: {
         conjunction: 'or',
-        items: ['REVIEWED_REJECTED', 'REWORK'].map(function(value) {
+        items: ['REVIEWED_REJECTED', 'REPAIR', 'REWORK'].map(function(value) {
           return {
             filter: 'filter:tasks:state',
             operator: 'equal',
@@ -2189,6 +2189,114 @@
 
   var repairCache = {};
 
+  var REPAIR_CSV_HEADERS = ['项目名称', '项目 ID', '类型', '人员', '数量'];
+
+  function csvCell(value) {
+    return '"' + String(value == null ? '' : value).replace(/"/g, '""') + '"';
+  }
+
+  function repairExportRows(results) {
+    var rows = [];
+    var valid = Array.isArray(results) ? results : [];
+    for (var i = 0; i < valid.length; i++) {
+      var item = valid[i];
+      if (!item || item.error || item.empty) continue;
+      var kinds = [
+        { key: 'repair', label: '待返修' },
+        { key: 'rework', label: '待返工' }
+      ];
+      for (var k = 0; k < kinds.length; k++) {
+        var kind = kinds[k];
+        var count = Number(item[kind.key + 'TaskCount']) || 0;
+        if (count <= 0) continue;
+        var people = Array.isArray(item[kind.key]) ? item[kind.key] : [];
+        var namedPeople = people.filter(function (person) {
+          return person && person.name != null && !isNumericId(person.name);
+        });
+        var namedCount = 0;
+        for (var p = 0; p < namedPeople.length; p++) {
+          var personCount = Number(namedPeople[p].count) || 0;
+          if (personCount <= 0) continue;
+          namedCount += personCount;
+          rows.push([
+            item.name || '',
+            item.projectId == null ? '' : item.projectId,
+            kind.label,
+            namedPeople[p].name,
+            personCount
+          ]);
+        }
+        var unknownCount = Math.max(0, count - namedCount);
+        if (unknownCount > 0) {
+          rows.push([
+            item.name || '',
+            item.projectId == null ? '' : item.projectId,
+            kind.label,
+            '未获取姓名',
+            unknownCount
+          ]);
+        }
+      }
+    }
+    return rows;
+  }
+
+  function buildRepairCsv(results) {
+    var rows = [REPAIR_CSV_HEADERS].concat(repairExportRows(results));
+    return '\ufeff' + rows.map(function (row) {
+      return row.map(csvCell).join(',');
+    }).join('\r\n') + '\r\n';
+  }
+
+  function repairExportFileName() {
+    var now = new Date();
+    function pad(value) { return String(value).padStart(2, '0'); }
+    return '待返修待返工人员_' + now.getFullYear() + pad(now.getMonth() + 1) + pad(now.getDate()) + '_' +
+      pad(now.getHours()) + pad(now.getMinutes()) + pad(now.getSeconds()) + '.csv';
+  }
+
+  function repairExportToast(message, type) {
+    var suite = window.__INSTA360_SUITE__;
+    if (suite && typeof suite.toast === 'function') suite.toast(message, type || 'info');
+  }
+
+  function syncRepairExportButton(panelEl) {
+    if (!panelEl) return;
+    var button = panelEl.querySelector('.ovw-repair-export');
+    if (!button) return;
+    var state = panelEl.__ovwRepairExport || {};
+    var ready = state.complete === true && repairExportRows(state.results).length > 0;
+    button.disabled = !ready;
+    button.title = ready ? '导出当前扫描结果' : '扫描完成且有待返修/待返工任务后可导出';
+  }
+
+  function downloadRepairCsv(panelEl) {
+    var state = panelEl && panelEl.__ovwRepairExport;
+    var rows = state ? repairExportRows(state.results) : [];
+    if (!state || !state.complete) {
+      repairExportToast('请等待统计扫描完成后再导出', 'info');
+      return;
+    }
+    if (!rows.length) {
+      repairExportToast('当前范围没有可导出的待返修或待返工人员', 'info');
+      return;
+    }
+    if (typeof Blob === 'undefined' || !window.URL || typeof window.URL.createObjectURL !== 'function') {
+      repairExportToast('当前浏览器不支持 CSV 下载', 'error');
+      return;
+    }
+    var blob = new Blob([buildRepairCsv(state.results)], { type: 'text/csv;charset=utf-8' });
+    var url = window.URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = repairExportFileName();
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(function () { window.URL.revokeObjectURL(url); }, 0);
+  }
+
   function pendingCountFromCounts(counts) {
     if (!counts || typeof counts !== 'object') return null;
     return (Number(counts.REVIEWED_REJECTED) || 0)
@@ -2352,22 +2460,9 @@
       var n3 = Number(agg.counts.REPAIR) || 0;
       cardRejected = n1;
       pendingHint = n1 + n2 + n3;
-      if (!n1 && !n2 && !n3) {
-        var emptyResult = {
-          workspaceId: ctx.workspaceId,
-          projectId: ctx.projectId, href: ctx.href, name: name,
-          repair: [], rework: [], empty: true,
-          repairTaskCount: 0, reworkTaskCount: 0,
-          repairTaskIds: [], reworkTaskIds: [],
-          repairUnknownTaskIds: [], reworkUnknownTaskIds: [],
-          cardRejected: 0
-        };
-        repairCache[ctx.projectId] = { ts: Date.now(), data: emptyResult };
-        return emptyResult;
-      }
     }
 
-    // ★ v3.8.9 全量拉取任务，客户端过滤
+    // 汇总可能缺少项目级待处理数，即使汇总为 0 也必须查询当前任务。
     var rows;
     try {
       var loaded = await Promise.all([
@@ -2475,6 +2570,9 @@
   }
 
   function renderRepairShell(panelEl, scanCount, skipped) {
+    if (!panelEl.__ovwRepairExport) {
+      panelEl.__ovwRepairExport = { results: [], scanTotal: scanCount, done: 0, complete: false, scopeKey: '' };
+    }
     var selCnt = selectedCount();
     if (panelEl.querySelector('.ovw-repair-head')) {
       var selCntEl = panelEl.querySelector('.ovw-repair-selcount');
@@ -2488,6 +2586,7 @@
       if (clearBtn) clearBtn.disabled = !selCnt;
       var onlyCb = panelEl.querySelector('.ovw-repair-onlysel input');
       if (onlyCb) onlyCb.checked = onlySelected;
+      syncRepairExportButton(panelEl);
       return;
     }
 
@@ -2496,6 +2595,7 @@
     html += '<span>待返修 / 待返工人员</span>';
     html += '<span class="ovw-repair-acts">';
     html += '<button type="button" class="ovw-repair-clear"' + (selCnt ? '' : ' disabled') + '>清空选择</button>';
+    html += '<button type="button" class="ovw-repair-export" disabled>导出 CSV</button>';
     html += '<button type="button" class="ovw-repair-refresh">刷新</button>';
     html += '</span>';
     html += '</div>';
@@ -2515,6 +2615,7 @@
     panelEl.innerHTML = html;
 
     var clearBtn = panelEl.querySelector('.ovw-repair-clear');
+    var exportBtn = panelEl.querySelector('.ovw-repair-export');
     var refreshBtn = panelEl.querySelector('.ovw-repair-refresh');
     var onlyCb = panelEl.querySelector('.ovw-repair-onlysel input');
     var bodyEl = panelEl.querySelector('.ovw-repair-body');
@@ -2523,6 +2624,10 @@
       e.stopPropagation();
       clearProjectSelected();
       renderRepairPanel(panelEl, false);
+    });
+    if (exportBtn) exportBtn.addEventListener('click', function (e) {
+      e.stopPropagation();
+      downloadRepairCsv(panelEl);
     });
     if (refreshBtn) refreshBtn.addEventListener('click', function (e) {
       e.stopPropagation();
@@ -2546,10 +2651,12 @@
         setTimeout(function() { el.textContent = old; }, 1000);
       });
     });
+    syncRepairExportButton(panelEl);
   }
 
-  function shouldLoadRepairPanel(panelEl, forceRefresh) {
-    return !!forceRefresh || !panelEl || !panelEl.dataset || panelEl.dataset.ovwLoaded !== '1';
+  function shouldLoadRepairPanel(panelEl, forceRefresh, scopeKey) {
+    return !!forceRefresh || !panelEl || !panelEl.dataset || panelEl.dataset.ovwLoaded !== '1'
+      || panelEl.dataset.ovwScopeKey !== scopeKey;
   }
 
   function repairLaneHtml(item, kind) {
@@ -2650,12 +2757,6 @@
   }
 
   async function renderRepairPanel(panelEl, forceRefresh) {
-    if (!shouldLoadRepairPanel(panelEl, forceRefresh)) {
-      updateRepairPanelMeta();
-      return;
-    }
-    panelEl.dataset.ovwLoaded = '1';
-
     var allCards = [].slice.call(document.querySelectorAll(CONFIG.cardSelector));
     var cards = allCards;
     var skipped = 0;
@@ -2667,6 +2768,27 @@
       });
       skipped = allCards.length - cards.length;
     }
+
+    var scopeKey = JSON.stringify([onlySelected, cards.map(function(card) {
+      var ctx = projectContext(card);
+      return ctx ? [ctx.workspaceId, ctx.projectId] : null;
+    }).sort()]);
+    if (!shouldLoadRepairPanel(panelEl, forceRefresh, scopeKey)) {
+      renderRepairShell(panelEl, cards.length, skipped);
+      return;
+    }
+    panelEl.dataset.ovwLoaded = '1';
+    panelEl.dataset.ovwScopeKey = scopeKey;
+    // 在处理空选择前更新扫描标记，阻止旧请求覆盖当前范围的结果。
+    var scanId = String(Date.now()) + ':' + String(Math.random());
+    panelEl.dataset.ovwScanId = scanId;
+    panelEl.__ovwRepairExport = {
+      results: [],
+      scanTotal: cards.length,
+      done: 0,
+      complete: false,
+      scopeKey: scopeKey
+    };
 
     if (forceRefresh) {
       for (var ci = 0; ci < cards.length; ci++) {
@@ -2695,14 +2817,17 @@
         + (onlySelected ? '尚未选中任何项目，请点击卡片右上角的复选框选择要扫描的项目'
                         : '当前页没有项目卡片')
         + '</div>';
+      panelEl.__ovwRepairExport.complete = true;
+      syncRepairExportButton(panelEl);
       return;
     }
 
     var results = new Array(cards.length);
     var done = 0;
-    var scanId = String(Date.now()) + ':' + String(Math.random());
-    panelEl.dataset.ovwScanId = scanId;
     renderRepairResults(bodyEl, results, cards.length, done, false);
+    panelEl.__ovwRepairExport.results = results;
+    panelEl.__ovwRepairExport.done = done;
+    syncRepairExportButton(panelEl);
     var tasks = cards.map(function (c, idx) {
       return repairPool.run(function () {
         return collectRepairPeopleForProject(c, forceRefresh).then(function (r) {
@@ -2714,7 +2839,10 @@
         }).then(function(r) {
           done++;
           if (panelEl.dataset.ovwScanId === scanId) {
+            panelEl.__ovwRepairExport.results = results;
+            panelEl.__ovwRepairExport.done = done;
             renderRepairResults(bodyEl, results, cards.length, done, false);
+            syncRepairExportButton(panelEl);
           }
           return r;
         });
@@ -2722,7 +2850,11 @@
     });
     await Promise.all(tasks);
     if (panelEl.dataset.ovwScanId !== scanId) return;
+    panelEl.__ovwRepairExport.results = results;
+    panelEl.__ovwRepairExport.done = done;
+    panelEl.__ovwRepairExport.complete = true;
     renderRepairResults(bodyEl, results, cards.length, done, true);
+    syncRepairExportButton(panelEl);
   }
 
   function toggleRepairPanel(toolbar, btnEl) {
@@ -2966,6 +3098,9 @@
     '.ovw-repair-clear{border:0;background:transparent;color:#8c8c8c;cursor:pointer;font-size:12px;padding:0;font-family:inherit;}',
     '.ovw-repair-clear:hover:not(:disabled){color:#ff4d4f;}',
     '.ovw-repair-clear:disabled{opacity:.45;cursor:default;}',
+    '.ovw-repair-export{border:0;background:transparent;color:#1677ff;cursor:pointer;font-size:12px;padding:0;font-family:inherit;}',
+    '.ovw-repair-export:hover:not(:disabled){color:#0958d9;}',
+    '.ovw-repair-export:disabled{opacity:.45;cursor:default;}',
     '.ovw-repair-refresh{border:0;background:transparent;color:#1677ff;cursor:pointer;font-size:12px;padding:0;font-family:inherit;}',
     '.ovw-repair-refresh:hover{color:#0958d9;}',
     '.ovw-repair-sum{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:0 0 8px;margin-bottom:2px;border-bottom:1px solid rgba(0,0,0,.06);font-size:12px;color:#595959;}',
@@ -4124,6 +4259,23 @@
     });
   }
 
+  function filteredAssignableUsers(users, rightIds, query) {
+    return users.filter(function (user) {
+      return !rightIds.has(user.id) && matches(user, query);
+    });
+  }
+
+  function allFilteredSelected(selection, users) {
+    return users.length > 0 && users.every(function (user) { return selection.has(user.id); });
+  }
+
+  function setFilteredSelection(selection, users, selected) {
+    users.forEach(function (user) {
+      if (selected) selection.add(user.id); else selection.delete(user.id);
+    });
+    return selection;
+  }
+
   function resolveMentionSelection(users, rightIds, query) {
     var names = mentionNames(query);
     if (!names.length) return null;
@@ -4192,7 +4344,7 @@
     var rightIds = finalRightIds();
     var leftQuery = dialog.querySelector('.ovw-suite-assign-search-left').value;
     var rightQuery = dialog.querySelector('.ovw-suite-assign-search-right').value;
-    var leftUsers = allUsers.filter(function (user) { return !rightIds.has(user.id) && matches(user, leftQuery); });
+    var leftUsers = filteredAssignableUsers(allUsers, rightIds, leftQuery);
     var rightUsers = Array.from(rightIds).map(userById).filter(Boolean).filter(function (user) { return matches(user, rightQuery); });
     var leftList = dialog.querySelector('.ovw-suite-assign-left');
     var rightList = dialog.querySelector('.ovw-suite-assign-right');
@@ -4204,6 +4356,11 @@
     }).join('') : '<div class="ovw-suite-assign-empty">暂无已分配成员</div>';
     dialog.querySelector('.ovw-suite-assign-left-count').textContent = String(leftUsers.length);
     dialog.querySelector('.ovw-suite-assign-right-count').textContent = String(rightUsers.length);
+    var selectAll = dialog.querySelector('.ovw-suite-assign-select-all');
+    var selectedAll = allFilteredSelected(leftSelected, leftUsers);
+    selectAll.textContent = selectedAll ? '取消全选' : '全选结果';
+    selectAll.setAttribute('aria-pressed', selectedAll ? 'true' : 'false');
+    selectAll.disabled = !leftUsers.length || loading || saving;
     dialog.querySelector('.ovw-suite-assign-add').disabled = !leftSelected.size || loading || saving;
     dialog.querySelector('.ovw-suite-assign-remove').disabled = !rightSelected.size || loading || saving;
     dialog.querySelector('.ovw-suite-assign-save').disabled = (!pendingAddIds.size && !pendingRemoveIds.size) || loading || saving;
@@ -4261,6 +4418,18 @@
     leftSelected.clear();
     mentionSelectedIds.clear();
     mentionSummary = null;
+    renderLists();
+  }
+
+  function toggleFilteredLeftSelection() {
+    if (!dialog || dialog.dataset.readOnly === '1' || loading || saving) return;
+    var query = dialog.querySelector('.ovw-suite-assign-search-left').value;
+    var users = filteredAssignableUsers(allUsers, finalRightIds(), query);
+    var select = !allFilteredSelected(leftSelected, users);
+    setFilteredSelection(leftSelected, users, select);
+    if (!select) {
+      users.forEach(function (user) { mentionSelectedIds.delete(user.id); });
+    }
     renderLists();
   }
 
@@ -4340,7 +4509,7 @@
     dialog.innerHTML =
       '<header><h3>分配项目成员</h3><button type="button" class="ovw-suite-assign-close" aria-label="关闭">×</button></header>' +
       '<div class="ovw-suite-assign-body">' +
-        '<section class="ovw-suite-assign-column"><div class="ovw-suite-assign-title">可分配成员 <span class="ovw-suite-assign-left-count">0</span></div><input class="ovw-suite-assign-search-left" placeholder="姓名或邮箱；批量输入 @姓名 @姓名"><div class="ovw-suite-assign-list ovw-suite-assign-left"></div></section>' +
+        '<section class="ovw-suite-assign-column"><div class="ovw-suite-assign-title">可分配成员 <span class="ovw-suite-assign-left-count">0</span></div><div class="ovw-suite-assign-search-tools"><input class="ovw-suite-assign-search-left" placeholder="姓名或邮箱；批量输入 @姓名 @姓名"><button type="button" class="ovw-suite-assign-select-all" aria-pressed="false">全选结果</button></div><div class="ovw-suite-assign-list ovw-suite-assign-left"></div></section>' +
         '<div class="ovw-suite-assign-arrows"><button type="button" class="ovw-suite-assign-add" title="添加选中成员">→</button><button type="button" class="ovw-suite-assign-remove" title="移除选中成员">←</button></div>' +
         '<section class="ovw-suite-assign-column"><div class="ovw-suite-assign-title">已分配成员 <span class="ovw-suite-assign-right-count">0</span></div><input class="ovw-suite-assign-search-right" placeholder="搜索已分配成员"><div class="ovw-suite-assign-list ovw-suite-assign-right"></div></section>' +
       '</div>' +
@@ -4348,6 +4517,7 @@
     overlay.addEventListener('click', closeDialog);
     dialog.querySelector('.ovw-suite-assign-close').addEventListener('click', closeDialog);
     dialog.querySelector('.ovw-suite-assign-cancel').addEventListener('click', closeDialog);
+    dialog.querySelector('.ovw-suite-assign-select-all').addEventListener('click', toggleFilteredLeftSelection);
     dialog.querySelector('.ovw-suite-assign-add').addEventListener('click', moveRight);
     dialog.querySelector('.ovw-suite-assign-remove').addEventListener('click', moveLeft);
     dialog.querySelector('.ovw-suite-assign-save').addEventListener('click', saveChanges);
@@ -4416,12 +4586,12 @@
       '.ovw-suite-assign-dialog{position:fixed;z-index:2147483645;top:50%;left:50%;transform:translate(-50%,-50%);display:flex;flex-direction:column;width:min(860px,calc(100vw - 32px));height:min(620px,calc(100vh - 32px));background:#fff;border:1px solid #dfe4ea;border-radius:8px;box-shadow:0 24px 70px rgba(15,23,42,.3);overflow:hidden;color:#1f2937;font:13px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}',
       '.ovw-suite-assign-dialog>header{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;background:#f8fafc;border-bottom:1px solid #e5eaf0}.ovw-suite-assign-dialog h3{margin:0;font-size:15px}.ovw-suite-assign-close{border:0;background:transparent;color:#94a3b8;font-size:22px;cursor:pointer}',
       '.ovw-suite-assign-body{display:grid;grid-template-columns:minmax(0,1fr) 46px minmax(0,1fr);gap:12px;min-height:0;flex:1;padding:14px}.ovw-suite-assign-column{display:flex;min-width:0;min-height:0;flex-direction:column;padding:10px;border:1px solid #e5eaf0;border-radius:7px;background:#f8fafc}.ovw-suite-assign-title{display:flex;justify-content:space-between;margin-bottom:8px;font-weight:650}.ovw-suite-assign-title span{color:#64748b;font-weight:500}',
-      '.ovw-suite-assign-column input{box-sizing:border-box;width:100%;margin-bottom:8px;padding:7px 9px;border:1px solid #d9e0e8;border-radius:5px;background:#fff;outline:none}.ovw-suite-assign-column input:focus{border-color:#60a5fa;box-shadow:0 0 0 2px rgba(96,165,250,.16)}.ovw-suite-assign-list{min-height:0;flex:1;overflow:auto;padding:4px;border:1px solid #e5e7eb;border-radius:5px;background:#fff}',
+      '.ovw-suite-assign-column input{box-sizing:border-box;width:100%;margin-bottom:8px;padding:7px 9px;border:1px solid #d9e0e8;border-radius:5px;background:#fff;outline:none}.ovw-suite-assign-column input:focus{border-color:#60a5fa;box-shadow:0 0 0 2px rgba(96,165,250,.16)}.ovw-suite-assign-search-tools{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;margin-bottom:8px}.ovw-suite-assign-search-tools input{min-width:0;margin-bottom:0}.ovw-suite-assign-select-all{min-width:74px;padding:0 9px;border:1px solid #bfdbfe;border-radius:5px;background:#eff6ff;color:#2563eb;white-space:nowrap;cursor:pointer}.ovw-suite-assign-select-all[aria-pressed="true"]{border-color:#93c5fd;background:#dbeafe}.ovw-suite-assign-select-all:disabled{opacity:.45;cursor:not-allowed}.ovw-suite-assign-list{min-height:0;flex:1;overflow:auto;padding:4px;border:1px solid #e5e7eb;border-radius:5px;background:#fff}',
       '.ovw-suite-assign-row{display:flex;align-items:center;gap:8px;width:100%;padding:7px;border:0;border-radius:5px;background:transparent;text-align:left;cursor:pointer;color:#334155}.ovw-suite-assign-row:hover{background:#f1f5f9}.ovw-suite-assign-row.is-selected{background:#dbeafe}.ovw-suite-assign-check{display:flex;align-items:center;justify-content:center;width:16px;height:16px;border:1px solid #cbd5e1;border-radius:3px;color:#fff;font-size:10px}.is-selected>.ovw-suite-assign-check{border-color:#2563eb;background:#2563eb}.ovw-suite-assign-person{display:flex;min-width:0;flex:1;flex-direction:column}.ovw-suite-assign-person strong,.ovw-suite-assign-person small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ovw-suite-assign-person strong{font-size:12.5px}.ovw-suite-assign-person small{color:#94a3b8;font-size:10.5px}.ovw-suite-assign-role,.ovw-suite-assign-change{flex:none;padding:2px 5px;border-radius:4px;background:#eef2ff;color:#4f46e5;font-size:10px}.ovw-suite-assign-change.is-remove{background:#fef2f2;color:#b91c1c}.ovw-suite-assign-change.is-add{background:#f0fdf4;color:#15803d}',
       '.ovw-suite-assign-arrows{display:flex;flex-direction:column;justify-content:center;gap:8px}.ovw-suite-assign-arrows button{width:34px;height:34px;border:1px solid #bfdbfe;border-radius:5px;background:#eff6ff;color:#2563eb;cursor:pointer}.ovw-suite-assign-arrows button:disabled{opacity:.35;cursor:not-allowed}.ovw-suite-assign-empty{padding:32px 10px;text-align:center;color:#94a3b8}',
       '.ovw-suite-assign-dialog>footer{display:flex;align-items:center;gap:8px;padding:11px 14px;border-top:1px solid #e5eaf0;background:#f8fafc}.ovw-suite-assign-status{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#64748b;font-size:11px}.ovw-suite-assign-dialog>footer button{padding:6px 14px;border:1px solid #d9e0e8;border-radius:5px;background:#fff;color:#475569;cursor:pointer}.ovw-suite-assign-dialog>footer .ovw-suite-assign-save{border-color:#2563eb;background:#2563eb;color:#fff}.ovw-suite-assign-dialog>footer button:disabled{opacity:.45;cursor:not-allowed}',
       '.ovw-suite-assign-arrows[hidden],.ovw-suite-assign-save[hidden]{display:none!important}.ovw-suite-assign-dialog[data-read-only="1"] .ovw-suite-assign-body{display:block}.ovw-suite-assign-dialog[data-read-only="1"] .ovw-suite-assign-column:first-child{display:none}.ovw-suite-assign-dialog[data-read-only="1"] .ovw-suite-assign-column:last-child{height:100%;box-sizing:border-box}',
-      '@media (max-width:700px){.ovw-suite-assign-body{grid-template-columns:1fr;overflow:auto}.ovw-suite-assign-arrows{flex-direction:row}.ovw-suite-assign-column{min-height:260px}.ovw-suite-assign-dialog[data-read-only="1"] .ovw-suite-assign-body{grid-template-columns:1fr}}',
+      '@media (max-width:700px){.ovw-suite-assign-body{grid-template-columns:1fr;overflow:auto}.ovw-suite-assign-arrows{flex-direction:row}.ovw-suite-assign-column{min-height:260px}.ovw-suite-assign-search-tools{grid-template-columns:minmax(0,1fr) auto}.ovw-suite-assign-dialog[data-read-only="1"] .ovw-suite-assign-body{grid-template-columns:1fr}}',
     ].join('');
     document.head.appendChild(style);
   }
