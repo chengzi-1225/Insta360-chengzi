@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Insta360 项目概览工具箱
 // @namespace    https://label.insta360.com/
-// @author       chengzi / Codex
-// @version      4.6.1
-// @description  项目概览、项目权限、成员快速分配与卡片隐藏
+// @author       chengzi
+// @version      4.6.5
+// @description  项目概览与跳过数据统计、精简原生卡片、项目权限、成员快速分配与卡片隐藏
 // @match        *://label.insta360.com/*
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
@@ -471,7 +471,7 @@
   else sync();
 })();
 
-/* MODULE: overview v3.11.4 */
+/* MODULE: overview v3.11.8 */
 
 (function () {
   'use strict';
@@ -896,14 +896,6 @@
   var statsEnabled = loadStatsFlag();
   var allHidden = loadHideAll();
 
-  function closeStatedProjects() {
-    saveStatsProjects({});
-    document.querySelectorAll(CONFIG.cardSelector).forEach(function (c) {
-      var s = c.querySelector('.ovw-summary');
-      if (s && s.dataset.ovwManual === '1') { s.dataset.ovwManual = ''; delete c.dataset.ovwMounted; }
-    });
-    scanCards();
-  }
   function hideAllCards() {
     allHidden = true; saveHideAll(true);
     document.querySelectorAll(CONFIG.cardSelector).forEach(function (c) {
@@ -1017,6 +1009,7 @@
     { key: 'REVIEWED_ACCEPTED',   label: '已审核',   short: '已审核',   color: '#13c2c2', kind: 'status' },
     { key: 'REPAIR',              label: '待返修',   short: '待返修',   color: '#ff4d4f', kind: 'status' },
     { key: 'REWORK',              label: '返工',     short: '返工',     color: '#fa8c16', kind: 'status' },
+    { key: 'SKIPPED',             label: '跳过数据', short: '跳过',     color: '#8b5cf6', kind: 'status' },
     { key: 'reworkTotal',         label: '总返工量', short: '总返工',   color: '#fa8c16', kind: 'status' },
     { key: 'PENDING_ANNOTATION',  label: '待标注',   short: '待标注',   color: '#8c8c8c', kind: 'status' },
     { key: 'REVIEWED_REJECTED',   label: '审核驳回', short: '审核驳回', color: '#ff4d4f', kind: 'status' },
@@ -1027,11 +1020,20 @@
   for (var fi = 0; fi < FIELD_DEFS.length; fi++) FIELD_MAP[FIELD_DEFS[fi].key] = FIELD_DEFS[fi];
   var DEFAULT_VISIBLE = [
     'annotationProgress', 'reviewProgress', 'repairProgress',
-    'total', 'ANNOTATED', 'REVIEWED_ACCEPTED', 'REPAIR', 'REWORK'
+    'total', 'ANNOTATED', 'REVIEWED_ACCEPTED', 'SKIPPED', 'REVIEWED_REJECTED'
   ];
+  var SKIPPED_FIELD_MIGRATION_KEY = 'insta360-overview-skipped-field-v1';
   function loadVisibleFields() {
-    try { var raw = JSON.parse(localStorage.getItem(CONFIG.settingsKey) || 'null');
-      if (Array.isArray(raw)) return raw.filter(function (k) { return FIELD_MAP[k]; }); } catch (e) {}
+    try {
+      var raw = JSON.parse(localStorage.getItem(CONFIG.settingsKey) || 'null');
+      var list = Array.isArray(raw) ? raw.filter(function (k) { return FIELD_MAP[k]; }) : DEFAULT_VISIBLE.slice();
+      if (localStorage.getItem(SKIPPED_FIELD_MIGRATION_KEY) !== '1') {
+        if (list.indexOf('SKIPPED') === -1) list.push('SKIPPED');
+        localStorage.setItem(CONFIG.settingsKey, JSON.stringify(list));
+        localStorage.setItem(SKIPPED_FIELD_MIGRATION_KEY, '1');
+      }
+      return list;
+    } catch (e) {}
     return DEFAULT_VISIBLE.slice();
   }
   function saveVisibleFields(list) { try { localStorage.setItem(CONFIG.settingsKey, JSON.stringify(list)); } catch (e) {} }
@@ -1144,16 +1146,25 @@
     var counts = {};
     for (var i = 0; i < STATUS_CODES.length; i++) counts[STATUS_CODES[i]] = 0;
     var seen = {}; var total = 0, unknown = 0;
+    var skipped = 0, skippedAvailable = true;
     var list = Array.isArray(rows) ? rows : [];
     for (var j = 0; j < list.length; j++) {
       var t = normalizeTask(list[j], 'row-' + j);
       var key = String(t.taskId);
       if (seen[key]) continue;
       seen[key] = true; total += 1;
+      var annotations = list[j] && list[j].annotations;
+      if (Array.isArray(annotations)) {
+        skipped += annotations.filter(function (annotation) { return annotation && annotation.was_cancelled === true; }).length;
+      } else {
+        skippedAvailable = false;
+      }
       if (t.status && STATUS_SET[t.status]) counts[t.status] += 1; else unknown += 1;
     }
     counts.reworkTotal = counts.REWORK || 0;
-    return { total: total, counts: counts, unknown: unknown, available: STATUS_CODES.concat(['reworkTotal']), needsTaskDetails: false, source: 'tasks' };
+    var available = STATUS_CODES.concat(['reworkTotal']);
+    if (skippedAvailable) { counts.SKIPPED = skipped; available.push('SKIPPED'); }
+    return { total: total, counts: counts, unknown: unknown, available: available, needsTaskDetails: false, source: 'tasks' };
   }
   function num(v) { var n = Number(v); return Number.isFinite(n) ? n : 0; }
 
@@ -1194,9 +1205,18 @@
     counts.reworkTotal = rework;
     counts.REPAIR = repair;
     var sum = 0; for (var k in counts) sum += counts[k];
+    var available = STATUS_CODES.concat(['reworkTotal']);
+    // Use the platform's cancelled/skipped annotation count; never infer it
+    // from total minus completed tasks, which also includes untouched tasks.
+    var skippedRaw = summary.skipped_annotations_number;
+    var skipped = typeof skippedRaw === 'number' || (typeof skippedRaw === 'string' && skippedRaw.trim() !== '') ? Number(skippedRaw) : NaN;
+    if (Number.isSafeInteger(skipped) && skipped >= 0) {
+      counts.SKIPPED = skipped;
+      available.push('SKIPPED');
+    }
     return {
       total: total, counts: counts,
-      available: STATUS_CODES.concat(['reworkTotal']),
+      available: available,
       unknown: Math.max(0, total - sum),
       source: 'summary-fast', needsTaskDetails: false, summary: summary
     };
@@ -1779,6 +1799,7 @@
     for (var i = 0; i < avList.length; i++) available[avList[i]] = true;
     if (field.kind === 'total') return String(agg.total != null ? agg.total : 0);
     if (field.kind === 'status') {
+      if (field.key === 'SKIPPED' && !available.SKIPPED) return '—';
       if (!available[field.key]) return '…';
       return String(counts[field.key] != null ? counts[field.key] : 0);
     }
@@ -2049,6 +2070,19 @@
     return null;
   }
 
+  function positionFieldsPanel(toolbar) {
+    if (!toolbar) return;
+    var panel = toolbar.querySelector('.ovw-toolbar__panel');
+    var button = toolbar.querySelector('.ovw-toolbar__btn--fields');
+    if (!panel || panel.hidden || !button) return;
+    panel.style.left = button.offsetLeft + 'px';
+    panel.style.top = (button.offsetTop + button.offsetHeight + 6) + 'px';
+    var rect = panel.getBoundingClientRect();
+    var left = Math.max(8, Math.min(rect.left, window.innerWidth - rect.width - 8));
+    var scale = toolbar.offsetWidth ? toolbar.getBoundingClientRect().width / toolbar.offsetWidth : 1;
+    if (left !== rect.left) panel.style.left = (button.offsetLeft + (left - rect.left) / (scale || 1)) + 'px';
+  }
+
   function injectFieldsToolbar() {
     if (document.querySelector('.ovw-toolbar')) return;
     var input = findSearchInput();
@@ -2070,7 +2104,6 @@
         '<div class="ovw-toolbar__panel-head">' +
           '<span>功能与卡片显示</span>' +
           '<span class="ovw-toolbar__acts">' +
-            '<button type="button" class="ovw-toolbar__closestat" title="已统计的卡片回到「点击统计本项目」">关闭已统计</button>' +
             '<button type="button" class="ovw-toolbar__hideall" title="所有卡片彻底不显示（含待点击态）">全部关闭</button>' +
             '<button type="button" class="ovw-toolbar__reset" title="恢复字段默认并重新显示所有卡片">恢复默认</button>' +
           '</span>' +
@@ -2085,7 +2118,6 @@
     var listEl = toolbar.querySelector('.ovw-toolbar__panel-list');
     var resetBtn = toolbar.querySelector('.ovw-toolbar__reset');
     var hideAllBtn = toolbar.querySelector('.ovw-toolbar__hideall');
-    var closeStatBtn = toolbar.querySelector('.ovw-toolbar__closestat');
 
     hideAllBtnEl = hideAllBtn;
     updateHideAllBtn();
@@ -2174,13 +2206,12 @@
         listEl.appendChild(row);
       }
     }
-    function openPanel() { renderList(); updateHideAllBtn(); panel.hidden = false; btn.classList.add('is-open'); }
+    function openPanel() { renderList(); updateHideAllBtn(); panel.hidden = false; btn.classList.add('is-open'); positionFieldsPanel(toolbar); }
     function closePanel() { panel.hidden = true; btn.classList.remove('is-open'); }
 
     btn.addEventListener('click', function (e) { e.stopPropagation(); if (panel.hidden) openPanel(); else closePanel(); });
     resetBtn.addEventListener('click', function (e) { e.stopPropagation(); restoreAll(); renderList(); });
     hideAllBtn.addEventListener('click', function (e) { e.stopPropagation(); if (allHidden) showAllCards(); else hideAllCards(); });
-    closeStatBtn.addEventListener('click', function (e) { e.stopPropagation(); closeStatedProjects(); });
 
     panel.addEventListener('click', function (e) { e.stopPropagation(); });
     document.addEventListener('click', function (e) { if (!toolbar.contains(e.target)) closePanel(); }, true);
@@ -2991,10 +3022,16 @@
   }
 
   var CSS_TEXT = [
+    '.ls-projects-page__link:has(.ls-project-card){display:flex!important;flex-direction:column;align-self:stretch;}',
+    '.ls-project-card{display:flex!important;flex-direction:column!important;justify-content:flex-start!important;height:auto!important;min-height:0!important;flex:1 0 auto!important;}',
+    '.ls-project-card .ls-project-card__description{display:block!important;height:auto!important;min-height:40px!important;flex:1 0 auto!important;box-sizing:border-box;}',
+    '.ls-project-card .ls-project-card__info{flex:0 0 auto!important;}',
+    '.ls-project-card .ls-project-card__detail{display:none!important;}',
     '.ovw-summary{',
+      'flex:0 0 auto!important;',
       '--ovw-label:#595959;--ovw-track:rgba(0,0,0,.08);--ovw-divider:rgba(0,0,0,.08);--ovw-hover:rgba(0,0,0,.045);--ovw-icon:rgba(0,0,0,.35);',
       'display:block;width:100%;max-width:100%;box-sizing:border-box;',
-      'position:relative;margin:6px 0 10px 0;padding:10px 16px 8px 16px;',
+      'position:relative;margin:6px 0 0;padding:10px 16px 0;',
       'border-top:1px dashed var(--ovw-divider);color:#262626;',
       'font:12px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif;',
     '}',
@@ -3050,12 +3087,10 @@
     '.ovw-toolbar__btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;margin-left:8px;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:rgba(0,0,0,.88);cursor:pointer;font-size:13px;line-height:1;white-space:nowrap;transition:all .15s ease;font-family:inherit;}',
     '.ovw-toolbar__btn[hidden]{display:none!important;}',
     '.ovw-toolbar__btn:hover,.ovw-toolbar__btn.is-open{color:#1677ff;border-color:#1677ff;background:rgba(22,119,255,.03);}',
-    '.ovw-toolbar__panel{position:absolute;top:calc(100% + 6px);right:0;z-index:1000000;min-width:320px;padding:0;border:1px solid rgba(0,0,0,.06);border-radius:10px;background:#fff;box-shadow:0 8px 28px rgba(0,0,0,.13);overflow:hidden;}',
+    '.ovw-toolbar__panel{position:absolute;top:calc(100% + 6px);left:8px;right:auto;z-index:1000000;width:320px;max-width:calc(100vw - 16px);min-width:0;box-sizing:border-box;padding:0;border:1px solid rgba(0,0,0,.06);border-radius:10px;background:#fff;box-shadow:0 8px 28px rgba(0,0,0,.13);overflow:hidden;}',
     '.ovw-toolbar__panel-head{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 14px 8px;font-size:12px;color:#8c8c8c;border-bottom:1px solid rgba(0,0,0,.04);}',
     '.ovw-toolbar__acts{display:inline-flex;align-items:center;gap:10px;flex:0 0 auto;}',
     '.ovw-toolbar__reset{border:0;background:transparent;color:#1677ff;cursor:pointer;font-size:12px;padding:0;font-family:inherit;}',
-    '.ovw-toolbar__closestat{border:0;background:transparent;color:#fa8c16;cursor:pointer;font-size:12px;padding:0;font-family:inherit;}',
-    '.ovw-toolbar__closestat:hover{color:#d46b08;}',
     '.ovw-toolbar__hideall{border:0;background:transparent;color:#8c8c8c;cursor:pointer;font-size:12px;padding:0;font-family:inherit;transition:all .15s ease;border-radius:4px;}',
     '.ovw-toolbar__hideall:hover{color:#ff4d4f;}',
     '.ovw-toolbar__hideall.is-on{background:#fa8c16;color:#fff;padding:1px 8px;border-radius:4px;font-weight:600;box-shadow:0 1px 4px rgba(250,140,22,.35);}',
@@ -3415,6 +3450,7 @@
     else stopDataScrapeObserver();
   }
   window.addEventListener('insta360-suite:route', function () { setTimeout(checkRoute, 0); });
+  window.addEventListener('resize', function () { positionFieldsPanel(document.querySelector('.ovw-toolbar')); });
 
   if (DEBUG) {
     window.__OVW = {
