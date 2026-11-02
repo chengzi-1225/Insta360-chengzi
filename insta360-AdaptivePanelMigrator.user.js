@@ -2,6 +2,8 @@
 // @name         自适应面板移植器
 // @namespace    http://tampermonkey.net/
 // @version      3.0.0
+// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-AdaptivePanelMigrator.user.js
+// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-AdaptivePanelMigrator.user.js
 // @description  将 Labels / Choices 完整卡片移入同一编辑器的 Relations，支持恢复、任务切换和媒体保护
 // @author       chengzi
 // @match        https://label.insta360.com/*
