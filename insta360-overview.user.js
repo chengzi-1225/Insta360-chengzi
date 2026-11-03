@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Insta360 项目概览工具箱
 // @namespace    https://label.insta360.com/
-// @author       chengzi
-// @version      4.6.5
+// @author       chengzi / Codex
+// @version      4.6.6
 // @description  项目概览与跳过数据统计、精简原生卡片、项目权限、成员快速分配与卡片隐藏
 // @match        *://label.insta360.com/*
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
@@ -977,7 +977,7 @@
     PENDING_ANNOTATION: 1, ANNOTATED: 1,
     REVIEWED_ACCEPTED: 1, REVIEWED_REJECTED: 1,
     REWORK: 1, reworkTotal: 1,
-    REPAIR: 1
+    REPAIR: 1, SKIPPED: 1
   };
   var STATUS_ALIASES = {
     PENDING: 'PENDING_ANNOTATION', PENDING_ANNOTATION: 'PENDING_ANNOTATION',
@@ -3235,7 +3235,7 @@
   function findValueInput(panel) {
     var valCol = panel.querySelector('.dm-filter-line__column.dm-value, .dm-value');
     if (!valCol) return null;
-    return valCol.querySelector('input.dm-input, input[type="text"]');
+    return valCol.querySelector('input.dm-input, input[type="text"], input[type="number"]');
   }
   function hasFilterRow(panel) {
     return !!panel.querySelector('.dm-filter-line__column.dm-field, .dm-filter-line__column.dm-value');
@@ -3273,7 +3273,8 @@
     return false;
   }
   async function autoFillFilter(intent) {
-    var candidates = intent.candidates || [intent.filterValue || intent.code];
+    var isSkipped = intent.code === 'SKIPPED';
+    var candidates = isSkipped ? ['0'] : (intent.candidates || [intent.filterValue || intent.code]);
     log('自动筛选开始，候选值：', candidates);
     var btn = findFiltersButton();
     if (!btn) { log('未找到 Filters 按钮'); return false; }
@@ -3291,17 +3292,32 @@
     }
     if (!hasFilterRow(panel)) { log('筛选行未出现'); return false; }
     log('筛选行存在');
+    // Skipped is a count of cancelled annotations, not a workflow State.
+    var fieldMatches = isSkipped
+      ? function (text) { return /跳过|skipped|cancelled[\s_]*annotations/i.test(text); }
+      : function (text) { return /State|状态/i.test(text); };
     var fieldTrigger = findFieldTrigger(panel);
     if (fieldTrigger) {
       var fieldTxt = (fieldTrigger.textContent || '').replace(/__Cici__\S+/g, '').trim();
       log('当前字段：', fieldTxt);
-      if (!/State|状态/i.test(fieldTxt)) {
-        await selectOptionFromDropdown(fieldTrigger, function (t) { return /State|状态/i.test(t); });
+      if (!fieldMatches(fieldTxt)) {
+        var selected = await selectOptionFromDropdown(fieldTrigger, fieldMatches);
+        if (isSkipped && !selected) return false;
         await sleep(200);
         fieldTrigger = findFieldTrigger(panel);
         if (fieldTrigger) log('切换后字段：', (fieldTrigger.textContent || '').replace(/__Cici__\S+/g, '').trim());
       }
     } else log('未找到字段触发器');
+    if (isSkipped) {
+      if (!fieldTrigger || !fieldMatches(fieldTrigger.textContent || '')) return false;
+      var operationColumn = panel.querySelector('.dm-filter-line__column.dm-operation, .dm-operation');
+      var operationTrigger = operationColumn && operationColumn.querySelector('.dm-select__selected, .dm-dropdown__trigger');
+      if (!operationTrigger) return false;
+      var isGreater = function (text) { return /^(?:>|大于|greater\s+than|is\s+greater\s+than)$/i.test(text.trim()); };
+      if (!isGreater(operationTrigger.textContent || '')) {
+        if (!await selectOptionFromDropdown(operationTrigger, isGreater)) return false;
+      }
+    }
     var valueInput = findValueInput(panel);
     if (!valueInput) { log('未找到值输入框'); return false; }
     for (var ci = 0; ci < candidates.length; ci++) {
@@ -3332,13 +3348,19 @@
       if (CONFIG.autoApplyFilter) {
         for (var i = 0; i < 30; i++) { if (findFiltersButton()) break; await sleep(200); }
         var ok = await autoFillFilter(intent);
+        if (!ok && intent.code === 'SKIPPED') {
+          var suite = window.__INSTA360_SUITE__;
+          if (suite && typeof suite.toast === 'function') {
+            suite.toast('自动筛选未完成，请在筛选器中选择“跳过次数 > 0”', 'error');
+          }
+        }
         log('自动筛选结果：', ok);
       }
     }, 1200);
   }
   function injectFilterHint(intent) {
     if (document.querySelector('.ovw-filter-hint')) return;
-    var cands = (intent.candidates || []).join(' / ');
+    var cands = intent.code === 'SKIPPED' ? '跳过次数 > 0' : (intent.candidates || []).join(' / ');
     var hint = document.createElement('div');
     hint.className = 'ovw-filter-hint';
     hint.innerHTML =
