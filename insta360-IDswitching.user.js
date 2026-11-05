@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         insta360-IDswitching
 // @namespace    local.ls.toolkit
-// @version      3.18.0
+// @version      3.18.1
 // @description  精简分组工具栏、预设全选与拖动框选；保留原生删框撤回、选中显隐、标签同步及自定义快捷键。
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
@@ -288,7 +288,7 @@
       if (target && target.closest('input,textarea,select,button,[role="button"],[role="textbox"],[role="combobox"],[contenteditable]:not([contenteditable="false"]),dialog,.ant-modal,.ant-drawer')) return;
       if (document.querySelector('dialog[open],.ant-modal-wrap:not([style*="display: none"])')) return;
       const key = event.key.toLowerCase();
-      if (!['a', 'd', 'tab', 's'].includes(key) || window.__CLEAR_TAGS && window.__CLEAR_TAGS.isRunning()) return;
+      if (!['a', 'd', 's'].includes(key) || window.__CLEAR_TAGS && window.__CLEAR_TAGS.isRunning()) return;
       event.preventDefault(); event.stopImmediatePropagation();
       if (key === 's') { if (!event.repeat) cycleRatio(); }
       else navigate(key === 'a' ? -1 : 1);
@@ -434,7 +434,7 @@
         toolbarNode.append(label, button);
         for (const [direction, name, text] of [[-1, '上一个 ID', '← 上一 ID'], [1, '下一个 ID', '下一 ID →']]) {
           const nav = document.createElement('button'); nav.type = 'button'; nav.textContent = text;
-          nav.setAttribute('aria-label', name); nav.title = direction < 0 ? '上一个 ID（A）' : '下一个 ID（D / Tab）';
+          nav.setAttribute('aria-label', name); nav.title = direction < 0 ? '上一个 ID（A）' : '下一个 ID（D）';
           nav.style.cssText = 'height:24px;padding:0 8px;border:1px solid #d5deea;border-radius:4px;background:#fff;color:#526780;font:inherit;cursor:pointer;white-space:nowrap';
           nav.addEventListener('mousedown', event => event.preventDefault());
           nav.addEventListener('click', () => navigate(direction)); toolbarNode.appendChild(nav);
@@ -442,7 +442,7 @@
         const scope = document.createElement('div'); scope.id = '__selected_visibility_scope';
         scope.style.cssText = 'display:flex;align-items:center;flex-wrap:wrap;gap:7px;width:100%;min-width:0;color:#64748b';
         const select = document.createElement('select'); select.id = '__selected_visibility_ratio';
-        select.setAttribute('aria-label', 'ID切换比例'); select.title = 'A / D / Tab 切换 ID，S 循环五种比例';
+        select.setAttribute('aria-label', 'ID切换比例'); select.title = 'A / D 切换 ID，S 循环五种比例';
         select.style.cssText = 'height:26px;max-width:100%;padding:0 5px;border:1px solid #d5deea;border-radius:4px;background:#fff;color:#526780;font:inherit';
         for (const [value, text] of [['all', '全部五种比例'], ...RATIOS.map(value => [value, value])]) {
           const option = document.createElement('option'); option.value = value; option.textContent = text; select.appendChild(option);
@@ -483,7 +483,7 @@
       const select = scope.querySelector('select');
       if (select.value !== selectedRatio) select.value = selectedRatio;
       if (!external) {
-        const count = scope.querySelector('span'), text = `${navigationItems().length} 个 ID · A / D / Tab`;
+        const count = scope.querySelector('span'), text = `${navigationItems().length} 个 ID · A / D`;
         if (count.textContent !== text) count.textContent = text;
       }
       editing.mount(toolbarNode);
@@ -591,7 +591,7 @@
   })();
   // END SHARED SELECTED VISIBILITY
 
-  // 标题栏放比例选择和快捷键入口，其他操作放下方，避开原生排序栏。
+  // 所有入口放在页签下方的独立工具区，适配窄侧栏并保留原生页签布局。
   let outlinerHeaderControls = null;
   function ensureOutlinerToolbar() {
     const outliner = Array.from(document.querySelectorAll('.lsf-outliner'))
@@ -607,32 +607,28 @@
       const style = document.createElement('style');
       style.id = '__id_switch_toolbar_style';
       style.textContent = `
-        #__id_switch_toolbar{display:flex!important;flex-direction:column!important;gap:8px!important;
+        #__id_switch_toolbar{display:flex!important;flex-direction:column!important;gap:7px!important;
           box-sizing:border-box!important;width:100%!important;min-width:0!important;max-width:100%!important;
-          height:auto!important;flex:0 0 auto!important;align-self:stretch!important;padding:8px 10px!important;
-          margin:0!important;border-bottom:1px solid #e2e8f0;background:#f8fafc;overflow:visible!important;
+          height:auto!important;flex:0 0 auto!important;align-self:stretch!important;padding:9px 10px!important;
+          margin:0!important;border-bottom:1px solid #e2e8f0;background:#fff;overflow:visible!important;
           font:12px/1.4 system-ui,-apple-system,"PingFang SC",sans-serif;white-space:normal!important}
         #__id_switch_toolbar[hidden],#__id_switch_header_controls[hidden]{display:none!important}
-        [data-id-switch-header]{display:flex!important;flex-wrap:wrap!important;align-items:center!important;
-          gap:6px!important;box-sizing:border-box!important;width:100%!important;min-width:0!important;
-          max-width:100%!important;height:auto!important;min-height:30px!important;max-height:none!important;
-          flex-shrink:0!important;overflow:visible!important;white-space:normal!important}
-        [data-id-switch-header]>.lsf-tabs__tab-container{flex:0 1 auto!important;min-width:0!important;width:auto!important;max-width:100%!important}
-        [data-id-switch-header]>.lsf-tabs__drop-space-after{flex:1 1 0!important;min-width:0!important;width:auto!important}
-        #__id_switch_header_controls{display:flex!important;flex-wrap:wrap!important;align-items:center!important;
-          justify-content:flex-end;gap:6px!important;min-width:0!important;max-width:100%!important;
-          flex:0 1 auto!important;margin-left:auto!important;padding:3px 0;box-sizing:border-box!important;
+        #__id_switch_header_controls{display:grid!important;grid-template-columns:repeat(2,minmax(0,1fr));align-items:center!important;
+          gap:7px!important;min-width:0!important;width:100%!important;max-width:100%!important;
+          margin:0!important;padding:0;box-sizing:border-box!important;
           font:12px/1.4 system-ui,-apple-system,"PingFang SC",sans-serif;white-space:normal!important}
         #__id_switch_preset_row,#__id_switch_action_row{display:flex!important;flex-wrap:wrap!important;
           align-items:center!important;gap:6px!important;min-width:0!important;max-width:100%!important;
           width:100%!important;box-sizing:border-box!important}
-        #__id_switch_header_controls #__outliner_ratio_controls{display:flex!important;flex-wrap:wrap!important;
-          align-items:center!important;gap:6px!important;width:auto!important;max-width:100%!important;
+        #__id_switch_action_row{display:grid!important;grid-template-columns:minmax(0,1fr) auto;gap:7px!important}
+        #__id_switch_header_controls #__outliner_ratio_controls{display:flex!important;
+          align-items:center!important;width:100%!important;max-width:100%!important;
           min-width:0!important;margin:0!important;box-sizing:border-box!important;white-space:normal!important}
         #__outliner_ratio_actions{display:flex;flex-wrap:wrap;align-items:center;gap:6px;max-width:100%;min-width:0}
-        #__id_switch_toolbar button,#__id_switch_header_controls button{flex:0 0 auto;max-width:100%;margin-left:0!important}
+        #__id_switch_toolbar button,#__id_switch_header_controls button{flex:0 0 auto;min-width:0;max-width:100%;margin:0!important}
+        #__id_switch_header_controls>button{width:100%;border:1px solid #d9e1eb!important;background:#fff!important;color:#53647a!important}
         #__outliner_ratio_trigger{display:inline-flex;align-items:center;justify-content:center;gap:7px;
-          box-sizing:border-box;height:28px;min-width:94px;max-width:164px!important;padding:0 9px;
+          box-sizing:border-box;height:28px;width:100%;min-width:0;max-width:100%!important;padding:0 9px;
           border:1px solid #d5dfea;border-radius:6px;background:#fff;color:#3b4d65;cursor:pointer;
           font:12px/1.4 system-ui,-apple-system,"PingFang SC",sans-serif;white-space:nowrap}
         #__outliner_ratio_trigger:hover{border-color:#a5bedc;background:#f8fbff}
@@ -671,7 +667,7 @@
         .preset-marquee{position:fixed;z-index:100010;pointer-events:none;border:1px solid #287ce4;
           background:#287ce41c;border-radius:3px;box-sizing:border-box}
         .preset-marquee[data-action=remove]{border-color:#c78c4e;background:#c78c4e1c}
-        #__id_switch_toolbar{gap:9px!important;padding:12px!important;background:#f7f9fc;color:#33465f}
+        #__id_switch_toolbar{color:#33465f}
         #__id_switch_toolbar button,#__id_switch_header_controls button,
         #__selected_visibility_toolbar button{box-sizing:border-box;height:28px!important;min-height:28px;
           border-radius:6px!important;font-size:12px;line-height:1.3;transition:background .12s,border-color .12s}
@@ -679,14 +675,14 @@
         #__selected_visibility_toolbar button:focus-visible,#__label_actions_toolbar button:focus-visible{
           outline:2px solid #287ce4;outline-offset:2px}
         #__id_switch_toolbar button:disabled{opacity:.42!important;cursor:default!important}
-        #__outliner_mode_btn{color:#315782!important;background:#edf4fd!important;border-color:#c8daef!important;
-          overflow:hidden;text-overflow:ellipsis;max-width:100%}
-        #__id_switch_preset_details{border-top:1px solid #e3e9f1;padding-top:8px;color:#6a7c92}
-        #__id_switch_preset_details>summary{cursor:pointer;width:fit-content;font-size:11px;user-select:none}
+        #__outliner_mode_btn{color:#315782!important;background:#f2f6fc!important;border-color:#d8e3f1!important;
+          overflow:hidden;text-overflow:ellipsis;max-width:100%;text-align:left}
+        #__id_switch_preset_details{padding-top:1px;color:#7c8b9f}
+        #__id_switch_preset_details>summary{cursor:pointer;width:fit-content;font-size:11px;line-height:20px;user-select:none}
         #__id_switch_preset_details[open]>summary{margin-bottom:8px}
         #__outliner_ratio_actions>span:first-child{display:none}
         #__outliner_ratio_actions button,#__ls_edit_history_controls button{color:#526780!important;background:#fff!important}
-        #__selected_visibility_toolbar{gap:7px!important;padding:9px 12px!important;background:#fff!important;color:#6a7c92}
+        #__selected_visibility_toolbar{gap:7px!important;padding:6px 10px!important;background:#fff!important;color:#6a7c92}
         #__id_switch_toolbar~#__selected_visibility_toolbar button[aria-label="上一个 ID"],
         #__id_switch_toolbar~#__selected_visibility_toolbar button[aria-label="下一个 ID"]{display:none!important}
         #__label_actions_toolbar{gap:7px!important;padding-top:10px!important;border-top:1px solid #edf0f5}
@@ -741,18 +737,13 @@
           !node.closest('.lsf-panel-tabs__ghost-tab') && /^Regions$/i.test(node.textContent.trim()));
       if (tab) { header = candidate; regionTab = tab; break; }
     }
+    const previous = quick.parentElement;
+    if (previous && previous.hasAttribute('data-id-switch-header')) previous.removeAttribute('data-id-switch-header');
+    if (header && header.hasAttribute('data-id-switch-header')) header.removeAttribute('data-id-switch-header');
+    if (root.firstElementChild !== quick) root.prepend(quick);
     if (header) {
-      const previous = quick.parentElement;
-      if (previous && previous !== header && previous.hasAttribute('data-id-switch-header')) previous.removeAttribute('data-id-switch-header');
-      if (!header.hasAttribute('data-id-switch-header')) header.setAttribute('data-id-switch-header', '');
-      if (quick.parentElement !== header) header.appendChild(quick);
       if (header.nextElementSibling !== root) header.after(root);
-    } else {
-      const previous = quick.parentElement;
-      if (previous && previous.hasAttribute('data-id-switch-header')) previous.removeAttribute('data-id-switch-header');
-      if (root.firstElementChild !== quick) root.prepend(quick);
-      if (outliner.firstElementChild !== root) outliner.prepend(root);
-    }
+    } else if (outliner.firstElementChild !== root) outliner.prepend(root);
     const inactive = !!regionTab && !regionTab.classList.contains('lsf-panel-tabs__tab_active');
     if (root.hidden !== inactive) root.hidden = inactive;
     if (quick.hidden !== inactive) quick.hidden = inactive;
@@ -934,13 +925,12 @@
           disabled ? '勾选单个预设后可删除，也可打开“新增”管理' : `从预设列表删除 ${ratioLabel(selectedRatio)}，保留标注框`;
         if (remove.title !== title) remove.title = title;
       }
-      const title = `当前：${currentMode().label}；勾选即生效，支持多选并自动保存`;
+      const title = `当前预设：${presetSummary()}；勾选即生效，支持多选并自动保存`;
       if (select.title !== title) select.title = title;
       const trigger = document.getElementById(RATIO_TRIGGER_ID);
       if (trigger) {
         const summary = trigger.querySelector('.preset-summary');
-        const text = currentMode().ratioKey === 'all' ? '全部比例' : active.size > 1 ? `${active.size} 项` :
-          active.size ? ratioLabel([...active][0]) : '未选择';
+        const text = presetSummary();
         if (summary.textContent !== text) summary.textContent = text;
         if (trigger.title !== title) trigger.title = title;
         const count = ratioPopover.querySelector('.preset-count');
@@ -1010,6 +1000,12 @@
       if (!key || key === NONE_KEY) return [];
       if (key === 'all') return ratioChoices().map(ratio => ratio.key);
       return key === MULTI_KEY ? [...selectedMultiple] : [key];
+    }
+
+    function presetSummary() {
+      const keys = checkedPresetKeys(), presets = allRatios();
+      if (presets.length && keys.length === presets.length) return '全选';
+      return keys.length > 1 ? `${keys.length} 项` : keys.length ? ratioLabel(keys[0]) : '未选择';
     }
 
     function selectPresetKeys(keys) {
@@ -1237,12 +1233,12 @@
       updateRatioControls();
       const btn = document.getElementById(MODE_BTN_ID);
       if (!btn) return;
-      const m = currentMode();
       const av = getAvail();
-      const text = `ID：${m.label}（${av.length}）`;
+      const summary = presetSummary();
+      const text = summary === '全选' ? '全选' : `${summary} · ${av.length} 个框`;
       if (btn.textContent !== text) btn.textContent = text;
       const shortcut = window.__LS_SHORTCUTS ? window.__LS_SHORTCUTS.hint('mode') : 'S';
-      const title = `当前模式：${m.label}\n点击切换${shortcut ? `（也可按 ${shortcut}）` : '（未绑定快捷键）'}`;
+      const title = `当前预设：${summary} · ${av.length} 个框\n点击切换${shortcut ? `（也可按 ${shortcut}）` : '（未绑定快捷键）'}`;
       if (btn.title !== title) btn.title = title;
     }
 
@@ -1261,7 +1257,7 @@
       syncManual();
       saveMode(currentMode()); // 写入 localStorage，下次打开保持
       const av = getAvail();
-      showToast(`切换 ID 模式：${currentMode().label}（${av.length} 项）`, 1600);
+      showToast(`切换 ID 模式：${presetSummary()}（${av.length} 项）`, 1600);
       updateModeButton();
       if (currentMode().namedLabel) next();
       return currentMode();
@@ -1277,7 +1273,7 @@
       syncManual();
       saveMode(currentMode()); // 写入 localStorage，下次打开保持
       const av = getAvail();
-      showToast(`切换 ID 模式：${currentMode().label}（${av.length} 项）`, 1600);
+      showToast(`切换 ID 模式：${presetSummary()}（${av.length} 项）`, 1600);
       updateModeButton();
       return currentMode().id;
     }
@@ -2954,7 +2950,6 @@
     const ACTIONS = [
       { id: 'previous', label: '上一个 ID', key: 'A', navigation: true, run: () => window.__OUTLINER.prev() },
       { id: 'next', label: '下一个 ID', key: 'D', navigation: true, run: () => window.__OUTLINER.next() },
-      { id: 'nextAlt', label: '下一个 ID（备用）', key: 'Tab', navigation: true, run: () => window.__OUTLINER.next() },
       { id: 'mode', label: '切换 ID 模式', key: 'S', run: () => window.__OUTLINER.toggle() },
       { id: 'update', label: '更新 / 保存', key: 'Space', run: () => window.__OUTLINER.update() },
       { id: 'deleteSelected', label: '删除选中框', key: 'Shift+Delete', run: () => window.__REGION_DELETE.run() },
@@ -3502,7 +3497,7 @@
 
     load();
     window.__LS_SHORTCUTS = {
-      version: '3.18.0', open: openSettings, scan: scanPage,
+      version: '3.18.1', open: openSettings, scan: scanPage,
       hint: id => bindings()[id] || '',
       state: () => ({ bindings: bindings(), defaults: { ...defaults }, overrides: { ...overrides },
         pageActions: Array.from(pageActions.values(), ({ id, label, page, matches, available }) => ({ id, label, group: page.group, matches, available })) }),
@@ -3511,5 +3506,5 @@
     else start();
   })();
 
-  console.log('[LabelStudio 工具集] v3.18.0 已加载');
+  console.log('[LabelStudio 工具集] v3.18.1 已加载');
 })();
