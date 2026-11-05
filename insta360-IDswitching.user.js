@@ -3232,11 +3232,14 @@
       const label = document.createElement('label'); label.textContent = action.label;
       const input = document.createElement('input'); input.type = 'text'; input.readOnly = true;
       input.id = `__shortcut_${action.id}`; input.dataset.shortcutId = action.id; input.placeholder = '未绑定';
+      input.title = '点击后按下快捷键；Backspace / Delete 清空';
       label.htmlFor = input.id;
       const clear = document.createElement('button'); clear.type = 'button'; clear.className = 'shortcut-clear';
       clear.textContent = '清除'; clear.setAttribute('aria-label', `清除${action.label}${action.page?.group ? `（${action.page.group}）` : ''}`);
       clear.addEventListener('click', () => { draft[action.id] = ''; refreshFields(); });
       const hint = document.createElement('small');
+      hint.id = `__shortcut_hint_${action.id}`;
+      input.setAttribute('aria-describedby', hint.id);
       if (action.page) {
         const status = action.matches > 1 ? `同名 ${action.matches} 个，暂不可执行` :
           !action.matches ? '当前页未找到' : !action.available ? '当前不可用' :
@@ -3245,7 +3248,9 @@
         if (action.matches !== 1 || !action.available) hint.className = 'shortcut-unavailable';
         row.dataset.pageActionId = action.id; label.title = hint.textContent;
       } else hint.dataset.defaultId = action.id;
-      row.append(label, input, clear, hint);
+      const description = document.createElement('div'); description.className = 'shortcut-description';
+      description.append(label, hint);
+      row.append(description, input, clear);
       return row;
     }
 
@@ -3263,7 +3268,8 @@
       const count = Array.from(pageActions.values()).filter(action => action.matches).length;
       scanStatus.textContent = `发现 ${count} 项 · 显示 ${actions.length} 项`;
       if (!actions.length) {
-        const empty = document.createElement('p'); empty.textContent = filter ? '没有匹配项' : '当前页没有可识别的按钮或标签';
+        const empty = document.createElement('p'); empty.className = 'shortcut-empty';
+        empty.textContent = filter ? '没有匹配项，试试其他名称' : '当前页没有可识别的按钮或标签';
         pageRows.appendChild(empty);
       }
     }
@@ -3292,39 +3298,126 @@
     function buildDialog() {
       const style = document.createElement('style');
       style.textContent = `
-        #${DIALOG_ID}{box-sizing:border-box;width:min(760px,calc(100vw - 32px));max-height:90vh;overflow:auto;padding:24px;border:1px solid #d8dee8;border-radius:12px;background:#fff;color:#253047;box-shadow:0 16px 60px #0004;font:14px/1.5 system-ui,-apple-system,"PingFang SC",sans-serif}
-        #${DIALOG_ID}::backdrop{background:#17203377}
-        #${DIALOG_ID} h2{font-size:20px;margin:0 0 6px} #${DIALOG_ID} p{margin:0 0 16px;color:#657186}
-        #${DIALOG_ID} .shortcut-rows{display:grid;gap:7px}
-        #${DIALOG_ID} .shortcut-row{display:grid;grid-template-columns:minmax(140px,1fr) minmax(110px,1fr) 48px 112px;align-items:center;gap:10px}
-        #${DIALOG_ID} input{box-sizing:border-box;width:100%;height:30px;border:1px solid #cad3df;border-radius:5px;padding:4px 8px;background:#f8fafc;color:#26364c;font:13px/1.4 ui-monospace,monospace;cursor:pointer}
-        #${DIALOG_ID} input:focus{outline:2px solid #409eff;outline-offset:1px;background:#fff}
-        #${DIALOG_ID} small{font-size:11px;color:#778398} #${DIALOG_ID} button{font:inherit;cursor:pointer;border:1px solid #cbd3df;border-radius:5px;background:#fff;color:#334155;padding:5px 12px}
-        #${DIALOG_ID} .shortcut-clear{font-size:12px;padding:3px 5px} #${DIALOG_ID} .shortcut-footer{display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap}
-        #${DIALOG_ID} .shortcut-reset{margin-right:auto} #${DIALOG_ID} .shortcut-save{background:#287ce4;border-color:#287ce4;color:white}
-        #${DIALOG_ID} [role=alert]{min-height:22px;margin:12px 0;color:#bc3232}
-        #${DIALOG_ID} .shortcut-page-section{margin-top:20px;padding-top:16px;border-top:1px solid #e2e8f0}
-        #${DIALOG_ID} .shortcut-page-section h3{margin:0 0 6px;font-size:15px}
-        #${DIALOG_ID} .shortcut-scan-tools{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
-        #${DIALOG_ID} .shortcut-scan-tools input{flex:1 1 180px;cursor:text}
-        #${DIALOG_ID} .shortcut-page-rows{max-height:260px;overflow:auto;padding:3px 4px 5px 1px;overscroll-behavior:contain}
-        #${DIALOG_ID} .shortcut-page-rows label{overflow-wrap:anywhere;min-width:0}
-        #${DIALOG_ID} .shortcut-unavailable{color:#aa7336}
-        #${DIALOG_ID} .shortcut-footer{position:sticky;bottom:-24px;background:white;padding:12px 0 8px;margin-bottom:-8px;border-top:1px solid #edf0f4}
-        @media(max-width:560px){#${DIALOG_ID}{padding:16px}#${DIALOG_ID} .shortcut-row{grid-template-columns:1fr 1fr 44px}#${DIALOG_ID} small{display:none}}
+        #${DIALOG_ID}{box-sizing:border-box;width:min(900px,calc(100vw - 32px));max-height:calc(100vh - 40px);
+          max-height:calc(100dvh - 40px);margin:auto;padding:0;overflow:hidden;border:1px solid #d9e3ef;
+          border-radius:14px;background:#fff;color:#30445e;box-shadow:0 20px 80px #152d4a33;
+          font:13px/1.5 system-ui,-apple-system,"PingFang SC",sans-serif}
+        #${DIALOG_ID}[open]{display:flex;flex-direction:column}
+        #${DIALOG_ID} *,#${DIALOG_ID} *::before,#${DIALOG_ID} *::after{box-sizing:border-box}
+        #${DIALOG_ID}::backdrop{background:#172c4666}
+        #${DIALOG_ID} .shortcut-header{display:flex;align-items:flex-start;justify-content:space-between;
+          gap:16px;padding:21px 24px 16px;flex:0 0 auto}
+        #${DIALOG_ID} h2{margin:0 0 5px;font-size:19px;line-height:1.4;font-weight:650;color:#243a55}
+        #${DIALOG_ID} p{margin:0;color:#8090a5;font-size:12px;line-height:1.65}
+        #${DIALOG_ID} button{font:inherit;cursor:pointer;border:1px solid #d8e2ee;border-radius:6px;
+          background:#fff;color:#566c88;padding:7px 12px;line-height:1.4;transition:background .12s,border-color .12s}
+        #${DIALOG_ID} button:hover{border-color:#a8c5e7;background:#f2f7fe;color:#246bc1}
+        #${DIALOG_ID} button:focus-visible{outline:2px solid #287ce4;outline-offset:2px}
+        #${DIALOG_ID} .shortcut-close{display:grid;place-items:center;flex:0 0 30px;width:30px;height:30px;
+          padding:0;border-color:transparent;background:#f4f7fb;color:#8393a8;font-size:23px;font-weight:300;line-height:1}
+        #${DIALOG_ID} .shortcut-tips{display:flex;align-items:center;gap:6px 14px;flex-wrap:wrap;padding:0 24px 17px;
+          color:#8b9aaf;font-size:11px;flex:0 0 auto}
+        #${DIALOG_ID} kbd{font:11px/1.4 ui-monospace,monospace;padding:1px 4px;border:1px solid #dfe7f1;
+          border-radius:4px;background:#f7f9fc;color:#67809e}
+        #${DIALOG_ID} .shortcut-body{min-height:0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;
+          padding:20px 24px;background:#f5f8fc;border-top:1px solid #e8eef5;border-bottom:1px solid #e8eef5}
+        #${DIALOG_ID} .shortcut-core-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
+        #${DIALOG_ID} .shortcut-section{min-width:0;padding:16px;border:1px solid #e0e8f2;border-radius:9px;background:#fff}
+        #${DIALOG_ID} .shortcut-section-heading{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px}
+        #${DIALOG_ID} h3{font-size:13px;font-weight:650;margin:0;color:#3d5573}
+        #${DIALOG_ID} .shortcut-section-count{font-size:10px;white-space:nowrap;color:#7e92ac;background:#f0f4f9;padding:2px 6px;border-radius:4px}
+        #${DIALOG_ID} .shortcut-rows{display:grid;gap:0}
+        #${DIALOG_ID} .shortcut-row{display:grid;grid-template-columns:minmax(0,1fr) 132px 34px;
+          align-items:center;gap:8px;min-height:58px;padding:9px 0;border-top:1px solid #f0f3f8}
+        #${DIALOG_ID} .shortcut-row:first-child{border-top:0;padding-top:3px}
+        #${DIALOG_ID} .shortcut-description{min-width:0}
+        #${DIALOG_ID} .shortcut-description label{display:block;color:#49617e;font-size:12px;font-weight:500;line-height:1.5;overflow-wrap:anywhere;cursor:pointer}
+        #${DIALOG_ID} .shortcut-description small{display:block;margin-top:2px;font-size:10px;color:#94a3b7;line-height:1.5;overflow-wrap:anywhere}
+        #${DIALOG_ID} input{width:100%;min-width:0;height:34px;border:1px solid #d5dfec;border-radius:6px;
+          padding:5px 7px;background:#f8fafd;color:#355a87;font:600 12px/1.4 ui-monospace,monospace;text-align:center;cursor:pointer}
+        #${DIALOG_ID} input::placeholder{font-weight:400;color:#acb8c9}
+        #${DIALOG_ID} input:focus{outline:2px solid #84b3ed;outline-offset:1px;border-color:#82afe7;background:#fff}
+        #${DIALOG_ID} .shortcut-clear{padding:4px 0;border-color:transparent;background:transparent;color:#99a8bb;font-size:11px;white-space:nowrap}
+        #${DIALOG_ID} .shortcut-page-section{margin-top:16px}
+        #${DIALOG_ID} .shortcut-page-summary{display:flex;align-items:center;gap:10px;cursor:pointer;list-style:none;user-select:none}
+        #${DIALOG_ID} .shortcut-page-summary::-webkit-details-marker{display:none}
+        #${DIALOG_ID} .shortcut-page-title{margin-right:auto;font-size:13px;font-weight:650;color:#3d5573}
+        #${DIALOG_ID} .shortcut-page-summary::after{content:'';width:7px;height:7px;margin:0 3px 4px 1px;
+          border-right:1.5px solid #91a3ba;border-bottom:1.5px solid #91a3ba;transform:rotate(45deg)}
+        #${DIALOG_ID} .shortcut-page-section[open]>.shortcut-page-summary{margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid #edf1f6}
+        #${DIALOG_ID} .shortcut-page-section[open]>.shortcut-page-summary::after{transform:rotate(225deg);margin-top:6px}
+        #${DIALOG_ID} .shortcut-page-summary:focus-visible{outline:2px solid #287ce4;outline-offset:5px;border-radius:3px}
+        #${DIALOG_ID} .shortcut-page-section>p{font-size:11px;margin-bottom:12px}
+        #${DIALOG_ID} .shortcut-scan-tools{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;margin-bottom:6px}
+        #${DIALOG_ID} .shortcut-scan-tools input{font:12px/1.4 system-ui,-apple-system,"PingFang SC",sans-serif;text-align:left;cursor:text;background:#fff;padding:5px 11px}
+        #${DIALOG_ID} .shortcut-scan-tools button{height:34px;font-size:12px;white-space:nowrap}
+        #${DIALOG_ID} .shortcut-scan-tools small{grid-column:1/-1;color:#8fa0b6;font-size:10px;margin:1px 0 5px}
+        #${DIALOG_ID} .shortcut-page-rows .shortcut-row{grid-template-columns:minmax(0,1fr) 168px 34px}
+        #${DIALOG_ID} .shortcut-description .shortcut-unavailable{color:#b48d61}
+        #${DIALOG_ID} .shortcut-empty{text-align:center;padding:24px 8px!important;color:#96a5b9}
+        #${DIALOG_ID} .shortcut-bottom{flex:0 0 auto;padding:14px 24px;background:#fff}
+        #${DIALOG_ID} [role=alert]{margin:0 0 12px;padding:9px 11px;border:1px solid #f0d6d3;border-radius:6px;
+          background:#fff6f5;font-size:12px;color:#b4544c;overflow-wrap:anywhere}
+        #${DIALOG_ID} [role=alert]:empty{display:none}
+        #${DIALOG_ID} .shortcut-footer{display:flex;align-items:center;gap:9px}
+        #${DIALOG_ID} .shortcut-reset{margin-right:auto}
+        #${DIALOG_ID} .shortcut-save{background:#287ce4;border-color:#287ce4;color:#fff;padding-left:18px;padding-right:18px}
+        #${DIALOG_ID} .shortcut-save:hover{background:#1e70d7;border-color:#1e70d7;color:#fff}
+        @media(max-width:760px){
+          #${DIALOG_ID}{width:calc(100vw - 24px);max-height:calc(100vh - 24px);max-height:calc(100dvh - 24px);border-radius:11px}
+          #${DIALOG_ID} .shortcut-header{padding:17px 16px 12px}
+          #${DIALOG_ID} .shortcut-tips{padding:0 16px 14px;gap:5px 12px;font-size:10px}
+          #${DIALOG_ID} .shortcut-body{padding:14px}
+          #${DIALOG_ID} .shortcut-core-grid{grid-template-columns:minmax(0,1fr);gap:12px}
+          #${DIALOG_ID} .shortcut-section{padding:14px}
+          #${DIALOG_ID} .shortcut-row,#${DIALOG_ID} .shortcut-page-rows .shortcut-row{grid-template-columns:minmax(0,1fr) 122px 30px;gap:6px}
+          #${DIALOG_ID} .shortcut-bottom{padding:12px 14px}
+          #${DIALOG_ID} .shortcut-footer{gap:7px}
+          #${DIALOG_ID} .shortcut-footer button{padding:7px 10px;font-size:12px}
+        }
+        @media(prefers-reduced-motion:reduce){#${DIALOG_ID} *{transition:none!important}}
       `;
       document.head.appendChild(style);
       dialog = document.createElement('dialog'); dialog.id = DIALOG_ID;
       dialog.setAttribute('aria-labelledby', '__shortcuts_title');
+      dialog.setAttribute('aria-describedby', '__shortcuts_help');
+      const header = document.createElement('div'); header.className = 'shortcut-header';
+      const intro = document.createElement('div');
       const title = document.createElement('h2'); title.id = '__shortcuts_title'; title.textContent = '快捷键设置';
-      const help = document.createElement('p');
-      help.textContent = '点击输入框录制按键，支持 Ctrl / Alt / Shift / Meta。单按 Backspace 或 Delete 清空，Escape 取消。页面按钮在下方自动发现，绑定后点击保存。';
-      dialog.append(title, help);
-      const rows = document.createElement('div'); rows.className = 'shortcut-rows';
-      for (const action of ACTIONS) rows.appendChild(actionRow(action));
-      const pageSection = document.createElement('section'); pageSection.className = 'shortcut-page-section';
-      const pageTitle = document.createElement('h3'); pageTitle.textContent = '页面按钮与标签';
-      const scanHelp = document.createElement('p'); scanHelp.textContent = '打开设置时自动扫描。未绑定的按钮只列出名称，不执行操作；同名且无法区分时暂停触发。';
+      const help = document.createElement('p'); help.id = '__shortcuts_help';
+      help.textContent = '点击按键框，按下新的快捷键。修改后点击保存。';
+      intro.append(title, help);
+      const close = document.createElement('button'); close.type = 'button'; close.className = 'shortcut-close';
+      close.textContent = '×'; close.setAttribute('aria-label', '关闭快捷键设置'); close.addEventListener('click', closeSettings);
+      header.append(intro, close);
+      const tips = document.createElement('div'); tips.className = 'shortcut-tips';
+      for (const [key, text] of [['Ctrl / ⌘ / Alt / Shift', '支持组合键'], ['Delete', '清空按键'], ['Esc', '取消修改']]) {
+        const item = document.createElement('span'), badge = document.createElement('kbd'); badge.textContent = key;
+        item.append(badge, ` ${text}`); tips.appendChild(item);
+      }
+      const body = document.createElement('div'); body.className = 'shortcut-body';
+      const core = document.createElement('div'); core.className = 'shortcut-core-grid';
+      for (const [id, text, actions] of [
+        ['navigation', '导航与操作', ACTIONS.filter(action => !action.choice)],
+        ['choices', '标签选择', ACTIONS.filter(action => action.choice)],
+      ]) {
+        const section = document.createElement('section'); section.className = 'shortcut-section';
+        const heading = document.createElement('div'); heading.className = 'shortcut-section-heading';
+        const name = document.createElement('h3'); name.id = `__shortcuts_${id}_title`; name.textContent = text;
+        section.setAttribute('aria-labelledby', name.id);
+        const count = document.createElement('span'); count.className = 'shortcut-section-count'; count.textContent = `${actions.length} 项`;
+        heading.append(name, count);
+        const rows = document.createElement('div'); rows.className = 'shortcut-rows';
+        for (const action of actions) rows.appendChild(actionRow(action));
+        section.append(heading, rows); core.appendChild(section);
+      }
+      const pageSection = document.createElement('details'); pageSection.className = 'shortcut-section shortcut-page-section';
+      const pageHeading = document.createElement('summary'); pageHeading.className = 'shortcut-page-summary';
+      const pageTitle = document.createElement('span'); pageTitle.className = 'shortcut-page-title'; pageTitle.textContent = '页面按钮与标签';
+      pageTitle.id = '__shortcuts_page_title'; pageSection.setAttribute('aria-labelledby', pageTitle.id);
+      const pageBadge = document.createElement('span'); pageBadge.className = 'shortcut-section-count'; pageBadge.textContent = '按需使用';
+      pageHeading.append(pageTitle, pageBadge);
+      const scanHelp = document.createElement('p'); scanHelp.textContent = '打开时自动扫描当前页面。搜索名称后录制按键，未绑定项不会触发操作。';
       const scanTools = document.createElement('div'); scanTools.className = 'shortcut-scan-tools';
       searchInput = document.createElement('input'); searchInput.type = 'search'; searchInput.placeholder = '搜索按钮或标签';
       searchInput.setAttribute('aria-label', '搜索页面按钮'); searchInput.addEventListener('input', renderPageRows);
@@ -3333,7 +3426,8 @@
       scanStatus = document.createElement('small'); scanStatus.setAttribute('role', 'status');
       scanTools.append(searchInput, rescan, scanStatus);
       pageRows = document.createElement('div'); pageRows.className = 'shortcut-rows shortcut-page-rows';
-      pageSection.append(pageTitle, scanHelp, scanTools, pageRows);
+      pageSection.append(pageHeading, scanHelp, scanTools, pageRows);
+      body.append(core, pageSection);
       errorNode = document.createElement('div'); errorNode.setAttribute('role', 'alert');
       const footer = document.createElement('div'); footer.className = 'shortcut-footer';
       for (const [text, cls, run] of [
@@ -3343,7 +3437,8 @@
         const button = document.createElement('button'); button.type = 'button'; button.textContent = text; button.className = cls;
         button.addEventListener('click', run); footer.appendChild(button);
       }
-      dialog.append(rows, pageSection, errorNode, footer);
+      const bottom = document.createElement('div'); bottom.className = 'shortcut-bottom'; bottom.append(errorNode, footer);
+      dialog.append(header, tips, body, bottom);
       dialog.addEventListener('cancel', event => { event.preventDefault(); closeSettings(); });
       dialog.addEventListener('close', () => { draft = null; if (previousFocus && previousFocus.isConnected) previousFocus.focus(); });
       document.body.appendChild(dialog);
@@ -3354,7 +3449,9 @@
       if (!dialog || !dialog.isConnected) buildDialog();
       if (dialog.open) return;
       previousFocus = document.activeElement;
+      dialog.querySelector('.shortcut-page-section').open = false;
       draft = bindings(); searchInput.value = ''; scanPage(); refreshFields(); dialog.showModal();
+      dialog.querySelector('.shortcut-body').scrollTop = 0;
     }
 
     function editing(event) {
