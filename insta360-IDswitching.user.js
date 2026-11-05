@@ -1,8 +1,10 @@
 // ==UserScript==
-// @name         id切换
+// @name         insta360-IDswitching
 // @namespace    local.ls.toolkit
 // @version      3.18.0
 // @description  精简分组工具栏、预设全选与拖动框选；保留原生删框撤回、选中显隐、标签同步及自定义快捷键。
+// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
+// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
 // @match        *://label.insta360.com/*
 // @match        *://*.labelstud.io/*
 // @run-at       document-idle
