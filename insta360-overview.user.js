@@ -2,7 +2,7 @@
 // @name         Insta360 项目概览工具箱
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      4.6.8
+// @version      4.6.9
 // @description  项目概览与跳过数据统计、精简原生卡片、项目权限、成员快速分配与卡片隐藏
 // @match        *://label.insta360.com/*
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
@@ -4721,7 +4721,7 @@
   var ITEM_SELECTOR = '.ls-projects-page__link, .ls-annotation-center-page__link, .ls-review-center-page__link, .ls-acceptance-center-page__link';
   var hidden = loadHidden();
   var entryButton = null;
-  var fallbackEntry = null;
+  var centerEntry = null;
   var popover = null;
   var observer = null;
   var scanTimer = null;
@@ -4878,12 +4878,12 @@
   }
 
   function updateEntryBadge(button) {
-    button = button || entryButton || fallbackEntry;
+    button = button || entryButton || centerEntry;
     if (!button) return;
-    var badge = button.querySelector('.ovw-suite-tool__badge, .ovw-suite-hide-fallback-badge');
+    var badge = button.querySelector('.ovw-suite-tool__badge, .ovw-suite-hide-center-badge');
     var total = Object.keys(hidden).length;
     if (badge) {
-      badge.textContent = String(total);
+      if (badge.textContent !== String(total)) badge.textContent = String(total);
       badge.hidden = total === 0;
     }
     var here = currentHiddenCount();
@@ -4893,27 +4893,39 @@
 
   function updateEntry() {
     updateEntryBadge(entryButton);
-    updateEntryBadge(fallbackEntry);
+    updateEntryBadge(centerEntry);
   }
 
-  function ensureFallbackEntry() {
+  function ensureCenterEntry() {
     if (suite.listPage()) {
-      if (fallbackEntry) fallbackEntry.hidden = true;
+      if (centerEntry) centerEntry.remove();
       return;
     }
-    if (!fallbackEntry) {
-      fallbackEntry = document.createElement('button');
-      fallbackEntry.type = 'button';
-      fallbackEntry.className = 'ovw-suite-hide-fallback';
-      fallbackEntry.innerHTML = '<span>隐藏项目</span><b class="ovw-suite-hide-fallback-badge" hidden></b>';
-      fallbackEntry.addEventListener('click', function (event) {
-        event.stopPropagation();
-        togglePopover(fallbackEntry);
-      });
-      document.body.appendChild(fallbackEntry);
+    var candidates = document.querySelectorAll('input[placeholder*="项目"], input[placeholder*="搜索"], input[type="search"]:not([role="combobox"])');
+    var input = [].slice.call(candidates).find(function (element) {
+      return !element.readOnly && element.getAttribute('role') !== 'combobox' &&
+        (element.offsetParent !== null || element.getClientRects().length);
+    });
+    var host = input && (input.closest('.ant-input-group-wrapper') || input.closest('.ant-input-search') || input.closest('.ant-input-affix-wrapper') || input.parentElement);
+    if (!host || !host.parentElement) {
+      if (centerEntry) centerEntry.remove();
+      return;
     }
-    fallbackEntry.hidden = false;
-    updateEntryBadge(fallbackEntry);
+    if (!centerEntry) {
+      centerEntry = document.createElement('button');
+      centerEntry.type = 'button';
+      centerEntry.className = 'ovw-suite-hide-center-entry';
+      centerEntry.innerHTML = '<span>隐藏项目</span><b class="ovw-suite-hide-center-badge" hidden></b>';
+      centerEntry.addEventListener('click', function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        togglePopover(centerEntry);
+      });
+    }
+    if (centerEntry.parentElement !== host.parentElement || centerEntry.nextSibling !== host) {
+      host.parentElement.insertBefore(centerEntry, host);
+    }
+    updateEntryBadge(centerEntry);
   }
 
   function closePopover() {
@@ -4972,8 +4984,8 @@
     style.id = 'ovw-suite-hidden-style';
     style.textContent = [
       '.ovw-suite-card-actions{position:absolute;top:6px;left:6px;z-index:24;display:none;align-items:center;gap:4px}.ls-project-card:hover>.ovw-suite-card-actions{display:flex}.ovw-suite-card-action{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;padding:0;border:1px solid rgba(0,0,0,.08);border-radius:5px;background:rgba(255,255,255,.94);color:#64748b;box-shadow:0 1px 4px rgba(0,0,0,.12);cursor:pointer}.ovw-suite-hide-card:hover{color:#dc2626;border-color:#fca5a5}',
-      '.ovw-suite-tool.has-current-hidden,.ovw-suite-hide-fallback.has-current-hidden{border-color:#f59e0b!important;background:#fffbeb!important;color:#b45309!important}',
-      '.ovw-suite-hide-fallback{position:fixed;right:18px;bottom:18px;z-index:2147483643;display:inline-flex;align-items:center;gap:6px;padding:7px 10px;border:1px solid #d7dce3;border-radius:6px;background:#fff;color:#475569;box-shadow:0 8px 24px rgba(15,23,42,.14);cursor:pointer}.ovw-suite-hide-fallback[hidden]{display:none}.ovw-suite-hide-fallback-badge{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:#2563eb;color:#fff;font-size:10px}.ovw-suite-hide-fallback-badge[hidden]{display:none}',
+      '.ovw-suite-tool.has-current-hidden,.ovw-suite-hide-center-entry.has-current-hidden{border-color:#f59e0b!important;background:#fffbeb!important;color:#b45309!important}',
+      '.ovw-suite-hide-center-entry{display:inline-flex;align-items:center;justify-content:center;gap:6px;box-sizing:border-box;height:32px;margin-right:8px;padding:0 12px;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:rgba(0,0,0,.88);font:13px/1 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;white-space:nowrap;flex:0 0 auto;vertical-align:middle;cursor:pointer}.ovw-suite-hide-center-entry:hover{color:#1677ff;border-color:#1677ff;background:#f8fbff}.ovw-suite-hide-center-badge{display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:8px;background:#2563eb;color:#fff;font-size:10px}.ovw-suite-hide-center-badge[hidden]{display:none}',
       '.ovw-suite-hide-popover{position:fixed;z-index:2147483646;overflow:hidden;border:1px solid #dfe4ea;border-radius:7px;background:#fff;box-shadow:0 14px 38px rgba(15,23,42,.2);color:#334155;font:12.5px/1.4 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}.ovw-suite-hide-popover header{display:flex;align-items:center;gap:6px;padding:10px 11px;border-bottom:1px solid #e9edf2;background:#f8fafc}.ovw-suite-hide-popover header span{color:#94a3b8}.ovw-suite-hide-popover header em{margin-left:auto;padding:1px 6px;border-radius:8px;background:#fff7e6;color:#b45309;font-style:normal;font-size:10px}.ovw-suite-hide-list{max-height:320px;overflow:auto;padding:4px}.ovw-suite-hide-row{display:flex;align-items:center;gap:6px;padding:6px;border-radius:5px}.ovw-suite-hide-row:hover{background:#f8fafc}.ovw-suite-hide-row span{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ovw-suite-hide-row span.is-current{font-weight:650;color:#b45309}.ovw-suite-hide-row button,.ovw-suite-hide-popover footer button{border:0;background:transparent;color:#2563eb;cursor:pointer}.ovw-suite-hide-popover footer{padding:7px 9px;border-top:1px solid #e9edf2;text-align:right}.ovw-suite-hide-empty{padding:30px 12px;text-align:center;color:#94a3b8}',
     ].join('');
     document.head.appendChild(style);
@@ -4983,8 +4995,13 @@
     injectCardButtons();
     applyHidden();
     if (suite.listPage()) entryButton = suite.addToolbarButton('hidden-cards', toolbarOptions()) || entryButton;
-    ensureFallbackEntry();
+    else {
+      suite.removeToolbarButton('hidden-cards');
+      entryButton = null;
+    }
+    ensureCenterEntry();
     updateEntry();
+    if (popover && !popover.__anchor.isConnected) closePopover();
     if (popover) positionPopover();
   }
 
@@ -5017,7 +5034,9 @@
     }
     document.querySelectorAll('[' + HIDE_ATTR + ']').forEach(showSlot);
     document.querySelectorAll('.ovw-suite-hide-card').forEach(function (button) { button.remove(); });
-    if (fallbackEntry) fallbackEntry.hidden = true;
+    if (centerEntry) centerEntry.remove();
+    suite.removeToolbarButton('hidden-cards');
+    entryButton = null;
   }
 
   document.addEventListener('click', function (event) {
