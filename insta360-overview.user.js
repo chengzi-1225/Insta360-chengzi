@@ -2,7 +2,7 @@
 // @name         Insta360 项目概览工具箱
 // @namespace    https://label.insta360.com/
 // @author       chengzi
-// @version      4.6.7
+// @version      4.6.8
 // @description  项目概览与跳过数据统计、精简原生卡片、项目权限、成员快速分配与卡片隐藏
 // @match        *://label.insta360.com/*
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
@@ -3294,7 +3294,10 @@
     log('筛选行存在');
     // The skipped counter filters cancellation count; audit-skip fields are unrelated.
     var fieldMatches = isSkipped
-      ? function (text) { return /^(?:取消数量|cancelled[\s_]+annotations|canceled[\s_]+annotations)$/i.test(text.replace(/__Cici__\S+/g, '').trim()); }
+      ? function (text) {
+          return /^(?:取消数量|(?:cancelled|canceled)(?:[\s_]+annotations)?(?:\s*[(（]\s*取消数量\s*[)）])?)$/i
+            .test(text.replace(/__Cici__\S+/g, '').trim());
+        }
       : function (text) { return /State|状态/i.test(text); };
     var fieldTrigger = findFieldTrigger(panel);
     if (fieldTrigger) {
