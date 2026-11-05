@@ -2,7 +2,7 @@
 // @name         Insta360 项目概览工具箱
 // @namespace    https://label.insta360.com/
 // @author       chengzi / Codex
-// @version      4.6.6
+// @version      4.6.7
 // @description  项目概览与跳过数据统计、精简原生卡片、项目权限、成员快速分配与卡片隐藏
 // @match        *://label.insta360.com/*
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-overview.user.js
@@ -3292,9 +3292,9 @@
     }
     if (!hasFilterRow(panel)) { log('筛选行未出现'); return false; }
     log('筛选行存在');
-    // Skipped is a count of cancelled annotations, not a workflow State.
+    // The skipped counter filters cancellation count; audit-skip fields are unrelated.
     var fieldMatches = isSkipped
-      ? function (text) { return /跳过|skipped|cancelled[\s_]*annotations/i.test(text); }
+      ? function (text) { return /^(?:取消数量|cancelled[\s_]+annotations|canceled[\s_]+annotations)$/i.test(text.replace(/__Cici__\S+/g, '').trim()); }
       : function (text) { return /State|状态/i.test(text); };
     var fieldTrigger = findFieldTrigger(panel);
     if (fieldTrigger) {
@@ -3351,7 +3351,7 @@
         if (!ok && intent.code === 'SKIPPED') {
           var suite = window.__INSTA360_SUITE__;
           if (suite && typeof suite.toast === 'function') {
-            suite.toast('自动筛选未完成，请在筛选器中选择“跳过次数 > 0”', 'error');
+            suite.toast('自动筛选未完成，请在筛选器中选择“取消数量 > 0”', 'error');
           }
         }
         log('自动筛选结果：', ok);
@@ -3360,7 +3360,7 @@
   }
   function injectFilterHint(intent) {
     if (document.querySelector('.ovw-filter-hint')) return;
-    var cands = intent.code === 'SKIPPED' ? '跳过次数 > 0' : (intent.candidates || []).join(' / ');
+    var cands = intent.code === 'SKIPPED' ? '取消数量 > 0' : (intent.candidates || []).join(' / ');
     var hint = document.createElement('div');
     hint.className = 'ovw-filter-hint';
     hint.innerHTML =
