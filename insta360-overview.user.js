@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 项目概览工具箱
 // @namespace    https://label.insta360.com/
-// @author       chengzi / Codex
+// @author       chengzi
 // @version      4.6.7
 // @description  项目概览与跳过数据统计、精简原生卡片、项目权限、成员快速分配与卡片隐藏
 // @match        *://label.insta360.com/*
