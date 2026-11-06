@@ -4,14 +4,14 @@
 
 将“右键提交/更新/通过 + 审核快捷键”和“Insta360 评论帧号跳转”合并为一份脚本。
 
-[安装合并版 v1.0.0](https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/insta360-review-comment-tools.user.js) · [查看源码](./insta360-review-comment-tools.user.js)
+[安装合并版 v1.0.1](https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/insta360-review-comment-tools.user.js) · [查看源码](./insta360-review-comment-tools.user.js)
 
 安装后请停用原来的两份脚本，再刷新页面。
 
 - 右键提交、更新、通过，鼠标侧键更新，审核快捷键和最近五条驳回历史。
 - 评论帧号 / ID / 任意标注引用跳转，并显示后续说明。
 - 富文本驳回理由、常用理由、自定义快捷键。
-- 一键截图附图；图片文字、画笔、箭头及形状标注，支持撤销和重做。
+- 一键截图同时包含原图标注区与裁切预览，保留标注框、网格和安全参考线；图片文字、画笔、箭头及形状标注，支持撤销和重做。
 - 编辑器与弹窗按键分别响应；上传中或原生提交按钮禁用时不强制提交。
 
 审核快捷键：Tab 打开或取消驳回，Enter 提交驳回，Esc 取消，Shift+Enter 换行；左右方向键切换任务。输入框内保留正常编辑操作。
