@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 审核与评论帧工具箱
 // @namespace    insta360-review-comment-tools
-// @version      1.0.1
+// @version      1.0.2
 // @description  右键提交/更新/通过，侧键更新，Tab驳回/取消、Enter提交、Esc取消、左右切换；驳回历史；评论帧号跳转/标注引用；常用理由；截图附图和图片标注；自定义快捷键。
 // @author       橙子 / chengzi
 // @match        *://label.insta360.com/*
@@ -23,7 +23,7 @@
   'use strict';
   const KEY = '__INSTA_REVIEW_ASSISTANT__';
   if (window[KEY]) return;
-  const api = { version: '1.0.1', destroy() {
+  const api = { version: '1.0.2', destroy() {
     if (window[KEY] !== api) return;
     window._fcMergedApi?.destroy?.();
     window.__INSTA_COMMENT_FRAME_LINKS__?.destroy?.();
@@ -1609,6 +1609,7 @@
     const MAX_HISTORY_COUNT = 5;
     const DROPDOWN_MAX_HEIGHT = 160;
     let historyDropdownEl = null;
+    let historySummaryEl = null, historyListEl = null, historySignature = null;
     let currentTextarea = null;
 
     function getRejectHistory() {
@@ -1642,22 +1643,21 @@
 
     function createDropdownElement() {
         if (!document.body || historyDropdownEl) return;
-        const wrap = document.createElement('div');
+        const wrap = document.createElement('details');
         wrap.id = 'reject-history-dropdown';
         wrap.style.cssText = `
-            position: fixed; z-index: 99999; min-width: 260px; max-width: 420px;
-            max-height: ${DROPDOWN_MAX_HEIGHT}px; overflow-y: auto; overflow-x: hidden;
-            background: #fff; border: 1px solid #dcdcdc; border-radius: 6px;
-            box-shadow: 0 3px 12px rgba(0,0,0,0.15); padding: 8px; display: none;
+            position: static; box-sizing: border-box; width: 100%; min-width: 0;
+            margin-top: 9px; border-top: 1px solid #e5eaf1; clear: both;
+            grid-column: 1 / -1; flex: 0 0 100%; color: #536176;
         `;
-        document.body.appendChild(wrap);
+        const summary = document.createElement('summary');
+        summary.style.cssText = 'padding:7px 2px;cursor:pointer;font:12px/1.6 system-ui,sans-serif;user-select:none;';
+        const list = document.createElement('div');
+        list.style.cssText = `box-sizing:border-box;max-height:${DROPDOWN_MAX_HEIGHT}px;overflow-y:auto;overflow-x:hidden;padding:5px;border:1px solid #e1e8f0;border-radius:6px;background:#f8fafc;`;
+        wrap.append(summary, list);
         historyDropdownEl = wrap;
-        listen(document, 'mousedown', e => {
-            if (!historyDropdownEl) return;
-            if (!wrap.contains(e.target) && !editorFor(currentTextarea)?.contains(e.target)) {
-                wrap.style.display = 'none';
-            }
-        }, true);
+        historySummaryEl = summary; historyListEl = list;
+        listen(summary, 'click', () => renderHistoryDropdown());
     }
 
     function setReactTextareaValue(el, value) {
@@ -1679,10 +1679,14 @@
     function renderHistoryDropdown() {
         if (!document.body) return;
         if (!historyDropdownEl) createDropdownElement();
-        const wrap = historyDropdownEl;
+        const wrap = historyListEl;
         if (!wrap) return;
-        wrap.innerHTML = '';
         const list = getRejectHistory();
+        const signature = JSON.stringify(list);
+        if (historySignature === signature) return;
+        historySignature = signature;
+        historySummaryEl.textContent = `历史记录（${list.length}）`;
+        wrap.replaceChildren();
         if (!list.length) {
             wrap.innerHTML = '<div style="padding:10px 6px;color:#999;text-align:center">暂无驳回历史</div>';
             return;
@@ -1691,49 +1695,50 @@
             const item = document.createElement('div');
             item.style.cssText = `
                 display: flex; justify-content: space-between; align-items: center;
-                padding: 6px 8px; border-radius: 4px; cursor: pointer;
-                margin-bottom: 4px; word-break: break-all; font-size: 13px;
+                gap: 5px; padding: 3px 4px; border-radius: 4px;
+                margin-bottom: 4px; min-width: 0; font-size: 13px;
             `;
             item.onmouseover = () => item.style.background = '#f0f7ff';
             item.onmouseout = () => item.style.background = 'transparent';
-            const ts = document.createElement('span');
+            const ts = document.createElement('button');
+            ts.type = 'button'; ts.className = 'i360-history-insert';
             ts.textContent = text;
-            ts.style.flex = '1'; ts.style.paddingRight = '8px';
-            const del = document.createElement('span');
+            ts.style.cssText = 'flex:1;min-width:0;padding:4px;border:0;background:transparent;color:#354b63;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.6 system-ui,sans-serif;cursor:pointer;';
+            const del = document.createElement('button');
+            del.type = 'button'; del.setAttribute('aria-label', `删除历史记录：${text}`);
             del.textContent = '×';
-            del.style.cssText = 'color:#f56c6c;padding:0 4px;font-weight:bold;';
+            del.style.cssText = 'flex:none;color:#d14c50;padding:2px 6px;border:0;background:transparent;font:16px/1.4 system-ui,sans-serif;cursor:pointer;';
             del.onclick = ev => { ev.stopPropagation(); removeSingleHistory(text); };
             item.appendChild(ts);
             item.appendChild(del);
-            item.onclick = () => {
+            ts.onclick = () => {
                 if (!currentTextarea) return;
-                wrap.style.display = 'none';
+                hideHistory();
                 setReactTextareaValue(currentTextarea, text);
             };
             wrap.appendChild(item);
         });
-        const clear = document.createElement('div');
+        const clear = document.createElement('button');
+        clear.type = 'button'; clear.setAttribute('aria-label', '清空全部历史');
         clear.textContent = '清空全部历史';
         clear.style.cssText = `
-            margin-top:6px; text-align:center; color:#409eff;
-            font-size:12px; padding:4px; cursor:pointer; border-top:1px solid #eee;
+            display:block;width:100%;margin-top:4px;text-align:center;color:#497caf;
+            font:12px/1.6 system-ui,sans-serif;padding:5px;cursor:pointer;border:0;border-top:1px solid #e5eaf1;background:transparent;
         `;
         clear.onclick = clearAllHistory;
         wrap.appendChild(clear);
     }
 
-    function showDropdown(targetTa) {
-        if (!document.body) return;
-        currentTextarea = targetTa;
-        renderHistoryDropdown();
-        const rect = editorFor(targetTa).getBoundingClientRect();
+    function mountHistory(targetTa = findRejectModal()?.textarea) {
+        if (!targetTa?.isConnected) { hideHistory(); return; }
+        if (!historyDropdownEl) createDropdownElement();
         const wrap = historyDropdownEl;
         if (!wrap) return;
-        const space = window.innerHeight - rect.bottom - 20;
-        wrap.style.left = `${rect.left}px`;
-        wrap.style.top = `${rect.bottom + 6}px`;
-        wrap.style.maxHeight = `${Math.min(DROPDOWN_MAX_HEIGHT, Math.max(60, space))}px`;
-        wrap.style.display = 'block';
+        if (currentTextarea !== targetTa) { hideHistory(); currentTextarea = targetTa; }
+        const host = targetTa.parentElement;
+        const anchor = [...host.children].find(node => node.matches('.i360-status')) || editorFor(targetTa);
+        if (wrap.parentElement !== host || wrap.previousElementSibling !== anchor) anchor.insertAdjacentElement('afterend', wrap);
+        renderHistoryDropdown();
     }
 
     /* ============================================================
@@ -1753,7 +1758,7 @@
         return null;
     }
     function isRejectModalOpen() { return !!findRejectModal(); }
-    function hideHistory() { if (historyDropdownEl) historyDropdownEl.style.display = 'none'; }
+    function hideHistory() { if (historyDropdownEl) historyDropdownEl.open = false; }
     function manualEnterSubmit(modal = findRejectModal()) {
         if (!modal) return;
         const { submit: submitBtn, textarea: ta } = modal;
@@ -1773,12 +1778,15 @@
             const ta = modal.textarea;
             if (commentTools()?.review) commentTools().review.focusReason(ta, true);
             else { ta.focus(); ta.select(); }
-            showDropdown(ta);
+            mountHistory(ta); hideHistory();
         }, attempt ? 100 : 250);
     }
     listen(document, 'click', e => {
         const modal = findRejectModal();
-        if (modal && editorFor(modal.textarea).contains(e.target)) showDropdown(modal.textarea);
+        if (modal) {
+            mountHistory(modal.textarea);
+            if (editorFor(modal.textarea).contains(e.target)) hideHistory();
+        } else hideHistory();
     });
 
     /* ============================================================
@@ -1920,17 +1928,18 @@
         }
         mountObserver = new MutationObserver(() => {
             if (!document.getElementById(TOGGLE_ID)) mountToggle();
+            mountHistory();
         });
         mountObserver.observe(document.body, { childList: true, subtree: true });
-        mountToggle();
+        mountToggle(); mountHistory();
     }
 
     observeMount();
     every(() => {
         if (!document.getElementById(TOGGLE_ID)) mountToggle();
         else syncToggleState();
+        mountHistory();
     }, 2000);
-    later(createDropdownElement, 1500);
 
     /* ============================================================
      * 10. 调试入口
