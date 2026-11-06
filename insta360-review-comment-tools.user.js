@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 审核与评论帧工具箱
 // @namespace    insta360-review-comment-tools
-// @version      1.0.0
+// @version      1.0.1
 // @description  右键提交/更新/通过，侧键更新，Tab驳回/取消、Enter提交、Esc取消、左右切换；驳回历史；评论帧号跳转/标注引用；常用理由；截图附图和图片标注；自定义快捷键。
 // @author       橙子 / chengzi
 // @match        *://label.insta360.com/*
@@ -23,7 +23,7 @@
   'use strict';
   const KEY = '__INSTA_REVIEW_ASSISTANT__';
   if (window[KEY]) return;
-  const api = { version: '1.0.0', destroy() {
+  const api = { version: '1.0.1', destroy() {
     if (window[KEY] !== api) return;
     window._fcMergedApi?.destroy?.();
     window.__INSTA_COMMENT_FRAME_LINKS__?.destroy?.();
@@ -469,23 +469,78 @@
     });
   }
 
+  const PANORAMA = '[class*="panorama-container--"]';
+
+  function captureLayerVisible(node, main) {
+    if (!visible(node)) return false;
+    for (let parent = node; parent; parent = parent.parentElement) {
+      const style = getComputedStyle(parent);
+      if (style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility) || style.opacity === '0') return false;
+      if (parent === main) break;
+    }
+    return true;
+  }
+
+  function imageCaptureHost() {
+    const host = frameTextDisplayHost();
+    if (!host || [...host.querySelectorAll(PANORAMA)].some(node => captureLayerVisible(node, host))) return host;
+    // 部分页面把裁切预览放在原图对象的相邻节点中，只扩大到同一画面容器。
+    for (let parent = host.parentElement, depth = 0; parent && parent !== document.body && depth < 3; parent = parent.parentElement, depth++) {
+      if (parent.querySelector('.lsf-comments-list,.lsf-outliner-tree,textarea,[role="dialog"]')) break;
+      if (parent.querySelectorAll('img[alt="LS"]').length > host.querySelectorAll('img[alt="LS"]').length) break;
+      if ([...parent.querySelectorAll(PANORAMA)].some(node => captureLayerVisible(node, parent))) return parent;
+    }
+    return host;
+  }
+
+  function imageLayerClip(layer, main) {
+    let { left, top, right, bottom } = main.getBoundingClientRect();
+    for (let parent = layer.parentElement; parent && parent !== main; parent = parent.parentElement) {
+      const style = getComputedStyle(parent), rect = parent.getBoundingClientRect();
+      if (/(hidden|clip|scroll|auto)/.test(style.overflowX || style.overflow)) { left = Math.max(left, rect.left); right = Math.min(right, rect.right); }
+      if (/(hidden|clip|scroll|auto)/.test(style.overflowY || style.overflow)) { top = Math.max(top, rect.top); bottom = Math.min(bottom, rect.bottom); }
+    }
+    return { left, top, right, bottom, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+  }
+
   function captureImageScene() {
-    const main = frameTextDisplayHost(), image = main?.querySelector('img[alt="LS"]');
-    if (!main || !image || !visible(image) || !image.complete || !image.naturalWidth) throw new Error('图片尚未加载完成');
-    const bounds = main.getBoundingClientRect();
-    const layers = [image, ...main.querySelectorAll('canvas')].filter(layer => {
+    const main = imageCaptureHost();
+    const image = [...(main?.querySelectorAll('img[alt="LS"]') || [])].find(node => captureLayerVisible(node, main));
+    if (!image || !image.complete || !image.naturalWidth) throw new Error('图片尚未加载完成');
+    const media = [...main.querySelectorAll(`img[alt="LS"],canvas,${PANORAMA} img`)].filter(layer => {
       const rect = layer.getBoundingClientRect();
-      return visible(layer) && rect.width > 0 && rect.height > 0 && (layer === image || layer.width && layer.height);
+      return captureLayerVisible(layer, main) && rect.width > 0 && rect.height > 0;
     });
-    const rectangles = layers.map(layer => layer.getBoundingClientRect());
-    const left = Math.max(bounds.left, Math.min(...rectangles.map(rect => rect.left)));
-    const top = Math.max(bounds.top, Math.min(...rectangles.map(rect => rect.top)));
-    const right = Math.min(bounds.right, Math.max(...rectangles.map(rect => rect.right)));
-    const bottom = Math.min(bounds.bottom, Math.max(...rectangles.map(rect => rect.bottom)));
-    const rect = { left, top, width: right - left, height: bottom - top };
-    if (rect.width <= 0 || rect.height <= 0) throw new Error('图片画面当前不可见');
-    const scale = Math.min(Math.max(1, ...layers.map((layer, index) => (layer.naturalWidth || layer.width) / rectangles[index].width)), 2560 / rect.width, 1440 / rect.height);
-    return { main, rect, layers, width: Math.max(1, Math.round(rect.width * scale)), height: Math.max(1, Math.round(rect.height * scale)) };
+    for (const layer of media) {
+      if (layer.tagName === 'IMG' && (!layer.complete || !layer.naturalWidth)) throw new Error('裁切预览尚未加载完成，请稍后截图');
+    }
+    const layers = media.filter(layer => layer.tagName === 'IMG' || layer.width && layer.height);
+    for (const preview of main.querySelectorAll(PANORAMA)) {
+      const rect = preview.getBoundingClientRect();
+      if (captureLayerVisible(preview, main) && rect.width > 0 && rect.height > 0 && !layers.some(layer => preview.contains(layer))) throw new Error('裁切预览尚未加载完成，请稍后截图');
+    }
+    const clips = new Map(layers.map(layer => [layer, imageLayerClip(layer, main)]));
+    const rectangles = layers.map(layer => {
+      const rect = layer.getBoundingClientRect(), clip = clips.get(layer);
+      return { left: Math.max(rect.left, clip.left), top: Math.max(rect.top, clip.top), right: Math.min(rect.right, clip.right), bottom: Math.min(rect.bottom, clip.bottom) };
+    }).filter(rect => rect.right > rect.left && rect.bottom > rect.top);
+    if (!rectangles.length) throw new Error('图片画面当前不可见');
+    const left = Math.min(...rectangles.map(rect => rect.left)), top = Math.min(...rectangles.map(rect => rect.top));
+    const rect = { left, top, width: Math.max(...rectangles.map(rect => rect.right)) - left, height: Math.max(...rectangles.map(rect => rect.bottom)) - top };
+    const scale = Math.min(Math.max(1, ...layers.map(layer => (layer.naturalWidth || layer.width) / layer.getBoundingClientRect().width)), 2560 / rect.width, 1440 / rect.height);
+    // 原生九宫格、十等分线和安全框是 DOM 边框，不在图片或标注画布中。
+    const guides = [...main.querySelectorAll('div')].filter(node => {
+      if (!captureLayerVisible(node, main)) return false;
+      const style = getComputedStyle(node);
+      return style.pointerEvents === 'none' && ['Top', 'Right', 'Bottom', 'Left'].some(side => Number.parseFloat(style[`border${side}Width`]) > 0 && !['none', 'hidden'].includes(style[`border${side}Style`]));
+    });
+    for (const guide of guides) clips.set(guide, imageLayerClip(guide, main));
+    const stackingOrder = node => {
+      let z = 0;
+      for (let parent = node; parent && parent !== main; parent = parent.parentElement) z = Math.max(z, Number.parseInt(getComputedStyle(parent).zIndex, 10) || 0);
+      return z;
+    };
+    return { main, rect, clips, layers: [...layers, ...guides].sort((a, b) => stackingOrder(a) - stackingOrder(b)), width: Math.max(1, Math.round(rect.width * scale)), height: Math.max(1, Math.round(rect.height * scale)) };
   }
 
   function captureScene() {
@@ -585,9 +640,12 @@
       // 在开始等待全景绘制前固定其余图层、布局和样式，避免异步等待时混入另一个画面。
       const layers = scene.layers.map(layer => {
         const style = getComputedStyle(layer);
+        const guide = !['IMG', 'CANVAS'].includes(layer.tagName);
+        const borders = guide ? ['Top', 'Right', 'Bottom', 'Left'].map(side => ({ side, width: Number.parseFloat(style[`border${side}Width`]) || 0, color: style[`border${side}Color`], style: style[`border${side}Style`] })) : [];
         return { image: layer.tagName === 'IMG', rect: layer.getBoundingClientRect(),
           filter: style.filter || 'none', fit: style.objectFit, position: style.objectPosition,
-          source: snapshotSceneLayer(layer, signal) };
+          clip: scene.clips?.get(layer), borders, guide,
+          source: guide ? null : snapshotSceneLayer(layer, signal) };
       });
       const sources = await Promise.all(layers.map(layer => layer.source));
       if (dead || signal?.aborted) throw new DOMException('截图已停止', 'AbortError');
@@ -603,7 +661,18 @@
         const x = (rect.left - scene.rect.left) * scene.width / scene.rect.width, y = (rect.top - scene.rect.top) * scene.height / scene.rect.height;
         const width = rect.width * scene.width / scene.rect.width, height = rect.height * scene.height / scene.rect.height;
         ctx.save(); ctx.filter = layer.filter;
-        if (layer.image && ['contain', 'cover'].includes(layer.fit)) {
+        if (layer.clip) {
+          const clip = layer.clip;
+          ctx.beginPath(); ctx.rect((clip.left - scene.rect.left) * scene.width / scene.rect.width, (clip.top - scene.rect.top) * scene.height / scene.rect.height, clip.width * scene.width / scene.rect.width, clip.height * scene.height / scene.rect.height); ctx.clip();
+        }
+        if (layer.guide) {
+          for (const border of layer.borders) {
+            if (!border.width || ['none', 'hidden'].includes(border.style)) continue;
+            const horizontal = ['Top', 'Bottom'].includes(border.side), thickness = border.width * (horizontal ? scene.height / scene.rect.height : scene.width / scene.rect.width);
+            ctx.fillStyle = border.color;
+            ctx.fillRect(x + (border.side === 'Right' ? width - thickness : 0), y + (border.side === 'Bottom' ? height - thickness : 0), horizontal ? width : thickness, horizontal ? thickness : height);
+          }
+        } else if (layer.image && ['contain', 'cover'].includes(layer.fit)) {
           const scale = (layer.fit === 'cover' ? Math.max : Math.min)(width / source.width, height / source.height);
           const drawnWidth = source.width * scale, drawnHeight = source.height * scale;
           const position = layer.position.split(/\s+/).map(value => value.endsWith('%') ? Number.parseFloat(value) / 100 : .5);
