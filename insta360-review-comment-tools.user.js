@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 审核与评论帧工具箱
 // @namespace    insta360-review-comment-tools
-// @version      1.0.4
+// @version      1.0.5
 // @description  右键提交/更新/通过，侧键更新，Tab驳回/取消、Enter提交、Esc取消、左右切换；驳回历史；评论帧号跳转/标注引用；常用理由；截图附图和图片标注；自定义快捷键。
 // @author       橙子 / chengzi
 // @match        *://label.insta360.com/*
@@ -23,7 +23,7 @@
   'use strict';
   const KEY = '__INSTA_REVIEW_ASSISTANT__';
   if (window[KEY]) return;
-  const api = { version: '1.0.4', destroy() {
+  const api = { version: '1.0.5', destroy() {
     if (window[KEY] !== api) return;
     window._fcMergedApi?.destroy?.();
     window.__INSTA_COMMENT_FRAME_LINKS__?.destroy?.();
@@ -498,9 +498,17 @@
       const parent = canvas.parentElement;
       candidates.add(parent && !parent.querySelector('img[alt="LS"]') ? parent : canvas);
     }
+    // 普通矩形框的成片预览也可能由项目配置渲染在独立 object 中，
+    // 使用普通 2D canvas / img，没有全景组件的类名。
+    for (const media of scope.querySelectorAll('canvas,img')) {
+      if (host.contains(media) || media.closest(PANORAMA)) continue;
+      const preview = media.closest('.lsf-object,[class*="preview"],[id*="preview"],[class*="crop"],[id*="crop"]');
+      if (preview && preview !== scope && scope.contains(preview)) candidates.add(preview);
+    }
     let previews = [...candidates].filter(node => {
-      if (!captureLayerVisible(node, scope) || node.closest('.lsf-comments-list,.lsf-history-item__comment-content,.lsf-comment-form__input-container,.i360-dialog,[contenteditable="true"]')) return false;
+      if (!captureLayerVisible(node, scope) || node.closest('.lsf-comments-list,.lsf-comments,.lsf-history-item__comment-content,.lsf-comment-form__input-container,.lsf-outliner-tree,.lsf-topbar,.i360-dialog,[role="dialog"],[contenteditable="true"]')) return false;
       const owner = node.closest('.lsf-object');
+      if (owner && owner !== host && owner.querySelector('img[alt="LS"]')) return false;
       return !owner || owner === host || host.contains(owner)
         || ![...owner.querySelectorAll('img[alt="LS"]')].some(image => !node.contains(image));
     });
@@ -535,7 +543,8 @@
     const queryAreas = selector => [...new Set(roots.flatMap(root => [...(root.matches(selector) ? [root] : []), ...root.querySelectorAll(selector)]))];
     const image = queryAreas('img[alt="LS"]').find(node => captureLayerVisible(node, main));
     if (!image || !image.complete || !image.naturalWidth) throw new Error('图片尚未加载完成');
-    const media = queryAreas(`img[alt="LS"],canvas,${PANORAMA} img`).filter(layer => {
+    const media = queryAreas('img,canvas').filter(layer => {
+      if (layer.tagName === 'IMG' && !layer.matches('img[alt="LS"]') && !previews.some(preview => preview === layer || preview.contains(layer))) return false;
       const rect = layer.getBoundingClientRect();
       return captureLayerVisible(layer, main) && rect.width > 0 && rect.height > 0;
     });
@@ -935,6 +944,19 @@
     const gear = button('⚙', `设置${action.label}快捷键`, 'i360-shortcut-gear'); gear.title = `设置${action.label}快捷键`;
     gear.addEventListener('click', event => { event.stopPropagation(); openShortcutSettings(key); });
     card.append(main, gear); record.cards[key] = { main, label, key: hint, gear }; return card;
+  }
+  // 原生画面及项目预览可能在 document 捕获阶段处理“点击外部”。
+  // 工具按钮只操作理由/截图，按下与松开不能清空当前裁切预览。
+  // 提前在 window 隔离这几个事件；click 仍到达按钮并执行原动作。
+  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+    listen(window, type, event => {
+      const target = event.target.closest?.('.i360-action-card,.i360-common-trigger');
+      if (!target) return;
+      const record = [...ui.values()].find(record => record.toolbar.contains(target) || record.common === target);
+      if (!record) return;
+      event.stopPropagation();
+      if (type.endsWith('down')) { event.preventDefault(); rememberReason(record); }
+    }, true);
   }
   function mountUI(native) {
     const host = inputHost(native); if (!host) return;
