@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 审核与评论帧工具箱
 // @namespace    insta360-review-comment-tools
-// @version      1.0.2
+// @version      1.0.3
 // @description  右键提交/更新/通过，侧键更新，Tab驳回/取消、Enter提交、Esc取消、左右切换；驳回历史；评论帧号跳转/标注引用；常用理由；截图附图和图片标注；自定义快捷键。
 // @author       橙子 / chengzi
 // @match        *://label.insta360.com/*
@@ -23,7 +23,7 @@
   'use strict';
   const KEY = '__INSTA_REVIEW_ASSISTANT__';
   if (window[KEY]) return;
-  const api = { version: '1.0.2', destroy() {
+  const api = { version: '1.0.3', destroy() {
     if (window[KEY] !== api) return;
     window._fcMergedApi?.destroy?.();
     window.__INSTA_COMMENT_FRAME_LINKS__?.destroy?.();
@@ -570,6 +570,28 @@
 
   const pendingCanvasCaptures = new Map();
 
+  function redrawNativePanorama(canvas, gl) {
+    // 原生图片预览在 React hooks 中持有 Three.js 场景、相机和 renderer。
+    // 已创建的 WebGL 上下文无法补开 preserveDrawingBuffer；用同一场景和相机
+    // 重绘一次，立即复制画面，不触碰取景参数、选中标注或保存操作。
+    const key = Object.keys(canvas).find(name => name.startsWith('__reactFiber$') || name.startsWith('__reactInternalInstance$'));
+    for (let fiber = canvas[key], depth = 0; fiber && depth < 12; fiber = fiber.return, depth++) {
+      const refs = [];
+      for (let hook = fiber.memoizedState, index = 0; hook && index < 80; hook = hook.next, index++) {
+        const value = hook.memoizedState?.current;
+        if (value) refs.push(value);
+      }
+      const renderer = refs.find(value => value.isWebGLRenderer && value.domElement === canvas && value.getContext?.() === gl);
+      if (!renderer) continue;
+      const scene = refs.find(value => value.isScene), camera = refs.find(value => value.isCamera);
+      if (!scene || !camera) continue;
+      if (!scene.children?.length) throw new Error('裁切预览尚未加载完成，请稍后截图');
+      renderer.render(scene, camera);
+      return true;
+    }
+    return false;
+  }
+
   function captureWebGLCanvas(canvas, gl, signal) {
     if (pendingCanvasCaptures.has(canvas)) throw new Error('全景截图正在生成，请稍候');
     return new Promise((resolve, reject) => {
@@ -618,7 +640,8 @@
             if (descriptor) Object.defineProperty(gl, name, descriptor); else delete gl[name];
           });
         }
-        timeout = setTimeout(() => finish(new Error('全景截图尚未初始化，请刷新标注页面后重试')), 2500);
+        timeout = setTimeout(() => finish(new Error('无法读取当前裁切预览，请刷新标注页面后重试')), 2500);
+        if (redrawNativePanorama(canvas, gl)) afterDraw();
       } catch (error) { finish(error); }
     });
   }
