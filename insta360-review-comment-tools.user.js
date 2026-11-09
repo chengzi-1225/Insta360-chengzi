@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 审核与评论帧工具箱
 // @namespace    insta360-review-comment-tools
-// @version      1.0.3
+// @version      1.0.4
 // @description  右键提交/更新/通过，侧键更新，Tab驳回/取消、Enter提交、Esc取消、左右切换；驳回历史；评论帧号跳转/标注引用；常用理由；截图附图和图片标注；自定义快捷键。
 // @author       橙子 / chengzi
 // @match        *://label.insta360.com/*
@@ -23,7 +23,7 @@
   'use strict';
   const KEY = '__INSTA_REVIEW_ASSISTANT__';
   if (window[KEY]) return;
-  const api = { version: '1.0.3', destroy() {
+  const api = { version: '1.0.4', destroy() {
     if (window[KEY] !== api) return;
     window._fcMergedApi?.destroy?.();
     window.__INSTA_COMMENT_FRAME_LINKS__?.destroy?.();
@@ -469,7 +469,8 @@
     });
   }
 
-  const PANORAMA = '[class*="panorama-container--"]';
+  const PANORAMA = '[class*="panorama-container"]';
+  const PANORAMA_CANVAS = 'canvas[class*="panorama-canvas"],canvas[data-engine^="three.js"]';
 
   function captureLayerVisible(node, main) {
     if (!visible(node)) return false;
@@ -481,16 +482,42 @@
     return true;
   }
 
-  function imageCaptureHost() {
+  function imageCaptureAreas() {
     const host = frameTextDisplayHost();
-    if (!host || [...host.querySelectorAll(PANORAMA)].some(node => captureLayerVisible(node, host))) return host;
-    // 部分页面把裁切预览放在原图对象的相邻节点中，只扩大到同一画面容器。
-    for (let parent = host.parentElement, depth = 0; parent && parent !== document.body && depth < 3; parent = parent.parentElement, depth++) {
-      if (parent.querySelector('.lsf-comments-list,.lsf-outliner-tree,textarea,[role="dialog"]')) break;
-      if (parent.querySelectorAll('img[alt="LS"]').length > host.querySelectorAll('img[alt="LS"]').length) break;
-      if ([...parent.querySelectorAll(PANORAMA)].some(node => captureLayerVisible(node, parent))) return parent;
+    if (!host) return { main: null, roots: [], previews: [] };
+    // 原图与预览可能分属不同面板；从同一编辑器找预览，不依赖父级层数。
+    // 只读取明确的画面区域，公共父级里的评论、附件和 Regions 不参与截图。
+    let scope = host.closest('.lsf-editor,#label-studio,#label-studio-dm,#review-studio-dm');
+    if (!scope) {
+      scope = host;
+      while (scope.parentElement && scope.parentElement !== document.body) scope = scope.parentElement;
     }
-    return host;
+    const candidates = new Set(scope.querySelectorAll(PANORAMA));
+    for (const canvas of scope.querySelectorAll(PANORAMA_CANVAS)) {
+      if (canvas.closest(PANORAMA)) continue;
+      const parent = canvas.parentElement;
+      candidates.add(parent && !parent.querySelector('img[alt="LS"]') ? parent : canvas);
+    }
+    let previews = [...candidates].filter(node => {
+      if (!captureLayerVisible(node, scope) || node.closest('.lsf-comments-list,.lsf-history-item__comment-content,.lsf-comment-form__input-container,.i360-dialog,[contenteditable="true"]')) return false;
+      const owner = node.closest('.lsf-object');
+      return !owner || owner === host || host.contains(owner)
+        || ![...owner.querySelectorAll('img[alt="LS"]')].some(image => !node.contains(image));
+    });
+    const inside = previews.filter(node => host.contains(node));
+    if (inside.length) previews = inside;
+    else {
+      // 多个独立图像对象共存时，优先选择与原图共享最近父级的预览。
+      for (let parent = host.parentElement; parent; parent = parent.parentElement) {
+        const nearby = previews.filter(node => parent.contains(node));
+        if (nearby.length) { previews = nearby; break; }
+        if (parent === scope) break;
+      }
+    }
+    const roots = [host, ...previews.filter(node => !host.contains(node))];
+    let main = host;
+    while (main.parentElement && roots.some(node => !main.contains(node))) main = main.parentElement;
+    return { main, roots, previews };
   }
 
   function imageLayerClip(layer, main) {
@@ -504,10 +531,11 @@
   }
 
   function captureImageScene() {
-    const main = imageCaptureHost();
-    const image = [...(main?.querySelectorAll('img[alt="LS"]') || [])].find(node => captureLayerVisible(node, main));
+    const { main, roots, previews } = imageCaptureAreas();
+    const queryAreas = selector => [...new Set(roots.flatMap(root => [...(root.matches(selector) ? [root] : []), ...root.querySelectorAll(selector)]))];
+    const image = queryAreas('img[alt="LS"]').find(node => captureLayerVisible(node, main));
     if (!image || !image.complete || !image.naturalWidth) throw new Error('图片尚未加载完成');
-    const media = [...main.querySelectorAll(`img[alt="LS"],canvas,${PANORAMA} img`)].filter(layer => {
+    const media = queryAreas(`img[alt="LS"],canvas,${PANORAMA} img`).filter(layer => {
       const rect = layer.getBoundingClientRect();
       return captureLayerVisible(layer, main) && rect.width > 0 && rect.height > 0;
     });
@@ -515,7 +543,7 @@
       if (layer.tagName === 'IMG' && (!layer.complete || !layer.naturalWidth)) throw new Error('裁切预览尚未加载完成，请稍后截图');
     }
     const layers = media.filter(layer => layer.tagName === 'IMG' || layer.width && layer.height);
-    for (const preview of main.querySelectorAll(PANORAMA)) {
+    for (const preview of previews) {
       const rect = preview.getBoundingClientRect();
       if (captureLayerVisible(preview, main) && rect.width > 0 && rect.height > 0 && !layers.some(layer => preview.contains(layer))) throw new Error('裁切预览尚未加载完成，请稍后截图');
     }
@@ -529,7 +557,7 @@
     const rect = { left, top, width: Math.max(...rectangles.map(rect => rect.right)) - left, height: Math.max(...rectangles.map(rect => rect.bottom)) - top };
     const scale = Math.min(Math.max(1, ...layers.map(layer => (layer.naturalWidth || layer.width) / layer.getBoundingClientRect().width)), 2560 / rect.width, 1440 / rect.height);
     // 原生九宫格、十等分线和安全框是 DOM 边框，不在图片或标注画布中。
-    const guides = [...main.querySelectorAll('div')].filter(node => {
+    const guides = queryAreas('div').filter(node => {
       if (!captureLayerVisible(node, main)) return false;
       const style = getComputedStyle(node);
       return style.pointerEvents === 'none' && ['Top', 'Right', 'Bottom', 'Left'].some(side => Number.parseFloat(style[`border${side}Width`]) > 0 && !['none', 'hidden'].includes(style[`border${side}Style`]));
