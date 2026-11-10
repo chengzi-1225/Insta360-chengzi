@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 审核与评论帧工具箱
 // @namespace    insta360-review-comment-tools
-// @version      1.0.7
+// @version      1.0.8
 // @description  右键提交/更新/通过，侧键更新，Tab驳回/取消、Enter提交、Esc取消、左右切换；驳回历史；评论帧号跳转/标注引用；常用理由；截图附图和图片标注；自定义快捷键。
 // @author       橙子 / chengzi
 // @match        *://label.insta360.com/*
@@ -23,7 +23,7 @@
   'use strict';
   const KEY = '__INSTA_REVIEW_ASSISTANT__';
   if (window[KEY]) return;
-  const api = { version: '1.0.7', destroy() {
+  const api = { version: '1.0.8', destroy() {
     if (window[KEY] !== api) return;
     window._fcMergedApi?.destroy?.();
     window.__INSTA_COMMENT_FRAME_LINKS__?.destroy?.();
@@ -479,8 +479,19 @@
     return captureLayerVisible(node, main) && !node.closest(CAPTURE_EXCLUDED) && rect.width >= 80 && rect.height >= 48;
   }
 
+  function visibleImageRect(image) {
+    const rect = image.getBoundingClientRect();
+    const scope = image.closest('.lsf-editor,#label-studio,#label-studio-dm,#review-studio-dm') || image.closest('.lsf-object') || image.parentElement;
+    if (!scope) return rect;
+    const clip = imageLayerClip(image, scope);
+    const left = Math.max(rect.left, clip.left), top = Math.max(rect.top, clip.top);
+    const right = Math.min(rect.right, clip.right), bottom = Math.min(rect.bottom, clip.bottom);
+    return { left, top, right, bottom, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+  }
+
   function adjacentCaptureSurface(node, image) {
-    const a = image.getBoundingClientRect(), b = node.getBoundingClientRect();
+    // 缩放后的底图可能超出左侧视口；以实际可见的范围判断左右相邻。
+    const a = visibleImageRect(image), b = node.getBoundingClientRect();
     const overlapY = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
     const gapX = Math.max(b.left - a.right, a.left - b.right);
     const overlapX = Math.min(a.right, b.right) - Math.max(a.left, b.left);
@@ -492,7 +503,7 @@
   function surfaceCaptureRoot(node, includeImageObject = false) {
     if (includeImageObject) {
       // 手动点到的可能只是 Konva 透明标注层；原生底图与网格在它的兄弟节点。
-      // 只有用户明确补选时才合并整个图片对象，避免自动带入其他独立图片。
+      // 自动确认是右侧预览或用户明确补选后，合并整个图片对象。
       const owner = node.closest('.lsf-object'), host = frameTextDisplayHost();
       if (owner && owner !== host && !owner.contains(host) && owner.querySelector('img[alt="LS"]')) return owner;
     }
@@ -522,6 +533,8 @@
       scope = host;
       while (scope.parentElement && scope.parentElement !== document.body) scope = scope.parentElement;
     }
+    const image = host.querySelector('img[alt="LS"]'), editor = host.closest('.lsf-editor');
+    const nativePreviews = new Set();
     const candidates = new Set(scope.querySelectorAll(PANORAMA));
     for (const canvas of scope.querySelectorAll(PANORAMA_CANVAS)) {
       if (canvas.closest(PANORAMA)) continue;
@@ -531,21 +544,32 @@
     // 普通矩形框的成片预览也可能由项目配置渲染在独立 object 中，
     // 使用普通 2D canvas / img，没有全景组件的类名。
     for (const media of scope.querySelectorAll('canvas,img')) {
-      if (host.contains(media) || media.closest(PANORAMA)) continue;
+      if (media === image || media.closest(PANORAMA)) continue;
+      const owner = media.closest('.lsf-object');
+      const nearby = image && largeCaptureSurface(media, scope) && adjacentCaptureSurface(media, image)
+        && (!editor || media.closest('.lsf-editor') === editor);
+      // 站点的成片区本身也是原生 Image 对象。只合并同一编辑器中紧邻原图右侧的对象。
+      if (nearby && owner && owner !== host && !owner.contains(host)
+        && owner.querySelector('img[alt="LS"]')
+        && media.getBoundingClientRect().left >= visibleImageRect(image).right - 2) {
+        nativePreviews.add(owner); candidates.add(owner); continue;
+      }
+      if (host.contains(media)) {
+        if (nearby) candidates.add(surfaceCaptureRoot(media));
+        continue;
+      }
       const preview = media.closest('.lsf-object,[class*="preview"],[id*="preview"],[class*="crop"],[id*="crop"]');
       if (preview && preview !== scope && scope.contains(preview)) candidates.add(preview);
       // 项目自定义成片区可能只是无类名的 div/canvas/img。
       // 按与原图的实际位置识别，不把组件命名作为必要条件。
-      const image = host.querySelector('img[alt="LS"]');
-      const owner = media.closest('.lsf-object');
-      const editor = host.closest('.lsf-editor');
-      if (image && largeCaptureSurface(media, scope) && adjacentCaptureSurface(media, image)
+      if (nearby
         && (!owner || owner === host || !owner.querySelector('img[alt="LS"]'))
-        && (!editor || media.closest('.lsf-editor') === editor)) candidates.add(surfaceCaptureRoot(media));
+      ) candidates.add(surfaceCaptureRoot(media));
     }
     let previews = [...candidates].filter(node => {
       if (!captureLayerVisible(node, scope) || node.closest('.lsf-comments-list,.lsf-comments,.lsf-history-item__comment-content,.lsf-comment-form__input-container,.lsf-outliner-tree,.lsf-topbar,.i360-dialog,[role="dialog"],[contenteditable="true"]')) return false;
       const owner = node.closest('.lsf-object');
+      if (nativePreviews.has(owner)) return true;
       if (owner && owner !== host && owner.querySelector('img[alt="LS"]')) return false;
       return !owner || owner === host || host.contains(owner)
         || ![...owner.querySelectorAll('img[alt="LS"]')].some(image => !node.contains(image));
@@ -568,7 +592,7 @@
     const roots = [host, ...previews.filter(node => !host.contains(node))];
     let main = host;
     while (main.parentElement && roots.some(node => !main.contains(node))) main = main.parentElement;
-    return { main, roots, previews };
+    return { main, roots, previews, host };
   }
 
   function imageLayerClip(layer, main) {
@@ -581,10 +605,14 @@
     return { left, top, right, bottom, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
   }
 
-  function captureImageScene() {
-    const { main, roots, previews } = imageCaptureAreas();
-    const queryAreas = selector => [...new Set(roots.flatMap(root => [...(root.matches(selector) ? [root] : []), ...root.querySelectorAll(selector)]))];
-    const image = queryAreas('img[alt="LS"]').find(node => captureLayerVisible(node, main));
+  function captureImageScene(mode = config.captureMode) {
+    const { main, roots, previews, host } = imageCaptureAreas();
+    if (mode === 'right' && !previews.length) throw new Error('右侧预览未找到，请等待加载或点击“选择右侧”');
+    const areas = mode === 'right' ? previews : mode === 'left' ? [host].filter(Boolean) : roots;
+    const inPreview = node => previews.some(preview => preview === node || preview.contains(node));
+    const queryAreas = selector => [...new Set(areas.flatMap(root => [...(root.matches(selector) ? [root] : []), ...root.querySelectorAll(selector)]))]
+      .filter(node => mode !== 'left' || !inPreview(node));
+    const image = host?.querySelector('img[alt="LS"]');
     if (!image || !image.complete || !image.naturalWidth) throw new Error('图片尚未加载完成');
     const media = queryAreas('img,canvas').filter(layer => {
       if (layer.closest(CAPTURE_EXCLUDED)) return false;
@@ -596,7 +624,7 @@
       if (layer.tagName === 'IMG' && (!layer.complete || !layer.naturalWidth)) throw new Error('裁切预览尚未加载完成，请稍后截图');
     }
     const layers = media.filter(layer => layer.tagName === 'IMG' || layer.width && layer.height);
-    for (const preview of previews) {
+    for (const preview of mode === 'left' ? [] : previews) {
       const rect = preview.getBoundingClientRect();
       if (captureLayerVisible(preview, main) && rect.width > 0 && rect.height > 0 && !layers.some(layer => preview.contains(layer))) throw new Error('裁切预览尚未加载完成，请稍后截图');
     }
@@ -832,10 +860,11 @@
   const ui = new Map();
   const jobs = new Map();
   const STORAGE = 'i360-review-tools-v3';
-  const defaults = { shortcuts: { frame: null, capture: null, annotate: null }, reasons: [], panel: { x: null, y: null }, drawing: { color: '#ff3b30', width: 3, font: 28, background: true } };
+  const defaults = { captureMode: 'all', shortcuts: { frame: null, capture: null, annotate: null }, reasons: [], panel: { x: null, y: null }, drawing: { color: '#ff3b30', width: 3, font: 28, background: true } };
   let config;
   try { const saved = JSON.parse(localStorage.getItem(STORAGE) || '{}'); config = { ...defaults, ...saved, shortcuts: { ...defaults.shortcuts, ...saved.shortcuts }, drawing: { ...defaults.drawing, ...saved.drawing } }; }
   catch { config = structuredClone(defaults); }
+  if (!['left', 'all', 'right'].includes(config.captureMode)) config.captureMode = 'all';
   if (!Array.isArray(config.reasons)) config.reasons = [];
   config.reasons = config.reasons.filter(r => r && typeof r.id === 'string' && typeof r.text === 'string').slice(0, 200);
   let lastReason = null, settingsDialog = null, snippetsPanel = null, imageEditor = null;
@@ -982,12 +1011,11 @@
   }
   function updateCaptureScope(record) {
     if (!record.captureScope) return;
-    let label;
-    try {
-      const scene = captureImageScene(), image = scene.layers.find(node => node.matches?.('img[alt="LS"]'));
-      const right = image && scene.layers.some(node => ['IMG', 'CANVAS'].includes(node.tagName) && node !== image && (chosenPreview?.node === node || adjacentCaptureSurface(node, image)));
-      label = right ? '截图范围：左侧 + 右侧预览' : '截图范围：仅左侧';
-    } catch { label = '截图范围：等待画面加载'; }
+    const { host, previews } = imageCaptureAreas(), right = previews.length > 0;
+    const label = !host ? '截图范围：等待画面加载' : right ? '截图范围：左侧 + 右侧预览' : '截图范围：仅左侧';
+    record.capturePick.hidden = right || config.captureMode === 'left';
+    record.captureScope.hidden = right || config.captureMode === 'left';
+    for (const choice of record.captureRange.querySelectorAll('[data-capture-mode]')) choice.setAttribute('aria-pressed', String(choice.dataset.captureMode === config.captureMode));
     if (record.captureScope.textContent !== label) record.captureScope.textContent = label;
   }
   function closePreviewPicker() {
@@ -1068,11 +1096,21 @@
     const output = element('div', 'i360-status'); output.setAttribute('role', 'status'); record.status = output;
     native.insertAdjacentElement('afterend', toolbar); toolbar.insertAdjacentElement('afterend', output);
     if (record.cards.capture && !record.video) {
-      const scope = element('div'), summary = element('span', 'i360-capture-scope'), pick = button('补选右侧预览', '补选右侧预览', 'i360-pick-preview');
-      scope.className = 'i360-capture-range'; scope.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center;margin-top:7px;font:12px/1.5 system-ui;color:#68788b';
+      const scope = element('div', 'i360-capture-range'), summary = element('span', 'i360-capture-scope'), pick = button('选择右侧', '选择右侧预览', 'i360-pick-preview');
+      const choices = element('div', 'i360-capture-modes'); choices.setAttribute('role', 'group'); choices.setAttribute('aria-label', '截图范围');
+      for (const [mode, label] of [['left', '左侧'], ['all', '全部'], ['right', '右侧']]) {
+        const choice = button(label); choice.dataset.captureMode = mode;
+        choice.addEventListener('click', event => {
+          event.preventDefault(); event.stopPropagation(); config.captureMode = mode;
+          const saved = saveConfig();
+          for (const item of ui.values()) updateCaptureScope(item);
+          status(record, saved ? '' : '浏览器无法保存选择，本次仍可使用');
+        });
+        choices.append(choice);
+      }
       pick.style.cssText = 'border:0;padding:0;background:none;color:#1677ff;font:inherit;text-decoration:underline;cursor:pointer';
       pick.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); openPreviewPicker(record); });
-      scope.append(summary, pick); toolbar.after(scope); record.captureRange = scope; record.captureScope = summary; updateCaptureScope(record);
+      scope.append(element('span', '', '截图'), choices, summary, pick); toolbar.after(scope); record.captureRange = scope; record.captureScope = summary; record.capturePick = pick; updateCaptureScope(record);
     }
   }
   function unmountUI(record) {
@@ -1286,6 +1324,7 @@
     if (event.isComposing || event.keyCode === 229) { if (ownInput) event.stopImmediatePropagation(); return; }
     if (settingsDialog) { const handled = recordShortcut(event); if (!handled) event.stopImmediatePropagation(); return; }
     if (imageEditor) { imageEditorKey(event); return; }
+    if (event.target.closest?.('.i360-capture-range')) { event.stopImmediatePropagation(); return; }
     const token = event.target.closest?.(INLINE_REFERENCE);
     if (token && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); event.stopImmediatePropagation(); activateFrameLink(token); return; }
     const record = [...ui.values()].find(r => r.proxy && (event.target === r.proxy || r.proxy.contains(event.target)));
@@ -1310,7 +1349,7 @@
   // Keep the host player's keyboard shortcuts out of our editors, including
   // shortcuts registered on keypress/keyup rather than keydown.
   for (const type of ['keypress', 'keyup']) listen(window, type, event => {
-    if (event.target.closest?.('.i360-rich-reason,.i360-snippets,.i360-dialog')) event.stopImmediatePropagation();
+    if (event.target.closest?.('.i360-rich-reason,.i360-snippets,.i360-dialog,.i360-capture-range')) event.stopImmediatePropagation();
   }, true);
 
   function wrapTextLines(ctx, text, width) {
@@ -1547,7 +1586,7 @@
     if ([...roots.values()].some(state => state.pending.size)) schedule();
   }
   const style = document.createElement('style'); style.dataset.instaCommentFrameLinks = '3.1.7';
-  style.textContent = ".i360-native-hidden{display:none!important}\n.i360-rich-reason{box-sizing:border-box;display:block;min-height:112px;max-height:320px;overflow:auto;resize:vertical;white-space:pre-wrap;overflow-wrap:anywhere;width:100%;padding:12px;border:1px solid #d9d9d9;border-radius:5px;background:#fff;color:#17202e;font:14px/1.65 system-ui,sans-serif;outline:none;cursor:text}\n.i360-rich-reason:focus{border-color:#1677ff;box-shadow:0 0 0 2px #1677ff18}\n.i360-rich-reason:empty:before{content:attr(data-placeholder);color:#8a94a3;pointer-events:none}\n.i360-inline-frame{display:inline;color:#1677ff;text-decoration:underline;text-underline-offset:2px;cursor:pointer;border-radius:3px;background:#1677ff0a}\n.i360-inline-frame:hover{background:#1677ff20}\n.i360-inline-frame:focus-visible{outline:2px solid #1677ff}\n.i360-common-trigger{display:block;box-sizing:border-box;width:100%;padding:8px 12px;margin:0 0 9px;border:1px solid #cbdcf5;border-radius:6px;background:#f3f7fd;color:#17467c;text-align:left;cursor:pointer;font:600 13px/1.5 system-ui,sans-serif}\n.i360-toolbar{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px;align-items:stretch}\n.i360-action-card{position:relative;flex:1 0 auto;min-width:76px}\n.i360-action-main{box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;width:100%;height:50px;padding:6px 20px 5px 9px;border:1px solid #c9d7eb;border-radius:6px;background:#fff;color:#17467c;font:13px/1.3 system-ui,sans-serif;cursor:pointer}\n.i360-action-main kbd{font:10px/1.2 system-ui,sans-serif;color:#7a879b}\n.i360-action-capture{background:#1677ff;border-color:#1677ff;color:#fff}\n.i360-action-capture kbd{color:#dbeafe}\n.i360-action-annotate{border-color:#e1c17b;background:#fffbeb;color:#92400e}\n.i360-action-main:disabled{opacity:.55;cursor:wait}\n.i360-shortcut-gear{position:absolute;right:3px;top:3px;display:flex;align-items:center;justify-content:center;width:18px;height:18px;padding:0;border:0;border-radius:3px;background:#fff9;color:#536176;font:13px/1 system-ui,sans-serif;cursor:pointer}\n.i360-shortcut-gear:hover{background:#dbeafe;color:#0958d9}\n.i360-status{font:12px/1.5 system-ui,sans-serif;color:#536176;margin:7px 0 0;overflow-wrap:anywhere}\n.i360-status:empty{display:none}\n.i360-status[data-state=success]{color:#237804}\n.i360-status[data-state=error]{color:#cf1322}\n.i360-dialog{box-sizing:border-box;position:fixed;inset:0;margin:auto;padding:18px;border:1px solid #dce2ec;border-radius:12px;background:#fff;color:#17202e;font:14px/1.5 system-ui,sans-serif;box-shadow:0 14px 70px #0005;max-width:95vw;max-height:94vh;overflow:auto}\n.i360-dialog::backdrop{background:#0b122b80}\n.i360-dialog button,.i360-snippets button{padding:6px 10px;border:1px solid #cbd5e1;border-radius:5px;background:#fff;color:#17202e;font:13px/1.4 system-ui,sans-serif;cursor:pointer}\n.i360-dialog button:hover,.i360-snippets button:hover{background:#eff6ff;border-color:#1677ff}\n.i360-dialog button:disabled{opacity:.4;cursor:default}\n.i360-dialog input:not([type=color]):not([type=checkbox]),.i360-dialog textarea,.i360-snippets textarea{box-sizing:border-box;width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:5px;color:#17202e;background:#fff;font:14px/1.6 system-ui,sans-serif}\n.i360-dialog-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}\n.i360-primary{background:#1677ff!important;color:#fff!important;border-color:#1677ff!important}\n.i360-shortcut-dialog{width:420px}\n.i360-shortcut-dialog p{font-size:13px;color:#536176}\n.i360-snippets{position:fixed;z-index:2147482000;box-sizing:border-box;width:320px;min-width:220px;max-width:94vw;max-height:84vh;overflow:auto;resize:both;padding:12px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;color:#17202e;box-shadow:0 8px 36px #0003;font:13px/1.5 system-ui,sans-serif;outline:none}\n.i360-snippets-header{display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:move;touch-action:none;user-select:none}\n.i360-snippets-header button{padding:0 7px;font-size:20px}\n.i360-panel-hint,.i360-empty{font-size:12px;color:#7b8799;margin:7px 0}\n.i360-snippets-actions{display:flex;align-items:center;flex-wrap:wrap;gap:6px}.i360-snippets-actions button{white-space:nowrap}.i360-snippets-actions button:disabled{opacity:.55;cursor:wait}\n.i360-snippets-list{display:flex;flex-direction:column;gap:5px;margin-top:8px;max-height:42vh;overflow:auto}\n.i360-snippet-item{display:flex;align-items:flex-start;gap:5px;flex:0 0 auto;box-sizing:border-box;min-width:0;border:1px solid #e0e7f0;border-radius:5px;padding:4px 5px;background:#f9fbfe}\n.i360-snippets button.i360-snippet-insert{display:block;flex:1 1 0;min-width:0;width:auto;height:auto;min-height:22px;box-sizing:border-box;border:0;background:transparent;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;padding:1px 2px;color:#17467c;line-height:20px}\n.i360-snippet-controls{display:flex;flex:0 0 auto;align-items:center;gap:2px;margin:0}\n.i360-snippet-controls button{display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:22px;height:22px;padding:0;border-color:transparent;background:transparent;color:#738197}.i360-snippet-controls button svg{display:block;pointer-events:none}.i360-snippet-controls button:hover{background:#e6efff;color:#1677ff}.i360-snippet-controls button.i360-snippet-delete:hover{background:#fff1f0;border-color:#ffccc7;color:#cf1322}.i360-snippet-controls button:focus-visible{outline:2px solid #1677ff;outline-offset:1px}\n.i360-snippet-editing{border-color:#91baff;background:#fff}.i360-snippets textarea.i360-snippet-edit-input{flex:1 1 0;min-width:0;width:0;min-height:22px;box-sizing:border-box;margin:0;padding:1px 2px;border:0;border-radius:2px;background:transparent;font:13px/20px system-ui,sans-serif;color:#17467c;resize:none;overflow:hidden;outline:none}.i360-snippet-editing:focus-within{box-shadow:0 0 0 2px #1677ff15}.i360-snippet-editing .i360-snippet-controls button:first-child{color:#1677ff}\n.i360-image-dialog{width:1120px;padding:14px}\n.i360-editor-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}\n.i360-editor-tools{display:flex;flex-wrap:wrap;align-items:center;gap:5px;padding:8px;border:1px solid #e1e8f0;border-radius:6px;background:#f6f8fc;margin-bottom:8px}\n.i360-editor-tools button{padding:5px 8px}\n.i360-editor-tools button[aria-pressed=true]{background:#1677ff;color:#fff;border-color:#1677ff}\n.i360-editor-tools input[type=color]{box-sizing:border-box;width:32px;height:29px;padding:2px;border:1px solid #cbd5e1;border-radius:4px}\n.i360-editor-tools select{height:29px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;color:#17202e;font:12px system-ui,sans-serif}\n.i360-checkbox{display:inline-flex;align-items:center;gap:4px;font-size:12px}\n.i360-editor-stage{position:relative;display:flex;justify-content:center;align-items:center;overflow:hidden;background:#e8edf3;min-height:100px;border-radius:6px}\n.i360-editor-canvas{display:block;max-width:100%;max-height:62vh;width:auto;height:auto;touch-action:none;outline:none}\n.i360-editor-footer{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;align-items:center}\n.i360-editor-footer .i360-dialog-actions{margin-top:6px}\n.i360-canvas-text-entry{position:absolute;box-sizing:border-box;width:min(290px,90%);padding:8px;border:1px solid #fbbf24;border-radius:7px;background:#17202ef5;box-shadow:0 5px 25px #0005}\n.i360-canvas-text-entry textarea{font-size:16px!important;resize:vertical;max-height:25vh}\n.i360-comment-frame-link{display:inline;border:0;background:transparent;color:#1677ff;text-decoration:underline;cursor:pointer;font:inherit;padding:0}\n.i360-frame-text-overlay{position:absolute;z-index:2147481000;left:12px;right:12px;bottom:12px;box-sizing:border-box;display:grid;grid-template-columns:1fr auto;gap:3px 10px;max-height:38%;overflow:auto;padding:10px 12px;border:1px solid #8ab4ff;border-radius:8px;background:#17202eed;color:#fff;box-shadow:0 6px 24px #0005;font:14px/1.6 system-ui,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere}\n.i360-frame-text-overlay[hidden]{display:none}\n.i360-frame-text-heading{grid-column:1;color:#bfdbfe;font-size:12px}\n.i360-frame-text-body{grid-column:1 / -1;min-width:0}\n.i360-frame-text-close{grid-column:2;grid-row:1;align-self:start;padding:0 5px!important;border:0!important;background:transparent!important;color:#dbeafe!important;font-size:18px!important;line-height:1!important}\n.i360-frame-text-close:hover{color:#fff!important;background:#ffffff20!important}\n";
+  style.textContent = ".i360-native-hidden{display:none!important}\n.i360-rich-reason{box-sizing:border-box;display:block;min-height:112px;max-height:320px;overflow:auto;resize:vertical;white-space:pre-wrap;overflow-wrap:anywhere;width:100%;padding:12px;border:1px solid #d9d9d9;border-radius:5px;background:#fff;color:#17202e;font:14px/1.65 system-ui,sans-serif;outline:none;cursor:text}\n.i360-rich-reason:focus{border-color:#1677ff;box-shadow:0 0 0 2px #1677ff18}\n.i360-rich-reason:empty:before{content:attr(data-placeholder);color:#8a94a3;pointer-events:none}\n.i360-inline-frame{display:inline;color:#1677ff;text-decoration:underline;text-underline-offset:2px;cursor:pointer;border-radius:3px;background:#1677ff0a}\n.i360-inline-frame:hover{background:#1677ff20}\n.i360-inline-frame:focus-visible{outline:2px solid #1677ff}\n.i360-common-trigger{display:block;box-sizing:border-box;width:100%;padding:8px 12px;margin:0 0 9px;border:1px solid #cbdcf5;border-radius:6px;background:#f3f7fd;color:#17467c;text-align:left;cursor:pointer;font:600 13px/1.5 system-ui,sans-serif}\n.i360-toolbar{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px;align-items:stretch}\n.i360-action-card{position:relative;flex:1 0 auto;min-width:76px}\n.i360-action-main{box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;width:100%;height:50px;padding:6px 20px 5px 9px;border:1px solid #c9d7eb;border-radius:6px;background:#fff;color:#17467c;font:13px/1.3 system-ui,sans-serif;cursor:pointer}\n.i360-action-main kbd{font:10px/1.2 system-ui,sans-serif;color:#7a879b}\n.i360-action-capture{background:#1677ff;border-color:#1677ff;color:#fff}\n.i360-action-capture kbd{color:#dbeafe}\n.i360-action-annotate{border-color:#e1c17b;background:#fffbeb;color:#92400e}\n.i360-action-main:disabled{opacity:.55;cursor:wait}\n.i360-shortcut-gear{position:absolute;right:3px;top:3px;display:flex;align-items:center;justify-content:center;width:18px;height:18px;padding:0;border:0;border-radius:3px;background:#fff9;color:#536176;font:13px/1 system-ui,sans-serif;cursor:pointer}\n.i360-shortcut-gear:hover{background:#dbeafe;color:#0958d9}\n.i360-capture-range{display:flex;flex-wrap:wrap;gap:6px 9px;align-items:center;margin-top:8px;color:#68788b;font:12px/1.5 system-ui}\n.i360-capture-modes{display:inline-flex;padding:2px;border:1px solid #dbe3ee;border-radius:6px;background:#f3f6fa;gap:2px}\n.i360-capture-modes button{min-width:44px;margin:0;padding:3px 11px;border:0;border-radius:4px;background:transparent;color:#627187;font:12px/1.5 system-ui;cursor:pointer}\n.i360-capture-modes button[aria-pressed=true]{background:#fff;color:#1677ff;font-weight:600;box-shadow:0 1px 3px #1f3b641f}\n.i360-capture-modes button:focus-visible{outline:2px solid #1677ff;outline-offset:1px}\n.i360-status{font:12px/1.5 system-ui,sans-serif;color:#536176;margin:7px 0 0;overflow-wrap:anywhere}\n.i360-status:empty{display:none}\n.i360-status[data-state=success]{color:#237804}\n.i360-status[data-state=error]{color:#cf1322}\n.i360-dialog{box-sizing:border-box;position:fixed;inset:0;margin:auto;padding:18px;border:1px solid #dce2ec;border-radius:12px;background:#fff;color:#17202e;font:14px/1.5 system-ui,sans-serif;box-shadow:0 14px 70px #0005;max-width:95vw;max-height:94vh;overflow:auto}\n.i360-dialog::backdrop{background:#0b122b80}\n.i360-dialog button,.i360-snippets button{padding:6px 10px;border:1px solid #cbd5e1;border-radius:5px;background:#fff;color:#17202e;font:13px/1.4 system-ui,sans-serif;cursor:pointer}\n.i360-dialog button:hover,.i360-snippets button:hover{background:#eff6ff;border-color:#1677ff}\n.i360-dialog button:disabled{opacity:.4;cursor:default}\n.i360-dialog input:not([type=color]):not([type=checkbox]),.i360-dialog textarea,.i360-snippets textarea{box-sizing:border-box;width:100%;padding:10px;border:1px solid #cbd5e1;border-radius:5px;color:#17202e;background:#fff;font:14px/1.6 system-ui,sans-serif}\n.i360-dialog-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px}\n.i360-primary{background:#1677ff!important;color:#fff!important;border-color:#1677ff!important}\n.i360-shortcut-dialog{width:420px}\n.i360-shortcut-dialog p{font-size:13px;color:#536176}\n.i360-snippets{position:fixed;z-index:2147482000;box-sizing:border-box;width:320px;min-width:220px;max-width:94vw;max-height:84vh;overflow:auto;resize:both;padding:12px;border:1px solid #cbd5e1;border-radius:10px;background:#fff;color:#17202e;box-shadow:0 8px 36px #0003;font:13px/1.5 system-ui,sans-serif;outline:none}\n.i360-snippets-header{display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:move;touch-action:none;user-select:none}\n.i360-snippets-header button{padding:0 7px;font-size:20px}\n.i360-panel-hint,.i360-empty{font-size:12px;color:#7b8799;margin:7px 0}\n.i360-snippets-actions{display:flex;align-items:center;flex-wrap:wrap;gap:6px}.i360-snippets-actions button{white-space:nowrap}.i360-snippets-actions button:disabled{opacity:.55;cursor:wait}\n.i360-snippets-list{display:flex;flex-direction:column;gap:5px;margin-top:8px;max-height:42vh;overflow:auto}\n.i360-snippet-item{display:flex;align-items:flex-start;gap:5px;flex:0 0 auto;box-sizing:border-box;min-width:0;border:1px solid #e0e7f0;border-radius:5px;padding:4px 5px;background:#f9fbfe}\n.i360-snippets button.i360-snippet-insert{display:block;flex:1 1 0;min-width:0;width:auto;height:auto;min-height:22px;box-sizing:border-box;border:0;background:transparent;text-align:left;white-space:pre-wrap;overflow-wrap:anywhere;padding:1px 2px;color:#17467c;line-height:20px}\n.i360-snippet-controls{display:flex;flex:0 0 auto;align-items:center;gap:2px;margin:0}\n.i360-snippet-controls button{display:flex;align-items:center;justify-content:center;box-sizing:border-box;width:22px;height:22px;padding:0;border-color:transparent;background:transparent;color:#738197}.i360-snippet-controls button svg{display:block;pointer-events:none}.i360-snippet-controls button:hover{background:#e6efff;color:#1677ff}.i360-snippet-controls button.i360-snippet-delete:hover{background:#fff1f0;border-color:#ffccc7;color:#cf1322}.i360-snippet-controls button:focus-visible{outline:2px solid #1677ff;outline-offset:1px}\n.i360-snippet-editing{border-color:#91baff;background:#fff}.i360-snippets textarea.i360-snippet-edit-input{flex:1 1 0;min-width:0;width:0;min-height:22px;box-sizing:border-box;margin:0;padding:1px 2px;border:0;border-radius:2px;background:transparent;font:13px/20px system-ui,sans-serif;color:#17467c;resize:none;overflow:hidden;outline:none}.i360-snippet-editing:focus-within{box-shadow:0 0 0 2px #1677ff15}.i360-snippet-editing .i360-snippet-controls button:first-child{color:#1677ff}\n.i360-image-dialog{width:1120px;padding:14px}\n.i360-editor-heading{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px}\n.i360-editor-tools{display:flex;flex-wrap:wrap;align-items:center;gap:5px;padding:8px;border:1px solid #e1e8f0;border-radius:6px;background:#f6f8fc;margin-bottom:8px}\n.i360-editor-tools button{padding:5px 8px}\n.i360-editor-tools button[aria-pressed=true]{background:#1677ff;color:#fff;border-color:#1677ff}\n.i360-editor-tools input[type=color]{box-sizing:border-box;width:32px;height:29px;padding:2px;border:1px solid #cbd5e1;border-radius:4px}\n.i360-editor-tools select{height:29px;border:1px solid #cbd5e1;border-radius:4px;background:#fff;color:#17202e;font:12px system-ui,sans-serif}\n.i360-checkbox{display:inline-flex;align-items:center;gap:4px;font-size:12px}\n.i360-editor-stage{position:relative;display:flex;justify-content:center;align-items:center;overflow:hidden;background:#e8edf3;min-height:100px;border-radius:6px}\n.i360-editor-canvas{display:block;max-width:100%;max-height:62vh;width:auto;height:auto;touch-action:none;outline:none}\n.i360-editor-footer{display:flex;flex-wrap:wrap;justify-content:space-between;gap:8px;align-items:center}\n.i360-editor-footer .i360-dialog-actions{margin-top:6px}\n.i360-canvas-text-entry{position:absolute;box-sizing:border-box;width:min(290px,90%);padding:8px;border:1px solid #fbbf24;border-radius:7px;background:#17202ef5;box-shadow:0 5px 25px #0005}\n.i360-canvas-text-entry textarea{font-size:16px!important;resize:vertical;max-height:25vh}\n.i360-comment-frame-link{display:inline;border:0;background:transparent;color:#1677ff;text-decoration:underline;cursor:pointer;font:inherit;padding:0}\n.i360-frame-text-overlay{position:absolute;z-index:2147481000;left:12px;right:12px;bottom:12px;box-sizing:border-box;display:grid;grid-template-columns:1fr auto;gap:3px 10px;max-height:38%;overflow:auto;padding:10px 12px;border:1px solid #8ab4ff;border-radius:8px;background:#17202eed;color:#fff;box-shadow:0 6px 24px #0005;font:14px/1.6 system-ui,sans-serif;white-space:pre-wrap;overflow-wrap:anywhere}\n.i360-frame-text-overlay[hidden]{display:none}\n.i360-frame-text-heading{grid-column:1;color:#bfdbfe;font-size:12px}\n.i360-frame-text-body{grid-column:1 / -1;min-width:0}\n.i360-frame-text-close{grid-column:2;grid-row:1;align-self:start;padding:0 5px!important;border:0!important;background:transparent!important;color:#dbeafe!important;font-size:18px!important;line-height:1!important}\n.i360-frame-text-close:hover{color:#fff!important;background:#ffffff20!important}\n";
   let discovery;
   function startUI() {
     if (dead) return;
