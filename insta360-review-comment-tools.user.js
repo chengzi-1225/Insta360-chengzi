@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 审核与评论帧工具箱
 // @namespace    insta360-review-comment-tools
-// @version      1.0.5
+// @version      1.0.6
 // @description  右键提交/更新/通过，侧键更新，Tab驳回/取消、Enter提交、Esc取消、左右切换；驳回历史；评论帧号跳转/标注引用；常用理由；截图附图和图片标注；自定义快捷键。
 // @author       橙子 / chengzi
 // @match        *://label.insta360.com/*
@@ -23,7 +23,7 @@
   'use strict';
   const KEY = '__INSTA_REVIEW_ASSISTANT__';
   if (window[KEY]) return;
-  const api = { version: '1.0.5', destroy() {
+  const api = { version: '1.0.6', destroy() {
     if (window[KEY] !== api) return;
     window._fcMergedApi?.destroy?.();
     window.__INSTA_COMMENT_FRAME_LINKS__?.destroy?.();
@@ -471,6 +471,30 @@
 
   const PANORAMA = '[class*="panorama-container"]';
   const PANORAMA_CANVAS = 'canvas[class*="panorama-canvas"],canvas[data-engine^="three.js"]';
+  const CAPTURE_EXCLUDED = '.lsf-comments-list,.lsf-comments,.lsf-history-item__comment-content,.lsf-comment-form__input-container,.lsf-outliner-tree,.lsf-topbar,.i360-dialog,[role="dialog"],[contenteditable="true"],button';
+  let chosenPreview = null, previewPicker = null;
+
+  function largeCaptureSurface(node, main) {
+    const rect = node.getBoundingClientRect();
+    return captureLayerVisible(node, main) && !node.closest(CAPTURE_EXCLUDED) && rect.width >= 80 && rect.height >= 48;
+  }
+
+  function adjacentCaptureSurface(node, image) {
+    const a = image.getBoundingClientRect(), b = node.getBoundingClientRect();
+    const overlapY = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+    const gapX = Math.max(b.left - a.right, a.left - b.right);
+    const overlapX = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+    const gapY = Math.max(b.top - a.bottom, a.top - b.bottom);
+    return overlapY > Math.min(a.height, b.height) * .25 && gapX >= -2 && gapX <= Math.max(160, a.width * .75)
+      || overlapX > Math.min(a.width, b.width) * .25 && gapY >= -2 && gapY <= 160;
+  }
+
+  function surfaceCaptureRoot(node) {
+    // 预览的参考线可能是画布旁的 DOM 边框，一起读取其直属容器。
+    const parent = node.parentElement;
+    return parent && parent !== document.body && !parent.matches(CAPTURE_EXCLUDED)
+      && !parent.querySelector('img[alt="LS"]') ? parent : node;
+  }
 
   function captureLayerVisible(node, main) {
     if (!visible(node)) return false;
@@ -504,6 +528,14 @@
       if (host.contains(media) || media.closest(PANORAMA)) continue;
       const preview = media.closest('.lsf-object,[class*="preview"],[id*="preview"],[class*="crop"],[id*="crop"]');
       if (preview && preview !== scope && scope.contains(preview)) candidates.add(preview);
+      // 项目自定义成片区可能只是无类名的 div/canvas/img。
+      // 按与原图的实际位置识别，不把组件命名作为必要条件。
+      const image = host.querySelector('img[alt="LS"]');
+      const owner = media.closest('.lsf-object');
+      const editor = host.closest('.lsf-editor');
+      if (image && largeCaptureSurface(media, scope) && adjacentCaptureSurface(media, image)
+        && (!owner || owner === host || !owner.querySelector('img[alt="LS"]'))
+        && (!editor || media.closest('.lsf-editor') === editor)) candidates.add(surfaceCaptureRoot(media));
     }
     let previews = [...candidates].filter(node => {
       if (!captureLayerVisible(node, scope) || node.closest('.lsf-comments-list,.lsf-comments,.lsf-history-item__comment-content,.lsf-comment-form__input-container,.lsf-outliner-tree,.lsf-topbar,.i360-dialog,[role="dialog"],[contenteditable="true"]')) return false;
@@ -522,6 +554,11 @@
         if (parent === scope) break;
       }
     }
+    if (chosenPreview) {
+      if (chosenPreview.identity !== captureTaskIdentity() || !chosenPreview.node.isConnected) chosenPreview = null;
+      else if (captureLayerVisible(chosenPreview.node, document.body)) previews.push(surfaceCaptureRoot(chosenPreview.node));
+    }
+    previews = [...new Set(previews)];
     const roots = [host, ...previews.filter(node => !host.contains(node))];
     let main = host;
     while (main.parentElement && roots.some(node => !main.contains(node))) main = main.parentElement;
@@ -544,7 +581,8 @@
     const image = queryAreas('img[alt="LS"]').find(node => captureLayerVisible(node, main));
     if (!image || !image.complete || !image.naturalWidth) throw new Error('图片尚未加载完成');
     const media = queryAreas('img,canvas').filter(layer => {
-      if (layer.tagName === 'IMG' && !layer.matches('img[alt="LS"]') && !previews.some(preview => preview === layer || preview.contains(layer))) return false;
+      if (layer.closest(CAPTURE_EXCLUDED)) return false;
+      if (layer.tagName === 'IMG' && !layer.matches('img[alt="LS"]') && !previews.some(preview => preview === layer || preview.contains(layer)) && !largeCaptureSurface(layer, main)) return false;
       const rect = layer.getBoundingClientRect();
       return captureLayerVisible(layer, main) && rect.width > 0 && rect.height > 0;
     });
@@ -936,6 +974,57 @@
   function updateShortcutLabels() {
     for (const record of ui.values()) for (const [key, card] of Object.entries(record.cards)) { card.key.textContent = shortcutLabel(key); card.gear.title = `设置${actions[key].label}快捷键：${shortcutLabel(key)}`; }
   }
+  function updateCaptureScope(record) {
+    if (!record.captureScope) return;
+    let label;
+    try {
+      const scene = captureImageScene(), image = scene.layers.find(node => node.matches?.('img[alt="LS"]'));
+      const right = image && scene.layers.some(node => ['IMG', 'CANVAS'].includes(node.tagName) && node !== image && (chosenPreview?.node === node || adjacentCaptureSurface(node, image)));
+      label = right ? '截图范围：左侧 + 右侧预览' : '截图范围：仅左侧';
+    } catch { label = '截图范围：等待画面加载'; }
+    if (record.captureScope.textContent !== label) record.captureScope.textContent = label;
+  }
+  function closePreviewPicker() {
+    if (!previewPicker) return;
+    previewPicker.tip.remove(); previewPicker.outline.remove();
+    window.removeEventListener('pointermove', previewPicker.move, true);
+    window.removeEventListener('click', previewPicker.click, true);
+    previewPicker = null;
+  }
+  function openPreviewPicker(record) {
+    closePreviewPicker();
+    const tip = element('div', 'i360-preview-picker'), text = element('span', '', '点击页面右侧的预览画面，将它补入截图。Esc 取消。'), cancel = button('取消', '取消补选预览');
+    tip.style.cssText = 'position:fixed;top:14px;left:50%;transform:translateX(-50%);z-index:2147483000;max-width:90vw;display:flex;align-items:center;gap:12px;padding:12px 16px;border:1px solid #1677ff;border-radius:8px;background:#fff;color:#17467c;box-shadow:0 4px 24px #0003;font:14px system-ui';
+    const outline = element('div'); outline.style.cssText = 'position:fixed;pointer-events:none;z-index:2147482999;border:3px solid #1677ff;box-sizing:border-box;background:#1677ff18'; outline.hidden = true;
+    tip.append(text, cancel); document.body.append(tip, outline);
+    const image = frameTextDisplayHost()?.querySelector('img[alt="LS"]');
+    const targetAt = event => {
+      if (tip.contains(event.target)) return null;
+      const direct = event.target.closest?.('canvas,img');
+      const surfaces = direct ? [direct] : [...document.querySelectorAll('canvas,img')].filter(node => {
+        const r = node.getBoundingClientRect();
+        return event.clientX >= r.left && event.clientX <= r.right && event.clientY >= r.top && event.clientY <= r.bottom;
+      });
+      return surfaces.find(node => node !== image && largeCaptureSurface(node, document.body)
+        && (!image?.closest('.lsf-object')?.contains(node) || adjacentCaptureSurface(node, image)));
+    };
+    const move = event => {
+      const node = targetAt(event); outline.hidden = !node;
+      if (node) { const r = node.getBoundingClientRect(); Object.assign(outline.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` }); }
+    };
+    const click = event => {
+      if (tip.contains(event.target)) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      const node = targetAt(event);
+      if (!node) { text.textContent = '这里没有可截取的画面，请点击右侧图片或预览画布。'; return; }
+      chosenPreview = { node, identity: captureTaskIdentity() };
+      closePreviewPicker(); updateCaptureScope(record);
+      status(record, '已补选右侧预览，请再点击一键截图或图片编辑。', 'success');
+    };
+    previewPicker = { tip, outline, move, click, record, identity: captureTaskIdentity() };
+    cancel.addEventListener('click', closePreviewPicker);
+    window.addEventListener('pointermove', move, true); window.addEventListener('click', click, true);
+  }
   function makeAction(record, key) {
     const action = actions[key], card = element('div', 'i360-action-card');
     const main = button('', action.label, `i360-action-main i360-action-${key}`), label = element('span', 'i360-action-label', action.label), hint = element('kbd', '', shortcutLabel(key));
@@ -950,9 +1039,10 @@
   // 提前在 window 隔离这几个事件；click 仍到达按钮并执行原动作。
   for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
     listen(window, type, event => {
-      const target = event.target.closest?.('.i360-action-card,.i360-common-trigger');
+      if (previewPicker && !previewPicker.tip.contains(event.target)) { event.preventDefault(); event.stopPropagation(); return; }
+      const target = event.target.closest?.('.i360-action-card,.i360-common-trigger,.i360-capture-range');
       if (!target) return;
-      const record = [...ui.values()].find(record => record.toolbar.contains(target) || record.common === target);
+      const record = [...ui.values()].find(record => record.toolbar.contains(target) || record.common === target || record.captureRange === target);
       if (!record) return;
       event.stopPropagation();
       if (type.endsWith('down')) { event.preventDefault(); rememberReason(record); }
@@ -971,15 +1061,24 @@
     if (native.matches(REJECT_TEXTAREA)) toolbar.append(makeAction(record, 'capture'), makeAction(record, 'annotate'));
     const output = element('div', 'i360-status'); output.setAttribute('role', 'status'); record.status = output;
     native.insertAdjacentElement('afterend', toolbar); toolbar.insertAdjacentElement('afterend', output);
+    if (record.cards.capture && !record.video) {
+      const scope = element('div'), summary = element('span', 'i360-capture-scope'), pick = button('补选右侧预览', '补选右侧预览', 'i360-pick-preview');
+      scope.className = 'i360-capture-range'; scope.style.cssText = 'display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center;margin-top:7px;font:12px/1.5 system-ui;color:#68788b';
+      pick.style.cssText = 'border:0;padding:0;background:none;color:#1677ff;font:inherit;text-decoration:underline;cursor:pointer';
+      pick.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); openPreviewPicker(record); });
+      scope.append(summary, pick); toolbar.after(scope); record.captureRange = scope; record.captureScope = summary; updateCaptureScope(record);
+    }
   }
   function unmountUI(record) {
-    jobs.get(record.native)?.abort(); record.proxy?.remove(); record.common?.remove(); record.toolbar.remove(); record.status.remove();
+    if (previewPicker?.record === record) closePreviewPicker();
+    jobs.get(record.native)?.abort(); record.proxy?.remove(); record.common?.remove(); record.toolbar.remove(); record.captureRange?.remove(); record.status.remove();
     record.native.classList.remove('i360-native-hidden');
     if (record.originalTabIndex === null) record.native.removeAttribute('tabindex'); else if (record.originalTabIndex !== undefined) record.native.setAttribute('tabindex', record.originalTabIndex);
     if (record.originalAriaHidden === null) record.native.removeAttribute('aria-hidden'); else if (record.originalAriaHidden !== undefined) record.native.setAttribute('aria-hidden', record.originalAriaHidden);
     ui.delete(record.native);
   }
   function scanUI() {
+    if (previewPicker && previewPicker.identity !== captureTaskIdentity()) closePreviewPicker();
     const supportedTask = videoTask() || !!frameTextDisplayHost();
     for (const record of ui.values()) {
       if (!record.native.isConnected || !record.toolbar.isConnected || !supportedTask || record.video !== videoTask()) { unmountUI(record); continue; }
@@ -987,6 +1086,7 @@
         pushReasonHistory(record); record.value = record.native.value;
         renderReason(record, record.native.value, document.activeElement === record.proxy ? record.selection : null, false);
       }
+      updateCaptureScope(record);
     }
     if (supportedTask) for (const native of document.querySelectorAll(TEXTAREA)) if (!ui.has(native)) mountUI(native);
     if (imageEditor && (!imageEditor.record.native.isConnected || imageEditor.identity !== captureTaskIdentity())) closeImageEditor();
@@ -1174,6 +1274,7 @@
   }
   listen(window, 'resize', () => { if (snippetsPanel) { const r = snippetsPanel.root.getBoundingClientRect(); clampPanel(snippetsPanel.root, r.x, r.y); } });
   listen(window, 'keydown', event => {
+    if (previewPicker) { event.preventDefault(); event.stopImmediatePropagation(); if (event.key === 'Escape') closePreviewPicker(); return; }
     if (dead) return;
     const ownInput = event.target.closest?.('.i360-rich-reason,.i360-snippets,.i360-dialog');
     if (event.isComposing || event.keyCode === 229) { if (ownInput) event.stopImmediatePropagation(); return; }
@@ -1450,7 +1551,7 @@
   }
   // 审核快捷键通过此接口访问可见编辑框，避免操作被隐藏的原生 textarea。
   const reviewBridge = {
-    hasActiveDialog: () => !!settingsDialog || !!imageEditor,
+    hasActiveDialog: () => !!settingsDialog || !!imageEditor || !!previewPicker,
     editorFor: native => ui.get(native)?.proxy || native,
     focusReason(native, selectAll = false) {
       discover();
@@ -1480,6 +1581,7 @@
   const api = { version:'3.1.7', review: reviewBridge, extractTrailingFrameText, scan:()=>discover(true), destroy() {
     if (dead) return; dead = true; ++seekId; clearInterval(discovery); cancelAnimationFrame(renderId); cancelAnimationFrame(centerId);
     restorePanoramaContext();
+    closePreviewPicker(); chosenPreview = null;
     closeImageEditor(); closeShortcutSettings(); closeSnippets(); jobs.forEach(controller=>controller.abort()); jobs.clear();
     pendingCanvasCaptures.forEach(abort=>abort()); pendingCanvasCaptures.clear();
     listeners.splice(0).forEach(remove=>remove()); roots.forEach(state=>state.observer.disconnect()); roots.clear(); clearFrameText();
