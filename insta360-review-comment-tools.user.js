@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 审核与评论帧工具箱
 // @namespace    insta360-review-comment-tools
-// @version      1.0.6
+// @version      1.0.7
 // @description  右键提交/更新/通过，侧键更新，Tab驳回/取消、Enter提交、Esc取消、左右切换；驳回历史；评论帧号跳转/标注引用；常用理由；截图附图和图片标注；自定义快捷键。
 // @author       橙子 / chengzi
 // @match        *://label.insta360.com/*
@@ -23,7 +23,7 @@
   'use strict';
   const KEY = '__INSTA_REVIEW_ASSISTANT__';
   if (window[KEY]) return;
-  const api = { version: '1.0.6', destroy() {
+  const api = { version: '1.0.7', destroy() {
     if (window[KEY] !== api) return;
     window._fcMergedApi?.destroy?.();
     window.__INSTA_COMMENT_FRAME_LINKS__?.destroy?.();
@@ -489,7 +489,13 @@
       || overlapX > Math.min(a.width, b.width) * .25 && gapY >= -2 && gapY <= 160;
   }
 
-  function surfaceCaptureRoot(node) {
+  function surfaceCaptureRoot(node, includeImageObject = false) {
+    if (includeImageObject) {
+      // 手动点到的可能只是 Konva 透明标注层；原生底图与网格在它的兄弟节点。
+      // 只有用户明确补选时才合并整个图片对象，避免自动带入其他独立图片。
+      const owner = node.closest('.lsf-object'), host = frameTextDisplayHost();
+      if (owner && owner !== host && !owner.contains(host) && owner.querySelector('img[alt="LS"]')) return owner;
+    }
     // 预览的参考线可能是画布旁的 DOM 边框，一起读取其直属容器。
     const parent = node.parentElement;
     return parent && parent !== document.body && !parent.matches(CAPTURE_EXCLUDED)
@@ -556,7 +562,7 @@
     }
     if (chosenPreview) {
       if (chosenPreview.identity !== captureTaskIdentity() || !chosenPreview.node.isConnected) chosenPreview = null;
-      else if (captureLayerVisible(chosenPreview.node, document.body)) previews.push(surfaceCaptureRoot(chosenPreview.node));
+      else if (captureLayerVisible(chosenPreview.node, document.body)) previews.push(surfaceCaptureRoot(chosenPreview.node, true));
     }
     previews = [...new Set(previews)];
     const roots = [host, ...previews.filter(node => !host.contains(node))];
@@ -1010,7 +1016,7 @@
     };
     const move = event => {
       const node = targetAt(event); outline.hidden = !node;
-      if (node) { const r = node.getBoundingClientRect(); Object.assign(outline.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` }); }
+      if (node) { const r = surfaceCaptureRoot(node, true).getBoundingClientRect(); Object.assign(outline.style, { left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` }); }
     };
     const click = event => {
       if (tip.contains(event.target)) return;
