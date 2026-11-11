@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 清空标注并恢复待标注
 // @namespace    insta360-local-tools
-// @version      1.0.4
+// @version      1.0.5
 // @description  对勾选任务或指定 ID 直接清理，预览与下载备份可选，清空标注、草稿和预标注并核查状态。
 // @homepageURL  https://github.com/chengzi-1225/Insta360-chengzi
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-reset-annotations.meta.js
@@ -277,7 +277,42 @@
     if (!state) throw new Error('接口未返回任务状态，无法确认待标注');
     return state;
   }
-  async function snapshot(api, taskId, projectId) {
+  async function independentAnnotations(api, entry) {
+    const initial = `/api/tasks/${entry.taskId}/annotations/`;
+    let path = initial;
+    const rows = [], seen = new Set(), visited = new Set();
+    while (path) {
+      if (visited.has(path) || visited.size >= 1000) throw new Error('独立标注核查分页异常');
+      visited.add(path);
+      const response = await api(path);
+      const page = Array.isArray(response) ? response : response?.results;
+      if (!Array.isArray(page)) throw new Error('独立标注接口未返回完整列表，不能确认已清空');
+      for (const row of page) {
+        const id = idOf(row.id);
+        if (seen.has(id) || row.is_stub === true || !Array.isArray(row.result) || (row.task != null && reference(row.task) !== entry.taskId)) {
+          throw new Error('独立标注列表不完整、重复或含其他任务的记录');
+        }
+        seen.add(id); rows.push(row);
+      }
+      if (!Array.isArray(response) && response?.count != null && (!Number.isSafeInteger(response.count) || (!response.next && response.count !== rows.length))) {
+        throw new Error('独立标注列表数量不匹配，不能确认已清空');
+      }
+      const next = !Array.isArray(response) && response?.next;
+      if (!next) break;
+      const url = new URL(next, 'https://label.insta360.com');
+      if (url.origin !== 'https://label.insta360.com' || url.pathname !== initial) throw new Error('独立标注分页超出当前任务');
+      path = url.pathname + url.search;
+    }
+    // The list endpoint excludes cancelled annotations on some deployments; retain
+    // records returned by task detail, and include any records the detail omitted.
+    const merged = new Map(entry.task.annotations.map(row => [idOf(row.id), row]));
+    rows.forEach(row => merged.set(idOf(row.id), row));
+    entry.task.annotations = Array.from(merged.values());
+    entry.independentAnnotationCount = rows.length;
+    entry.fingerprint = content(entry);
+    return entry;
+  }
+  async function snapshot(api, taskId, projectId, crossCheck = false) {
     const task = await api(`/api/tasks/${taskId}/?resolve_uri=false&annotations_stub=false`);
     if (!task || idOf(task.id) !== taskId || idOf(task.project) !== projectId) {
       throw new Error(`任务 ${taskId} 的 ID 或项目不匹配，停止处理`);
@@ -315,15 +350,15 @@
     }
     const entry = { taskId, task, drafts, state: await taskState(api, task, projectId) };
     entry.fingerprint = content(entry);
-    return entry;
+    return crossCheck ? independentAnnotations(api, entry) : entry;
   }
-  async function preview({ api, projectId, taskIds, shouldStop = () => false, onProgress = () => {} }) {
+  async function preview({ api, projectId, taskIds, crossCheck = false, shouldStop = () => false, onProgress = () => {} }) {
     projectId = idOf(projectId); taskIds = parseIds(taskIds.join('\n'));
     const plan = { version: 1, projectId, taskIds, runId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       createdAt: new Date().toISOString(), entries: [], stopped: false };
     const stopped = () => { if (shouldStop()) plan.stopped = true; return plan.stopped; };
     await runConcurrent(taskIds, 3, stopped, async taskId => {
-      try { plan.entries.push({ ...await snapshot(api, taskId, projectId), status: 'ready' }); }
+      try { plan.entries.push({ ...await snapshot(api, taskId, projectId, crossCheck), status: 'ready' }); }
       catch (error) { plan.entries.push({ taskId, status: 'failed', error: error.message }); }
       onProgress(plan);
     });
@@ -386,18 +421,186 @@
   }
   function contentAroundNative(entry, kind) {
     const value = JSON.parse(content(entry));
-    const fields = {
+    const fieldsByKind = {
       reviews: ['state', 'review', 'review_id', 'reviewId', 'reviews', 'reviewers', 'reviewed_by', 'reviewed_at',
         'review_status', 'reviewed', 'score', 'scores', 'review_score', 'total_reviews'],
       acceptances: ['state', 'acceptance', 'acceptance_id', 'acceptances', 'accepted_by', 'accepted_at', 'acceptance_status'],
       reviewers: ['reviewer', 'reviewers', 'reviewed_by', 'assigned_reviewers'],
       annotators: ['completed_by', 'annotator', 'annotators', 'assigned_annotators'],
-    }[kind] || [];
+    };
+    const fields = (Array.isArray(kind) ? kind : [kind]).flatMap(name => fieldsByKind[name] || []);
     value.annotations.forEach(row => fields.forEach(key => { delete row[key]; }));
     return stableJson(value);
   }
+  function verification(entry) {
+    return { checkedAt: new Date().toISOString(), taskId: entry.taskId, state: entry.state,
+      annotations: entry.task.annotations.length, drafts: entry.drafts.length, predictions: entry.task.predictions.length,
+      independentAnnotationCount: entry.independentAnnotationCount,
+      annotationIds: entry.task.annotations.map(row => idOf(row.id)),
+      draftIds: entry.drafts.map(row => idOf(row.id)), predictionIds: entry.task.predictions.map(row => idOf(row.id)) };
+  }
+  function remainingText(entry) {
+    return `服务器剩余：标注 ${entry.task.annotations.length} / 草稿 ${entry.drafts.length} / 预标注 ${entry.task.predictions.length}`;
+  }
+  async function executeBatches({ api, plan, persist, actions, shouldStop, onProgress }) {
+    const report = { version: 1, runId: plan.runId, projectId: plan.projectId, mode: 'direct', strategy: 'native-batch',
+      batchSize: 100, results: [], stopped: false, startedAt: new Date().toISOString(),
+      nativeActionsAvailable: actions.map(({ id, title, kind }) => ({ id, title, kind })) };
+    const stopped = () => {
+      if (shouldStop()) { report.stopped = true; report.stopReason ??= { message: '用户停止或页面切换' }; }
+      return report.stopped;
+    };
+    const checkStop = () => { if (stopped()) throw makeError('已停止；已发出的批量请求仍可能完成，已删内容不会自动恢复', { cancelled: true }); };
+    const phase = text => { report.phase = text; onProgress(report); };
+    for (let offset = 0; offset < plan.entries.length && !stopped(); offset += report.batchSize) {
+      const originals = plan.entries.slice(offset, offset + report.batchSize);
+      const entries = new Map(), finals = new Map(), receipts = [];
+      const label = `第 ${Math.floor(offset / report.batchSize) + 1} / ${Math.ceil(plan.entries.length / report.batchSize)} 批`;
+      let batchError, writesStarted = false;
+      const readAll = async (target, backup = false, compare = false) => {
+        let error;
+        await runConcurrent(originals, 8, () => false, async original => {
+          try {
+            if (backup) checkStop();
+            const entry = await snapshot(api, original.taskId, plan.projectId, true);
+            if (compare) {
+              const before = entries.get(original.taskId);
+              if (entry.fingerprint !== before.fingerprint || entry.state !== before.state) {
+                throw changeError(before, entry, '批量清理前内容或状态发生变化，整批未执行删除');
+              }
+            }
+            target.set(original.taskId, entry);
+            if (backup) {
+              try { await persist({ runId: plan.runId, projectId: plan.projectId, entry }); }
+              catch (cause) { throw makeError(`本地备份失败，整批未开始清空：${cause.message}`, { fatal: true }); }
+            }
+          } catch (cause) { error ??= cause; }
+        });
+        if (error) throw error;
+      };
+      try {
+        // Validate all forms before the first write; never guess a state-transition form.
+        const forms = new Map(actions.map(action => [action.id, nativeFormBody(action)]));
+        phase(`${label} · 读取并保存 ${originals.length} 个任务的本机备份`);
+        await readAll(entries, true);
+        checkStop(); phase(`${label} · 核对备份后内容`);
+        const fresh = new Map(); await readAll(fresh, false, true);
+        const invoke = async action => {
+          checkStop(); phase(`${label} · 批量执行 ${action.title}`);
+          writesStarted = true;
+          const params = new URLSearchParams({ project: String(plan.projectId), id: action.id });
+          let response;
+          try {
+            response = await api(`/api/dm/actions/?${params}`, 'POST', { ...forms.get(action.id),
+              selectedItems: { all: false, included: originals.map(row => row.taskId), excluded: [] },
+              filters: { conjunction: 'and', items: [] }, ordering: [] });
+          } catch (error) {
+            throw makeError(`批量动作 ${action.title} 失败：${error.message}；未重复提交`, { uncertain: error.status === 0, status: error.status });
+          }
+          const receipt = { id: action.id, title: action.title, kind: action.kind, scope: 'batch',
+            taskIds: originals.map(row => row.taskId), status: 'applied', response };
+          receipts.push(receipt);
+          if (response?.error) throw makeError(`批量动作 ${action.title} 失败：${response.detail || JSON.stringify(response.error)}`);
+          if (response?.async === true || response?.job || response?.job_id) {
+            receipt.status = 'pending';
+            if (!['annotations', 'predictions'].includes(action.kind)) {
+              throw makeError(`批量动作 ${action.title} 已交给平台后台处理，尚未确认完成；未重复提交，请稍后独立核查`, { uncertain: true });
+            }
+            // Native content deletion may run in the background without a job ID.
+            // Poll only outstanding tasks; never resubmit a destructive action.
+            let pending = originals.slice();
+            const deadline = Date.now() + 120000;
+            for (let attempt = 0; pending.length && attempt < 60; attempt++) {
+              if (stopped()) throw makeError('已停止等待；平台后台删除可能继续执行，请稍后核查，未重复提交', { uncertain: true, cancelled: true });
+              phase(`${label} · 平台后台删除中，仅回查剩余 ${pending.length} 个任务`);
+              const remaining = []; let readError;
+              await runConcurrent(pending, 8, () => false, async original => {
+                try {
+                  const current = await snapshot(api, original.taskId, plan.projectId, true);
+                  if (stableJson(current.task.data) !== stableJson(entries.get(original.taskId).task.data)) throw new Error('后台处理期间源数据发生变化');
+                  const hasContent = action.kind === 'annotations' ? current.task.annotations.length || current.drafts.length : current.task.predictions.length;
+                  if (hasContent) remaining.push(original);
+                } catch (error) { readError ??= error; }
+              });
+              if (readError) throw makeError(`后台删除已提交，但回查失败：${readError.message}`, { uncertain: true });
+              pending = remaining;
+              if (!pending.length) { receipt.status = 'applied'; break; }
+              if (Date.now() >= deadline) break;
+              await new Promise(resolve => setTimeout(resolve, 2000));
+            }
+            if (pending.length) throw makeError(`后台删除尚有 ${pending.length} 个任务未确认完成；已暂停后续批次，请稍后核查，未重复提交`, { uncertain: true });
+          }
+        };
+        const metadata = actions.filter(action => !['annotations', 'predictions'].includes(action.kind));
+        for (const action of metadata) await invoke(action);
+        if (metadata.length) {
+          phase(`${label} · 核对关联清理后的实际标注内容`);
+          const afterMetadata = new Map(); await readAll(afterMetadata);
+          for (const original of originals) {
+            const before = entries.get(original.taskId), after = afterMetadata.get(original.taskId);
+            if (contentAroundNative(before, metadata.map(action => action.kind)) !== contentAroundNative(after, metadata.map(action => action.kind))) {
+              throw makeError(`任务 ${original.taskId} 原生关联清理后实际标注内容发生变化，已停止后续删除`);
+            }
+          }
+        }
+        for (const action of actions.filter(action => ['annotations', 'predictions'].includes(action.kind))) {
+          // Detail counters may be zero while a separate editor still has records.
+          // Let the platform delete all children of these explicit task IDs.
+          await invoke(action);
+        }
+      } catch (error) {
+        batchError = error; report.stopped = true;
+        report.stopReason ??= { message: error.message };
+      }
+      // Always settle an issued batch by reading each task, even after the user presses Stop.
+      phase(`${label} · 独立回查每个任务，未清空不会显示完成`);
+      let readError;
+      try { await readAll(finals); } catch (error) { readError = error; }
+      for (const original of originals) {
+        const result = { taskId: original.taskId, status: 'failed', removed: { annotations: [], drafts: [], predictions: [] },
+          nativeActions: receipts.map(receipt => ({ ...receipt })), writesStarted };
+        const before = entries.get(original.taskId), final = finals.get(original.taskId);
+        if (final) {
+          result.verification = verification(final); result.state = final.state;
+          if (before) for (const kind of ['annotations', 'drafts', 'predictions']) {
+            const old = kind === 'drafts' ? before.drafts : before.task[kind];
+            const remaining = new Set((kind === 'drafts' ? final.drafts : final.task[kind]).map(row => idOf(row.id)));
+            result.removed[kind] = old.map(row => idOf(row.id)).filter(id => !remaining.has(id));
+          }
+        }
+        let error = batchError;
+        if (!final) error = makeError(`无法独立回查：${readError?.message || '任务未返回'}`, { uncertain: writesStarted });
+        if (!error && before && stableJson(before.task.data) !== stableJson(final.task.data)) error = makeError('原始视频或源数据发生变化，请核查备份');
+        if (!error) {
+          try {
+            verifyEmpty(final);
+            if (!pendingStates.includes(final.state)) throw new Error(`内容为空，但状态仍为 ${final.state}，尚未恢复待标注`);
+          } catch (cause) { error = cause; }
+        }
+        if (error) {
+          result.error = `${error.message}${final ? `；${remainingText(final)}` : ''}`;
+          const removed = Object.values(result.removed).some(ids => ids.length);
+          result.status = error.uncertain ? 'unknown' : removed ? 'partial' : error.cancelled && !writesStarted ? 'stopped' : writesStarted ? 'unknown' : 'failed';
+          report.stopped = true; report.stopReason ??= { taskId: result.taskId, message: result.error };
+        } else {
+          result.status = 'success';
+          result.message = `已执行 ${receipts.filter(row => !['annotations', 'predictions'].includes(row.kind)).length} 项平台原生关联清理；${remainingText(final)}，待标注（${final.state}）`;
+        }
+        report.results.push(result); onProgress(report);
+      }
+    }
+    report.finishedAt = new Date().toISOString(); return report;
+  }
   async function execute({ api, plan, persist, nativeCleanup = false, shouldStop = () => false, onProgress = () => {} }) {
-    const nativeActions = nativeCleanup ? nativeCleanupActions(await api(`/api/dm/actions/?project=${idOf(plan.projectId)}`)) : [];
+    const catalog = nativeCleanup ? await api(`/api/dm/actions/?project=${idOf(plan.projectId)}`) : [];
+    const nativeActions = nativeCleanupActions(catalog);
+    const contentActions = ['annotations', 'predictions'].map(kind => {
+      const action = catalog.find(row => row.id === `delete_tasks_${kind}` && !row.disabled);
+      return action && { ...action, kind };
+    });
+    if (plan.mode === 'direct' && contentActions.every(Boolean)) {
+      return executeBatches({ api, plan, persist, actions: [...nativeActions, ...contentActions], shouldStop, onProgress });
+    }
     const report = { version: 1, runId: plan.runId, projectId: idOf(plan.projectId), results: [], stopped: false,
       nativeActionsAvailable: nativeActions.map(action => ({ id: action.id, title: action.title, kind: action.kind })),
       mode: plan.mode === 'direct' ? 'direct' : 'preview', startedAt: new Date().toISOString() };
@@ -522,6 +725,8 @@
           if (!pendingStates.includes(final.state)) throw writeError || makeError(`状态未恢复，当前为 ${final.state}`, { fatal: true });
         }
         result.state = final.state;
+        if (nativeCleanup) { await independentAnnotations(api, final); result.verification = verification(final); verifyEmpty(final); }
+        result.verification = verification(final);
         result.status = 'success'; result.message = `${result.nativeActions.length ? `已执行 ${result.nativeActions.length} 项平台原生关联清理；` : ''}标注、草稿和预标注已清空，待标注（${final.state}）`;
       } catch (error) {
         result.error = error.message;
@@ -553,6 +758,12 @@
     }
     const data = { version: 1, projectId, taskId, state: stateOf(task), createdAt: new Date().toISOString(),
       taskShape: shape(task), records: [] };
+    try {
+      const taskDetailCount = task.annotations?.length;
+      const checked = await independentAnnotations(api, { taskId, task: { ...task, annotations: task.annotations?.slice() || [] }, drafts: [], state: stateOf(task) });
+      data.annotationCheck = { taskDetailCount, independentListCount: checked.independentAnnotationCount,
+        mergedIds: checked.task.annotations.map(row => idOf(row.id)) };
+    } catch (error) { data.annotationCheckError = error.message; }
     try { data.nativeActions = await api(`/api/dm/actions/?project=${projectId}`); }
     catch (error) { data.nativeActionsError = error.message; }
     const targets = [{ kind: 'tasks', id: taskId, shape: shape(task) }];
@@ -629,8 +840,8 @@
       <div class="steps"><button class="preview">预览范围（可选）</button><button class="backup" disabled>下载备份（可选）</button></div>
       <div class="status" role="status" aria-live="polite">等待选择任务</div>
       <button class="run danger" disabled>直接清空（无需预览）</button><pre class="log"></pre>
-      <div class="tools"><button class="stop" disabled>停止</button><button class="export" disabled>导出结果</button><button class="diagnose">导出接口诊断</button><button class="local">导出本机备份</button><button class="refresh">刷新列表</button></div>
-      <p class="foot">v1.0.4 · 保留任务 ID 与原始数据<a class="update" href="https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-reset-annotations.user.js" target="_blank" rel="noopener noreferrer">安装 / 更新</a></p>
+      <div class="tools"><button class="stop" disabled>停止</button><button class="verify">核查是否清空</button><button class="export" disabled>导出结果</button><button class="diagnose">导出接口诊断</button><button class="local">导出本机备份</button><button class="refresh">刷新列表</button></div>
+      <p class="foot">v1.0.5 · 批量清理 · 保留任务 ID 与原始数据<a class="update" href="https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-reset-annotations.user.js" target="_blank" rel="noopener noreferrer">安装 / 更新</a></p>
     </section><button class="toggle" ${demoSlot ? 'hidden' : ''}>清空标注</button>`;
     (demoSlot || document.documentElement).append(host);
     const $ = s => root.querySelector(s);
@@ -639,7 +850,12 @@
     let plan = null, report = null, busy = false, downloaded = false, stopRequested = false;
     let route = location.href, disposed = false;
     function message(text, tone = '') { status.textContent = text; status.dataset.tone = tone; }
-    function writeLog(text) { log.textContent += text + '\n'; log.scrollTop = log.scrollHeight; }
+    const logLines = [];
+    function writeLog(text) {
+      if (!log.textContent) logLines.length = 0;
+      logLines.push(text); if (logLines.length > 300) logLines.shift();
+      log.textContent = logLines.join('\n') + '\n'; log.scrollTop = log.scrollHeight;
+    }
     function validPlan() { return plan && !plan.stopped && plan.entries.length === plan.taskIds.length && plan.entries.every(e => e.status === 'ready'); }
     function controls() {
       let validIds = false;
@@ -647,6 +863,7 @@
       input.disabled = busy; $('.capture').disabled = busy; $('.preview').disabled = busy || !projectFromUrl();
       $('.backup').disabled = busy || !validPlan();
       $('.run').disabled = busy || !validIds;
+      $('.verify').disabled = busy || !validIds;
       $('.run').textContent = validPlan() ? '清空并恢复待标注' : '直接清空（无需预览）';
       $('.stop').disabled = !busy; $('.export').disabled = busy || !report; $('.diagnose').disabled = busy; $('.local').disabled = busy; $('.refresh').disabled = busy;
       $('.project').textContent = `当前项目 ${projectFromUrl() || '未识别'} · 勾选任务 / 指定 ID`;
@@ -714,20 +931,24 @@
       const detail = hasPreview ? (() => {
         const total = kind => executionPlan.entries.reduce((n, e) => n + (kind === 'drafts' ? e.drafts.length : e.task[kind].length), 0);
         return `将删除：标注 ${total('annotations')} 条、草稿 ${total('drafts')} 条、预标注 ${total('predictions')} 条。`;
-      })() : '本次未预览：确认后将逐个任务读取并删除标注、草稿和预标注，不等待整批预览完成。';
+      })() : '本次未预览：确认后优先每 100 个任务调用平台批量清理，再逐个核查；平台不提供批量动作时使用逐条清理。';
       const accepted = (hasPreview && downloaded) || window.confirm(`尚未下载本次备份，仍要清空项目 ${executionPlan.projectId} 的 ${executionPlan.taskIds.length} 个任务吗？\n\n${detail}\n同时执行平台实际提供的审核评分、验收、审核员与标注员关联删除。任务 ID 与原始视频保留。\n\n删除无法直接撤销。点击“确定”开始清空，或“取消”返回。`);
       if (!accepted) { message('已取消，未执行清空。'); return; }
       if (location.href !== pageRoute || input.value !== scopeText || (hasPreview && plan !== executionPlan)) { invalidate('确认期间任务范围或页面发生变化，请重新操作'); return; }
       route = pageRoute; report = null; log.textContent = '';
       busy = true; stopRequested = false; controls();
-      message(`开始${hasPreview ? '清空' : '直接清空'} ${executionPlan.taskIds.length} 个任务；正在读取首批任务并逐个处理。`);
+      message(`开始${hasPreview ? '清空' : '批量清空'} ${executionPlan.taskIds.length} 个任务；正在读取平台动作与首批任务。`);
+      let logged = 0;
       try {
         report = await execute({ api, plan: executionPlan, persist: backupStore, nativeCleanup: true,
           shouldStop: () => stopRequested || location.href !== route,
           onProgress: current => {
-            report = current; const result = current.results.at(-1);
-            writeLog(`${result.taskId} · ${result.status === 'success' ? '完成' : result.status === 'partial' ? '部分完成' : result.status === 'unknown' ? '待核实' : result.status === 'stopped' ? '已停止' : '失败'} · ${result.message || result.error}`);
-            message(`已处理 ${current.results.length} / ${executionPlan.entries.length}`);
+            report = current;
+            for (; logged < current.results.length; logged++) {
+              const result = current.results[logged];
+              writeLog(`${result.taskId} · ${result.status === 'success' ? '完成' : result.status === 'partial' ? '部分完成' : result.status === 'unknown' ? '待核实' : result.status === 'stopped' ? '已停止' : '失败'} · ${result.message || result.error}`);
+            }
+            message(`已处理 ${current.results.length} / ${executionPlan.entries.length}${current.phase ? `\n${current.phase}` : ''}`);
           } });
         const count = value => report.results.filter(r => r.status === value).length;
         const nextStep = report.stopped || count('failed') || count('partial') || count('unknown')
@@ -737,7 +958,26 @@
       } catch (error) { message(`执行中断：${error.message}。请导出本机备份核查。`, 'error'); }
       finally { busy = false; plan = null; downloaded = false; controls(); }
     };
-    $('.stop').onclick = () => { stopRequested = true; message('正在停止，将在当前请求回查后中止后续写入。'); };
+    $('.stop').onclick = () => { stopRequested = true; message('正在停止；当前已发出的批量请求仍可能完成。回查后不再发起后续清理，已删内容不会自动恢复。'); };
+    $('.verify').onclick = async () => {
+      if (busy) return;
+      try {
+        const taskIds = parseIds(input.value), projectId = idOf(projectFromUrl());
+        const pageRoute = location.href;
+        busy = true; stopRequested = false; log.textContent = ''; controls();
+        const current = await preview({ api, projectId, taskIds, crossCheck: true, shouldStop: () => stopRequested || location.href !== pageRoute,
+          onProgress: state => {
+            const entry = state.entries.at(-1);
+            writeLog(entry.status === 'ready' ? `${entry.taskId} · 标注 ${entry.task.annotations.length} / 草稿 ${entry.drafts.length} / 预标注 ${entry.task.predictions.length} · ${entry.state}` : `${entry.taskId} · 核查失败：${entry.error}`);
+            message(`只读核查 ${state.entries.length} / ${taskIds.length}；未执行删除`);
+          } });
+        const notEmpty = current.entries.filter(entry => entry.status !== 'ready' || entry.task.annotations.length || entry.task.predictions.length || entry.drafts.length || !pendingStates.includes(entry.state));
+        message(current.stopped ? '核查已停止，不能确认整个范围清空。'
+          : notEmpty.length ? `${notEmpty.length} 个任务仍有内容、状态未恢复或核查失败；请查看每个任务的剩余数量。未执行删除。`
+          : `本次核查的 ${current.entries.length} 个任务标注、草稿和预标注均为 0，状态为待标注。编辑器若仍有内容，请导出接口诊断继续核对。`, notEmpty.length ? 'error' : 'success');
+      } catch (error) { message(`核查失败：${error.message}`, 'error'); }
+      finally { busy = false; controls(); }
+    };
     $('.export').onclick = () => { if (report) download(`清空标注-执行结果-${report.runId}.json`, report); };
     $('.diagnose').onclick = async () => {
       if (busy) return;
