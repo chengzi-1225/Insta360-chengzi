@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 清空标注并恢复待标注
 // @namespace    insta360-local-tools
-// @version      1.0.2
+// @version      1.0.3
 // @description  对勾选任务或指定 ID 预览、备份，清空标注、草稿和预标注，回查待标注状态。
 // @homepageURL  https://github.com/chengzi-1225/Insta360-chengzi
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-reset-annotations.meta.js
@@ -106,6 +106,66 @@
     return JSON.stringify(sort(value));
   }
 
+  function nativeSelection(page, pageUrl) {
+    const url = new URL(pageUrl), projectId = idOf(url.pathname.match(/\/projects\/(\d+)\/data(?:\/|$)/)?.[1]);
+    const dm = page.dataManager || page.DM, store = dm?.store || dm;
+    const view = store?.currentView, selected = view?.selected;
+    if (!selected || typeof selected.all !== 'boolean' || !Array.isArray(selected.list)) {
+      throw new Error('无法读取平台原生跨页勾选范围，请刷新页面后重试，或直接输入完整 ID；不会退回当前可见行');
+    }
+    const project = store.project?.id ?? store.SDK?.projectId;
+    if (project == null || idOf(project) !== projectId) throw new Error('勾选范围的项目不匹配，请等待当前项目加载');
+    const tab = url.searchParams.get('tab');
+    if (tab && String(view.id) !== tab && String(view.tabKey) !== tab) throw new Error('勾选视图已切换，请等待列表加载');
+    const list = Array.from(new Set(Array.from(selected.list, idOf)));
+    const count = Number(view.selectedCount);
+    if (!Number.isSafeInteger(count) || count < 1) throw new Error('请先勾选需要处理的任务');
+    if (selected.all === false && count !== list.length) throw new Error('平台勾选数量与 ID 列表数量不一致，未读取局部范围');
+    let query = typeof view.query === 'string' ? JSON.parse(view.query) : view.query;
+    query = JSON.parse(JSON.stringify(query || {}));
+    if (selected.all && (!query.filters || !Array.isArray(query.filters.items))) throw new Error('无法读取完整筛选条件，未读取全选范围');
+    query.selectedItems = selected.all ? { all: true, excluded: list } : { all: false, included: list };
+    query.ordering = ['id'];
+    return { projectId, viewId: view.id, count, query };
+  }
+
+  async function resolveSelection({ api, scope, shouldStop = () => false, onProgress = () => {} }) {
+    const check = () => { if (shouldStop()) throw new Error('勾选范围变化或已停止，请重新读取'); };
+    check();
+    const selection = scope.query.selectedItems;
+    if (!selection.all) { onProgress(selection.included.length); return selection.included.slice(); }
+    function path(query, page, size) {
+      const params = new URLSearchParams({ project: String(scope.projectId), page: String(page), page_size: String(size),
+        fields: 'task_only', include: 'id,project', resolve_uri: 'false', query: JSON.stringify(query) });
+      return `/api/dm/tasks?${params}`;
+    }
+    function unpack(data) {
+      const rows = data?.tasks ?? data?.results, total = data?.total ?? data?.count;
+      if (!Array.isArray(rows) || !Number.isSafeInteger(total) || total < rows.length || total < 0) throw new Error('选择接口未返回可靠的列表和数量');
+      return { rows, total };
+    }
+    // Detect servers or installed list hooks that silently discard selection filters.
+    const probe = unpack(await api(path({ ...scope.query, selectedItems: { all: false, included: [0] } }, 1, 1)));
+    check();
+    if (probe.total !== 0 || probe.rows.length) throw new Error('接口未执行选择筛选，已停止读取');
+    const ids = [], seen = new Set(), excluded = new Set(selection.excluded);
+    for (let page = 1; ids.length < scope.count; page++) {
+      check();
+      const { rows, total } = unpack(await api(path(scope.query, page, 500)));
+      check();
+      if (total !== scope.count || !rows.length) throw new Error(`勾选数量不一致：平台勾选 ${scope.count} 条，接口返回 ${total} 条，已读取 ${ids.length} 条`);
+      for (const row of rows) {
+        const id = idOf(row.id);
+        if (seen.has(id)) throw new Error('选择分页返回重复 ID，未采用不完整范围');
+        if (excluded.has(id) || (row.project != null && reference(row.project) !== scope.projectId)) throw new Error('选择分页超出勾选范围或当前项目');
+        seen.add(id); ids.push(id);
+      }
+      if (ids.length > scope.count) throw new Error('选择分页数量超出勾选数量');
+      onProgress(ids.length);
+    }
+    check(); return ids;
+  }
+
   function makeError(message, extra = {}) { return Object.assign(new Error(message), extra); }
 
   function createApi({ origin, csrf, fetch: fetchRequest }) {
@@ -179,11 +239,15 @@
   function changeError(before, after, message, compareState = true) {
     const previous = JSON.parse(content(before)), current = JSON.parse(content(after));
     if (compareState) { previous.state = before.state; current.state = after.state; }
-    const changes = [];
+    const changes = [], changeValues = [];
     function visit(left, right, path) {
       if (changes.length >= 6 || stableJson(left) === stableJson(right)) return;
       if (left == null || right == null || typeof left !== 'object' || typeof right !== 'object' ||
-        Array.isArray(left) !== Array.isArray(right)) { changes.push(path || 'task'); return; }
+        Array.isArray(left) !== Array.isArray(right)) {
+        changes.push(path || 'task');
+        if (/(?:^|\.)state(?:\.|$)/.test(path)) changeValues.push({ path, before: left, after: right });
+        return;
+      }
       if (Array.isArray(left) && [...left, ...right].every(row => row && typeof row === 'object' && row.id != null)) {
         const oldRows = new Map(left.map(row => [String(row.id), row]));
         const newRows = new Map(right.map(row => [String(row.id), row]));
@@ -195,7 +259,10 @@
       }
     }
     visit(previous, current, '');
-    return makeError(`${message}；变化字段：${changes.join('、') || '未识别'}。请重新预览。`, { fatal: true, changes });
+    const display = value => (stableJson(value) ?? '未返回').slice(0, 160);
+    const values = changeValues.map(row => `${row.path}: ${display(row.before)} → ${display(row.after)}`).join('；');
+    return makeError(`${message}；变化字段：${changes.join('、') || '未识别'}${values ? `；${values}` : ''}。请重新预览。`,
+      { fatal: true, changes, changeValues });
   }
   async function taskState(api, task, projectId) {
     const direct = stateOf(task);
@@ -314,7 +381,12 @@
             try { after = await snapshot(api, original.taskId, plan.projectId); }
             catch (error) { throw makeError(`删除请求已发出，但无法回查：${error.message}`, { uncertain: true }); }
             const remaining = kind === 'drafts' ? after.drafts : after.task[kind];
-            if (remaining.some(row => idOf(row.id) === id)) throw writeError || new Error(`记录 ${id} 仍存在，删除未生效`);
+            if (remaining.some(row => idOf(row.id) === id)) {
+              const reason = writeError?.message || '删除未生效';
+              const advice = writeError?.status === 422 && /审核|打分|评分/.test(reason)
+                ? '；平台要求先处理审核和评分关联记录，请通过平台支持的撤销流程或联系管理员处理，再重新预览。未自动修改审核员或标注员信息' : '';
+              throw makeError(`${kind} ${id} 仍存在：${reason}${advice}`, { status: writeError?.status, fatal: writeError?.fatal });
+            }
             result.removed[kind].push(id);
             if (kind === 'drafts') expected.drafts = expected.drafts.filter(row => idOf(row.id) !== id);
             else expected.task[kind] = expected.task[kind].filter(row => idOf(row.id) !== id);
@@ -352,7 +424,8 @@
       } catch (error) {
         result.error = error.message;
         if (error.changes) result.changeDetails = error.changes;
-        result.status = error.uncertain ? 'unknown' : result.writesStarted ? 'partial' : 'failed';
+        if (error.changeValues) result.changeValues = error.changeValues;
+        result.status = error.uncertain ? 'unknown' : Object.values(result.removed).some(ids => ids.length) ? 'partial' : 'failed';
         if (result.writesStarted || error.fatal || error.status === 401 || error.status === 403) report.stopped = true;
       }
       report.results.push(result); onProgress(report);
@@ -361,7 +434,32 @@
     return report;
   }
 
-  const core = { parseIds, captureTaskIds, createApi, preview, execute, stateOf, content };
+  async function diagnose({ api, projectId, taskId }) {
+    projectId = idOf(projectId); taskId = idOf(taskId);
+    const task = await api(`/api/tasks/${taskId}/?resolve_uri=false&annotations_stub=false`);
+    if (idOf(task.id) !== taskId || idOf(task.project) !== projectId) throw new Error('诊断任务的项目不匹配');
+    function shape(value, depth = 0) {
+      if (value == null) return 'null';
+      if (Array.isArray(value)) return { type: 'array', length: value.length };
+      if (typeof value !== 'object' || depth >= 3) return typeof value;
+      return Object.fromEntries(Object.entries(value).filter(([key]) => !['result', 'data', 'video', 'text'].includes(key))
+        .map(([key, item]) => [key, shape(item, depth + 1)]));
+    }
+    const data = { version: 1, projectId, taskId, state: stateOf(task), createdAt: new Date().toISOString(),
+      taskShape: shape(task), records: [] };
+    const targets = [{ kind: 'tasks', id: taskId, shape: shape(task) }];
+    for (const kind of ['annotations', 'predictions']) {
+      for (const record of (task[kind] || []).slice(0, 3)) targets.push({ kind, id: idOf(record.id), state: stateOf(record), shape: shape(record) });
+    }
+    for (const target of targets) {
+      try { target.options = await api(`/api/${target.kind}/${target.id}/`, 'OPTIONS'); }
+      catch (error) { target.error = error.message; }
+      data.records.push(target);
+    }
+    return data;
+  }
+
+  const core = { parseIds, captureTaskIds, nativeSelection, resolveSelection, diagnose, createApi, preview, execute, stateOf, content };
   if (typeof module === 'object' && module.exports) { module.exports = core; return; }
 
   function projectFromUrl() { return Number(location.pathname.match(/\/projects\/(\d+)\/data(?:\/|$)/)?.[1] || 0); }
@@ -416,15 +514,15 @@
     </style>
     <section class="panel" ${demoSlot ? '' : 'hidden'} aria-label="清空标注工具">
       <h2>清空标注，重新开始</h2><p class="project"></p>
-      <p class="warning">将删除所选任务的已提交标注、跳过记录、草稿和预标注。请先保存备份。</p>
+      <p class="warning">将删除所选任务的已提交标注、跳过记录、草稿和预标注。下载备份可选；未下载时，执行前会弹窗确认。审核、评分及人员关联仍受平台接口限制。</p>
       <div class="row"><label for="reset-ids">任务 ID</label><button class="capture">读取已勾选任务</button></div>
       <textarea id="reset-ids" aria-label="任务 ID" placeholder="每行一个 ID，或用逗号分隔&#10;例如：24084572" spellcheck="false"></textarea>
       <div class="scope">勾选列表任务后点击读取，或直接输入 ID。</div>
-      <div class="steps"><button class="preview primary">1. 预览范围</button><button class="backup" disabled>2. 下载备份</button></div>
+      <div class="steps"><button class="preview primary">1. 预览范围</button><button class="backup" disabled>下载备份（可选）</button></div>
       <div class="status" role="status" aria-live="polite">等待选择任务</div>
-      <button class="run danger" disabled>3. 清空并恢复待标注</button><pre class="log"></pre>
-      <div class="tools"><button class="stop" disabled>停止</button><button class="export" disabled>导出结果</button><button class="local">导出本机备份</button><button class="refresh">刷新列表</button></div>
-      <p class="foot">v1.0.2 · 保留任务 ID 与原始数据<a class="update" href="https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-reset-annotations.user.js" target="_blank" rel="noopener noreferrer">安装 / 更新</a></p>
+      <button class="run danger" disabled>2. 清空并恢复待标注</button><pre class="log"></pre>
+      <div class="tools"><button class="stop" disabled>停止</button><button class="export" disabled>导出结果</button><button class="diagnose">导出接口诊断</button><button class="local">导出本机备份</button><button class="refresh">刷新列表</button></div>
+      <p class="foot">v1.0.3 · 保留任务 ID 与原始数据<a class="update" href="https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-reset-annotations.user.js" target="_blank" rel="noopener noreferrer">安装 / 更新</a></p>
     </section><button class="toggle" ${demoSlot ? 'hidden' : ''}>清空标注</button>`;
     (demoSlot || document.documentElement).append(host);
     const $ = s => root.querySelector(s);
@@ -438,8 +536,8 @@
     function controls() {
       input.disabled = busy; $('.capture').disabled = busy; $('.preview').disabled = busy || !projectFromUrl();
       $('.backup').disabled = busy || !validPlan();
-      $('.run').disabled = busy || !validPlan() || !downloaded;
-      $('.stop').disabled = !busy; $('.export').disabled = busy || !report; $('.local').disabled = busy; $('.refresh').disabled = busy;
+      $('.run').disabled = busy || !validPlan();
+      $('.stop').disabled = !busy; $('.export').disabled = busy || !report; $('.diagnose').disabled = busy; $('.local').disabled = busy; $('.refresh').disabled = busy;
       $('.project').textContent = `当前项目 ${projectFromUrl() || '未识别'} · 勾选任务 / 指定 ID`;
     }
     function invalidate(text = '任务范围已改变，请重新预览') {
@@ -448,14 +546,22 @@
     const scopeChanged = () => location.href !== route || projectFromUrl() !== plan?.projectId;
     $('.toggle').onclick = () => { $('.panel').hidden = !$('.panel').hidden; controls(); };
     input.addEventListener('input', () => { $('.scope').textContent = '手动 ID 模式；执行范围以文本框为准。'; invalidate(); });
-    $('.capture').onclick = () => {
+    $('.capture').onclick = async () => {
+      if (busy) return;
+      plan = null; downloaded = false; input.value = ''; busy = true; stopRequested = false; controls();
       try {
-        const scope = captureTaskIds(document, location.href);
-        if (scope.issue) throw new Error(scope.issue);
-        if (scope.source !== 'selected' || !scope.selectedCount) throw new Error('请先勾选需要处理的任务。未勾选时不会读取整页。');
-        input.value = scope.ids.join('\n'); $('.scope').textContent = `已读取当前页勾选的 ${scope.ids.length} 个任务；选择变化后可再次读取。`;
+        const pageRoute = location.href, scope = nativeSelection(window, pageRoute), signature = stableJson(scope);
+        const unchanged = () => {
+          if (stopRequested || location.href !== pageRoute) return false;
+          try { return stableJson(nativeSelection(window, location.href)) === signature; } catch { return false; }
+        };
+        const ids = await resolveSelection({ api, scope, shouldStop: () => !unchanged(),
+          onProgress: count => message(`正在读取跨页勾选范围 ${count} / ${scope.count}`) });
+        if (!unchanged()) throw new Error('勾选范围已变化，请重新读取');
+        input.value = ids.join('\n'); $('.scope').textContent = `已完整读取勾选的 ${ids.length} / ${scope.count} 个任务；执行范围以文本框 ID 为准。`;
         invalidate();
       } catch (error) { message(error.message, 'error'); }
+      finally { busy = false; controls(); }
     };
     $('.preview').onclick = async () => {
       if (busy) return;
@@ -473,7 +579,7 @@
         if (location.href !== route) invalidate('页面已切换，请在当前项目重新选择任务');
         else if (validPlan()) {
           const sum = name => plan.entries.reduce((n, e) => n + (name === 'drafts' ? e.drafts.length : e.task[name].length), 0);
-          message(`预览完成 · ${plan.entries.length} 个任务\n将删除 ${sum('annotations')} 条标注、${sum('drafts')} 条草稿、${sum('predictions')} 条预标注。\n任务与原始视频保留。下一步：下载备份。`);
+          message(`预览完成 · ${plan.entries.length} 个任务\n将删除 ${sum('annotations')} 条标注、${sum('drafts')} 条草稿、${sum('predictions')} 条预标注。\n任务与原始视频保留。可直接清空，或先下载备份。`);
         } else message('预览未全部通过，未执行清空。请查看下方明细并重新预览。', 'error');
       } catch (error) { message(error.message, 'error'); }
       finally { busy = false; controls(); }
@@ -482,15 +588,15 @@
       try {
         if (!validPlan() || scopeChanged()) { invalidate(); return; }
         download(`清空标注-执行前备份-项目${plan.projectId}-${plan.runId}.json`, plan);
-        downloaded = true; message('已触发备份下载。确认文件已保存后，点击“清空并恢复待标注”，在弹窗中确认即可。'); controls();
+        downloaded = true; message('已触发备份下载。点击“清空并恢复待标注”将直接执行，不再弹确认提醒。'); controls();
       } catch (error) { message(`备份导出失败：${error.message}`, 'error'); }
     };
     $('.run').onclick = async () => {
-      if (busy || !validPlan() || !downloaded) return;
+      if (busy || !validPlan()) return;
       if (scopeChanged()) { invalidate(); return; }
       const executionPlan = plan;
       const total = kind => executionPlan.entries.reduce((n, e) => n + (kind === 'drafts' ? e.drafts.length : e.task[kind].length), 0);
-      const accepted = window.confirm(`确认清空项目 ${executionPlan.projectId} 的 ${executionPlan.taskIds.length} 个任务？\n\n将删除：标注 ${total('annotations')} 条、草稿 ${total('drafts')} 条、预标注 ${total('predictions')} 条。\n任务 ID 与原始视频保留。\n\n请确认备份文件已保存。点击“确定”开始清空。`);
+      const accepted = downloaded || window.confirm(`尚未下载本次备份，仍要清空项目 ${executionPlan.projectId} 的 ${executionPlan.taskIds.length} 个任务吗？\n\n将删除：标注 ${total('annotations')} 条、草稿 ${total('drafts')} 条、预标注 ${total('predictions')} 条。\n任务 ID 与原始视频保留。\n\n删除无法直接撤销。点击“确定”开始清空，或“取消”返回下载备份。`);
       if (!accepted) { message('已取消，未执行清空。'); return; }
       if (scopeChanged() || plan !== executionPlan) { invalidate(); return; }
       busy = true; stopRequested = false; controls();
@@ -512,6 +618,17 @@
     };
     $('.stop').onclick = () => { stopRequested = true; message('正在停止，将在当前请求回查后中止后续写入。'); };
     $('.export').onclick = () => { if (report) download(`清空标注-执行结果-${report.runId}.json`, report); };
+    $('.diagnose').onclick = async () => {
+      if (busy) return;
+      try {
+        const taskId = parseIds(input.value)[0], projectId = idOf(projectFromUrl());
+        busy = true; controls(); message(`正在只读诊断任务 ${taskId} 的字段与接口能力`);
+        const data = await diagnose({ api, projectId, taskId });
+        download(`清空标注-接口诊断-任务${taskId}.json`, data);
+        message('已导出接口诊断文件，仅读取首个任务的字段结构和接口说明；没有执行清空。可提供该文件继续排查审核、评分和人员信息清理入口。');
+      } catch (error) { message(`诊断失败：${error.message}`, 'error'); }
+      finally { busy = false; controls(); }
+    };
     $('.local').onclick = async () => {
       try { download('清空标注-本机备份.json', await backupStore()); }
       catch (error) { message(error.message, 'error'); }
