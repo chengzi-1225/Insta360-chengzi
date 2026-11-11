@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Insta360 Regions 批量清空并提交
 // @namespace    local.insta360.regions-cleaner
-// @version      3.2.3
-// @description  直接清空 Regions，Ctrl+Enter 提交；空轨迹快速跳过，下一任务只读预取，提交后回读验证。
+// @version      3.2.4
+// @description  直接清空 Regions，Ctrl+Enter 提交；空轨迹跳过，减少轨迹重复扫描，提交后快速回读验证。
 // @homepageURL  https://github.com/chengzi-1225/Insta360-chengzi
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-regions-clear-submit.meta.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-regions-clear-submit.user.js
@@ -14,7 +14,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '3.2.3';
+  const VERSION = '3.2.4';
   const MAX_TASKS = 10000;
   const clone = value => JSON.parse(JSON.stringify(value));
   const canonical = value => JSON.stringify(normalize(value));
@@ -163,18 +163,26 @@
     const timeout = options.timeout ?? 45000, quietMs = options.quietMs ?? 1500;
     const start = now(), checkpoint = tracker.readyCheckpoint;
     let last = checkpoint?.clock === now ? checkpoint.token : null;
+    let lastMetadata = checkpoint?.clock === now ? checkpoint.metadata : null;
     let stableAt = last ? checkpoint.stableAt : start;
     let previousAnnotation = last ? checkpoint.annotation : null;
-    const reset = () => { last = null; previousAnnotation = null; stableAt = now(); tracker.readyCheckpoint = null; };
+    const reset = () => { last = null; lastMetadata = null; previousAnnotation = null; stableAt = now(); tracker.readyCheckpoint = null; };
     while (now() - start < timeout) {
       if (options.shouldStop?.()) { reset(); throw new Error('已结束本次原生加载等待'); }
       if (tracker.historyError) throw new Error(tracker.historyError);
       if (tracker.pending || tracker.historySeen <= 0) { reset(); await pause(150); continue; }
       const sample = read();
       if (sample?.ready) {
+        // Poll cheap readiness/identity fields, but scan all trajectory frames only
+        // at the start and end of the full window. A different final result starts
+        // another complete window; requests or source changes invalidate it early.
+        const metadata = canonical({ revision: tracker.revision, identity: sample.identity });
+        if (metadata !== lastMetadata || previousAnnotation !== sample.a) { last = null; stableAt = now(); }
+        if (last && now() - stableAt < quietMs) { await pause(150); continue; }
         const token = canonical({ revision: tracker.revision, identity: sample.identity, result: comparisonResult(sample.result) });
         if (token !== last || previousAnnotation !== sample.a) { last = token; previousAnnotation = sample.a; stableAt = now(); }
-        tracker.readyCheckpoint = { token: last, annotation: sample.a, stableAt, clock: now };
+        lastMetadata = metadata;
+        tracker.readyCheckpoint = { token: last, metadata, annotation: sample.a, stableAt, clock: now };
         if (now() - stableAt >= quietMs) return sample;
       } else reset();
       await pause(150);
@@ -192,6 +200,21 @@
       if (first.a !== sample.a) throw new Error('读取期间标注来源改变，本任务未继续操作，请核查当前任务');
       return { task, sample };
     } finally { closed = true; }
+  }
+  function postSubmitSample(native, annotationId, expected) {
+    if (!native) return null;
+    const { a, b } = native, store = b.lsf;
+    const ready = !store.isLoading && store.hydrated && !store.isSubmitting && !a.isDraftSaving &&
+      store.annotationStore?.selected === a && Number(a.pk) === annotationId;
+    const result = ready ? clone(a.serializeAnnotation()) : null;
+    return { ...native, identity: { id: a.id, pk: a.pk, draftId: a.draftId }, result,
+      ready: ready && same(result, expected) && roots(result).length === 0 };
+  }
+  function readAfterSubmission(read, tracker, fetchTask, options = {}) {
+    // Native history/request completion, exact saved annotation and matching
+    // contents replace the post-submit video/1.5-second wait. Server verification
+    // is unchanged; one short settle interval still checks late native changes.
+    return readWhileNativeReady(read, tracker, fetchTask, { ...options, quietMs: 150 });
   }
   async function verifySubmittedResult(task, annotationId, expected, submitted, readTask) {
     const matches = t => t?.id === task && t.annotations?.some(a => Number(a.id) === annotationId && same(a.result, expected) && roots(a.result).length === 0) && t.state === 'ANNOTATED';
@@ -243,7 +266,7 @@
         const cleaned = await adapter.clear(current);
         if (!same(cleaned, expected)) throw new Error('原生删除后的结果与预期不同，停止提交');
         emit('submitting', `任务 ${entry.task}：Ctrl+Enter 原生提交`);
-        const submitted = await adapter.submit(entry.task);
+        const submitted = await adapter.submit(entry.task, expected);
         if (!Number.isSafeInteger(submitted.id) || submitted.id <= 0) throw new Error('提交成功事件缺少标注 ID');
         outcome.annotationId = submitted.id;
         emit('verifying_submission', `任务 ${entry.task}：回读已提交结果`);
@@ -259,7 +282,7 @@
     }
     return outcomes;
   }
-  if (typeof module === 'object' && module.exports) { module.exports = { cleanResult, roots, parseIds, same, comparisonResult, actionFor, serverHasNoRegions, dispatchSubmitShortcut, resolveSelection, trackNativeRequests, waitForNativeReady, readWhileNativeReady, verifySubmittedResult, loadNativeTask, runBatch }; return; }
+  if (typeof module === 'object' && module.exports) { module.exports = { cleanResult, roots, parseIds, same, comparisonResult, actionFor, serverHasNoRegions, dispatchSubmitShortcut, resolveSelection, trackNativeRequests, waitForNativeReady, readWhileNativeReady, postSubmitSample, readAfterSubmission, verifySubmittedResult, loadNativeTask, runBatch }; return; }
   if (location.origin !== 'https://label.insta360.com') return;
   const project = Number(location.pathname.match(/\/projects\/(\d+)\/data/)?.[1]);
   if (!project) return;
@@ -326,7 +349,9 @@
     const names = b.lsf.annotationStore?.names;
     const videos = names ? [...names.values()].filter(o => o.type === 'video') : [];
     const ready = videos.length > 0 && videos.every(o => o.isReady && o.ref?.current && Number.isFinite(o.ref.current.duration) && o.ref.current.duration > 0 && o.length > 0) && !a.isDraftSaving;
-    return { ...native, ready, identity: { id: a.id, pk: a.pk, draftId: a.draftId }, result: ready ? clone(a.serializeAnnotation()) : null };
+    let result;
+    return { ...native, ready, identity: { id: a.id, pk: a.pk, draftId: a.draftId },
+      get result() { return ready ? (result ||= clone(a.serializeAnnotation())) : null; } };
   }
   function backendSnapshot(t) {
     const record = x => ({ id: x.id, task: x.task, annotation: x.annotation, user: x.user, updated_at: x.updated_at, result: x.result });
@@ -368,7 +393,7 @@
       for (const r of selected) r.deleteRegion();
       return clone(a.serializeAnnotation());
     },
-    async submit(task) {
+    async submit(task, expected) {
       const manager = dm();
       const { a } = nativeAnnotation(task) || {};
       if (!a) throw new Error('提交前编辑器未就绪');
@@ -407,7 +432,8 @@
         });
         // Success precedes the native reload and its history request. Wait before
         // the runner opens another task, even though the submission has succeeded.
-        const { task: taskSnapshot } = await readWhileNativeReady(() => readySample(task), tracker, () => getTask(task));
+        const { task: taskSnapshot } = await readAfterSubmission(
+          () => postSubmitSample(nativeAnnotation(task), submitted.id, expected), tracker, () => getTask(task));
         return { ...submitted, taskSnapshot };
       } catch (error) {
         if (submitted?.id) { error.annotationId = submitted.id; error.message = `已收到提交成功（标注 #${submitted.id}），但重新加载未完成：${error.message}。请先核对服务端结果，勿重复提交`; }
