@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Insta360 清空标注并恢复待标注
 // @namespace    insta360-local-tools
-// @version      1.0.3
-// @description  对勾选任务或指定 ID 预览、备份，清空标注、草稿和预标注，回查待标注状态。
+// @version      1.0.4
+// @description  对勾选任务或指定 ID 直接清理，预览与下载备份可选，清空标注、草稿和预标注并核查状态。
 // @homepageURL  https://github.com/chengzi-1225/Insta360-chengzi
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-reset-annotations.meta.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-reset-annotations.user.js
@@ -346,21 +346,91 @@
     }
     if (entry.task.is_labeled === true) throw new Error('记录已清空，但平台仍标记为已标注');
   }
-  async function execute({ api, plan, persist, shouldStop = () => false, onProgress = () => {} }) {
+  function createDirectPlan(projectId, taskIds) {
+    projectId = idOf(projectId); taskIds = parseIds(taskIds.join('\n'));
+    return { version: 1, mode: 'direct', projectId, taskIds,
+      runId: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, createdAt: new Date().toISOString(),
+      entries: taskIds.map(taskId => ({ taskId, status: 'direct' })) };
+  }
+  function nativeCleanupActions(catalog) {
+    if (!Array.isArray(catalog)) throw new Error('平台原生动作列表格式不匹配，请导出接口诊断');
+    const kinds = [
+      { kind: 'reviews', ids: ['delete_tasks_reviews'], titles: ['delete reviews and scores', 'delete reviews', '删除审核和评分', '删除审核及评分'] },
+      { kind: 'acceptances', ids: ['delete_tasks_acceptances'], titles: ['delete acceptances', '删除验收'] },
+      { kind: 'reviewers', ids: ['delete_reviewers'], titles: ['delete reviewers', '删除审核员'] },
+      { kind: 'annotators', ids: ['delete_annotators'], titles: ['delete annotators', '删除标注员'] },
+    ];
+    const result = [];
+    for (const group of kinds) {
+      const matches = catalog.filter(action => !action.disabled && /^[a-zA-Z0-9_-]+$/.test(String(action.id)) && action.id !== 'delete_tasks' &&
+        (group.ids.includes(action.id) || group.titles.includes(String(action.title || '').trim().toLowerCase())));
+      if (matches.length > 1) throw new Error(`平台提供多个 ${group.kind} 清理动作，请导出接口诊断确认`);
+      if (matches[0]) result.push({ ...matches[0], kind: group.kind });
+    }
+    return result;
+  }
+  function nativeFormBody(action) {
+    const form = action.dialog?.form;
+    if (form == null) return {};
+    if (!Array.isArray(form)) throw new Error(`原生动作 ${action.title} 的表单无法识别，请导出接口诊断`);
+    const fields = form.flatMap(row => [...(row.fields || []), ...(row.columns || []).flatMap(column => column.fields || [])]);
+    const body = {};
+    for (const field of fields) {
+      if (!/^(?:annotator|reviewer|user)(?:s|_id|_ids)?$/.test(field.name || '') || field.required) {
+        throw new Error(`原生动作 ${action.title} 需要确认字段 ${field.name || '未知'}，未自动提交`);
+      }
+      // The native deletion dialogs use null for all users. Never select one person's default.
+      body[field.name] = null;
+    }
+    return body;
+  }
+  function contentAroundNative(entry, kind) {
+    const value = JSON.parse(content(entry));
+    const fields = {
+      reviews: ['state', 'review', 'review_id', 'reviewId', 'reviews', 'reviewers', 'reviewed_by', 'reviewed_at',
+        'review_status', 'reviewed', 'score', 'scores', 'review_score', 'total_reviews'],
+      acceptances: ['state', 'acceptance', 'acceptance_id', 'acceptances', 'accepted_by', 'accepted_at', 'acceptance_status'],
+      reviewers: ['reviewer', 'reviewers', 'reviewed_by', 'assigned_reviewers'],
+      annotators: ['completed_by', 'annotator', 'annotators', 'assigned_annotators'],
+    }[kind] || [];
+    value.annotations.forEach(row => fields.forEach(key => { delete row[key]; }));
+    return stableJson(value);
+  }
+  async function execute({ api, plan, persist, nativeCleanup = false, shouldStop = () => false, onProgress = () => {} }) {
+    const nativeActions = nativeCleanup ? nativeCleanupActions(await api(`/api/dm/actions/?project=${idOf(plan.projectId)}`)) : [];
     const report = { version: 1, runId: plan.runId, projectId: idOf(plan.projectId), results: [], stopped: false,
-      startedAt: new Date().toISOString() };
-    const stopped = () => { if (shouldStop()) report.stopped = true; return report.stopped; };
+      nativeActionsAvailable: nativeActions.map(action => ({ id: action.id, title: action.title, kind: action.kind })),
+      mode: plan.mode === 'direct' ? 'direct' : 'preview', startedAt: new Date().toISOString() };
+    const stopped = () => {
+      if (shouldStop()) {
+        report.stopped = true;
+        report.stopReason ??= { message: '用户停止或页面切换' };
+      }
+      return report.stopped;
+    };
     await runConcurrent(plan.entries, 3, stopped, async original => {
-      const result = { taskId: original.taskId, status: 'failed', removed: { drafts: [], annotations: [], predictions: [] }, writesStarted: false };
+      const result = { taskId: original.taskId, status: 'failed', removed: { drafts: [], annotations: [], predictions: [] },
+        nativeActions: [], writesStarted: false };
       try {
-        if (original.status !== 'ready') throw new Error(original.error || '任务未通过预览');
+        if (original.status !== 'ready' && !(plan.mode === 'direct' && original.status === 'direct')) throw new Error(original.error || '任务未通过预览');
         let expected = await snapshot(api, original.taskId, plan.projectId);
+        if (plan.mode === 'direct') original = { ...expected, status: 'ready' };
         if (expected.fingerprint !== original.fingerprint || expected.state !== original.state) {
           throw changeError(original, expected, '预览后实际标注内容或任务状态发生变化，未执行删除');
         }
         try { await persist({ runId: plan.runId, projectId: plan.projectId, entry: expected }); }
         catch (error) { throw makeError(`本地备份失败，未开始清空：${error.message}`, { fatal: true }); }
-        const checkStop = () => { if (stopped()) throw makeError('已停止；已发出的删除请求不能撤回', { fatal: true }); };
+        const checkStop = () => {
+          if (!stopped()) return;
+          const names = { drafts: '草稿', annotations: '标注', predictions: '预标注' };
+          const removed = Object.entries(result.removed).filter(([, ids]) => ids.length)
+            .map(([kind, ids]) => `${names[kind]} ${ids.length} 条（ID ${ids.slice(0, 8).join(', ')}${ids.length > 8 ? '…' : ''}）`).join('、');
+          const applied = result.nativeActions.filter(action => action.status === 'applied').map(action => action.title).join('、');
+          const outcome = removed ? `已确认删除：${removed}；后续未执行，已删记录不会自动恢复`
+            : applied ? `已执行原生关联清理：${applied}；尚未删除标注、草稿或预标注` : '本任务未发出删除或修改请求';
+          const cause = report.stopReason ? `；触发原因：${report.stopReason.taskId ? `任务 ${report.stopReason.taskId} · ` : ''}${report.stopReason.message}` : '';
+          throw makeError(`已停止；${outcome}${cause}`, { fatal: true, cancelled: true });
+        };
         checkStop();
         // Persisting can take time. Recheck once after backup, then reuse each
         // immediately preceding deletion check rather than rereading the same task twice.
@@ -369,6 +439,38 @@
           throw changeError(expected, afterBackup, '备份期间实际内容或状态发生变化，未执行删除');
         }
         expected = afterBackup;
+        for (const action of nativeActions) {
+          checkStop();
+          const extra = nativeFormBody(action);
+          const params = new URLSearchParams({ project: String(plan.projectId), id: action.id });
+          result.writesStarted = true;
+          let response, writeError;
+          try {
+            response = await api(`/api/dm/actions/?${params}`, 'POST', {
+              ...extra, selectedItems: { all: false, included: [original.taskId], excluded: [] },
+              filters: { conjunction: 'and', items: [] }, ordering: [],
+            });
+          } catch (error) { writeError = error; }
+          if (response?.async === true || response?.job || response?.job_id) {
+            result.nativeActions.push({ id: action.id, title: action.title, status: 'pending', response });
+            throw makeError(`原生动作 ${action.title} 已交给平台后台处理，尚未确认完成；未重复提交，请完成后重新核查`, { uncertain: true });
+          }
+          if (!writeError && response?.error) writeError = makeError(`原生动作 ${action.title} 失败：${response.detail || JSON.stringify(response.error)}`, { fatal: true });
+          if (!writeError) result.nativeActions.push({ id: action.id, title: action.title, status: 'applied', response });
+          let after;
+          try { after = await snapshot(api, original.taskId, plan.projectId); }
+          catch (error) { throw makeError(`原生动作 ${action.title} 已提交，但无法回查：${error.message}`, { uncertain: true }); }
+          if (writeError) {
+            if (writeError.status === 0) throw makeError(`原生动作 ${action.title} 响应不确定，未重试：${writeError.message}`, { uncertain: true });
+            throw makeError(`原生动作 ${action.title}（${action.id}）失败：${writeError.message}`, { status: writeError.status, fatal: true });
+          }
+          if (contentAroundNative(expected, action.kind) !== contentAroundNative(after, action.kind)) {
+            throw makeError(`原生动作 ${action.title} 后实际标注内容或其他记录发生变化，已停止后续删除，请核查结果`, { fatal: true });
+          }
+          expected = after;
+        }
+        // Native review/assignment cleanup may change annotation metadata and task state.
+        // Record deletion still uses the freshly checked full contents and original IDs.
         for (const kind of ['drafts', 'annotations', 'predictions']) {
           const records = kind === 'drafts' ? original.drafts : original.task[kind];
           for (const record of records) {
@@ -384,7 +486,7 @@
             if (remaining.some(row => idOf(row.id) === id)) {
               const reason = writeError?.message || '删除未生效';
               const advice = writeError?.status === 422 && /审核|打分|评分/.test(reason)
-                ? '；平台要求先处理审核和评分关联记录，请通过平台支持的撤销流程或联系管理员处理，再重新预览。未自动修改审核员或标注员信息' : '';
+                ? '；平台仍要求先处理审核和评分关联记录，请核查原生操作结果及账号权限，或联系管理员处理。可导出结果与接口诊断继续排查' : '';
               throw makeError(`${kind} ${id} 仍存在：${reason}${advice}`, { status: writeError?.status, fatal: writeError?.fatal });
             }
             result.removed[kind].push(id);
@@ -420,13 +522,17 @@
           if (!pendingStates.includes(final.state)) throw writeError || makeError(`状态未恢复，当前为 ${final.state}`, { fatal: true });
         }
         result.state = final.state;
-        result.status = 'success'; result.message = `标注、草稿和预标注已清空，待标注（${final.state}）`;
+        result.status = 'success'; result.message = `${result.nativeActions.length ? `已执行 ${result.nativeActions.length} 项平台原生关联清理；` : ''}标注、草稿和预标注已清空，待标注（${final.state}）`;
       } catch (error) {
         result.error = error.message;
         if (error.changes) result.changeDetails = error.changes;
         if (error.changeValues) result.changeValues = error.changeValues;
-        result.status = error.uncertain ? 'unknown' : Object.values(result.removed).some(ids => ids.length) ? 'partial' : 'failed';
-        if (result.writesStarted || error.fatal || error.status === 401 || error.status === 403) report.stopped = true;
+        const nativeApplied = result.nativeActions.some(action => action.status === 'applied' && action.response?.processed_items !== 0);
+        result.status = error.uncertain ? 'unknown' : Object.values(result.removed).some(ids => ids.length) || nativeApplied ? 'partial' : error.cancelled ? 'stopped' : 'failed';
+        if (result.writesStarted || error.fatal || error.status === 401 || error.status === 403) {
+          report.stopped = true;
+          report.stopReason ??= { taskId: result.taskId, message: error.message };
+        }
       }
       report.results.push(result); onProgress(report);
     });
@@ -447,6 +553,8 @@
     }
     const data = { version: 1, projectId, taskId, state: stateOf(task), createdAt: new Date().toISOString(),
       taskShape: shape(task), records: [] };
+    try { data.nativeActions = await api(`/api/dm/actions/?project=${projectId}`); }
+    catch (error) { data.nativeActionsError = error.message; }
     const targets = [{ kind: 'tasks', id: taskId, shape: shape(task) }];
     for (const kind of ['annotations', 'predictions']) {
       for (const record of (task[kind] || []).slice(0, 3)) targets.push({ kind, id: idOf(record.id), state: stateOf(record), shape: shape(record) });
@@ -459,7 +567,7 @@
     return data;
   }
 
-  const core = { parseIds, captureTaskIds, nativeSelection, resolveSelection, diagnose, createApi, preview, execute, stateOf, content };
+  const core = { parseIds, captureTaskIds, nativeSelection, resolveSelection, diagnose, createApi, createDirectPlan, nativeCleanupActions, preview, execute, stateOf, content };
   if (typeof module === 'object' && module.exports) { module.exports = core; return; }
 
   function projectFromUrl() { return Number(location.pathname.match(/\/projects\/(\d+)\/data(?:\/|$)/)?.[1] || 0); }
@@ -514,15 +622,15 @@
     </style>
     <section class="panel" ${demoSlot ? '' : 'hidden'} aria-label="清空标注工具">
       <h2>清空标注，重新开始</h2><p class="project"></p>
-      <p class="warning">将删除所选任务的已提交标注、跳过记录、草稿和预标注。下载备份可选；未下载时，执行前会弹窗确认。审核、评分及人员关联仍受平台接口限制。</p>
+      <p class="warning">优先执行平台提供的审核评分、验收和人员关联清理，再删除标注、草稿及预标注。任务与视频保留。预览及下载备份可选；未下载时执行前弹窗确认。</p>
       <div class="row"><label for="reset-ids">任务 ID</label><button class="capture">读取已勾选任务</button></div>
       <textarea id="reset-ids" aria-label="任务 ID" placeholder="每行一个 ID，或用逗号分隔&#10;例如：24084572" spellcheck="false"></textarea>
       <div class="scope">勾选列表任务后点击读取，或直接输入 ID。</div>
-      <div class="steps"><button class="preview primary">1. 预览范围</button><button class="backup" disabled>下载备份（可选）</button></div>
+      <div class="steps"><button class="preview">预览范围（可选）</button><button class="backup" disabled>下载备份（可选）</button></div>
       <div class="status" role="status" aria-live="polite">等待选择任务</div>
-      <button class="run danger" disabled>2. 清空并恢复待标注</button><pre class="log"></pre>
+      <button class="run danger" disabled>直接清空（无需预览）</button><pre class="log"></pre>
       <div class="tools"><button class="stop" disabled>停止</button><button class="export" disabled>导出结果</button><button class="diagnose">导出接口诊断</button><button class="local">导出本机备份</button><button class="refresh">刷新列表</button></div>
-      <p class="foot">v1.0.3 · 保留任务 ID 与原始数据<a class="update" href="https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-reset-annotations.user.js" target="_blank" rel="noopener noreferrer">安装 / 更新</a></p>
+      <p class="foot">v1.0.4 · 保留任务 ID 与原始数据<a class="update" href="https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-reset-annotations.user.js" target="_blank" rel="noopener noreferrer">安装 / 更新</a></p>
     </section><button class="toggle" ${demoSlot ? 'hidden' : ''}>清空标注</button>`;
     (demoSlot || document.documentElement).append(host);
     const $ = s => root.querySelector(s);
@@ -534,13 +642,16 @@
     function writeLog(text) { log.textContent += text + '\n'; log.scrollTop = log.scrollHeight; }
     function validPlan() { return plan && !plan.stopped && plan.entries.length === plan.taskIds.length && plan.entries.every(e => e.status === 'ready'); }
     function controls() {
+      let validIds = false;
+      try { validIds = !!projectFromUrl() && parseIds(input.value).length > 0; } catch { /* Keep disabled for invalid input. */ }
       input.disabled = busy; $('.capture').disabled = busy; $('.preview').disabled = busy || !projectFromUrl();
       $('.backup').disabled = busy || !validPlan();
-      $('.run').disabled = busy || !validPlan();
+      $('.run').disabled = busy || !validIds;
+      $('.run').textContent = validPlan() ? '清空并恢复待标注' : '直接清空（无需预览）';
       $('.stop').disabled = !busy; $('.export').disabled = busy || !report; $('.diagnose').disabled = busy; $('.local').disabled = busy; $('.refresh').disabled = busy;
       $('.project').textContent = `当前项目 ${projectFromUrl() || '未识别'} · 勾选任务 / 指定 ID`;
     }
-    function invalidate(text = '任务范围已改变，请重新预览') {
+    function invalidate(text = '可以直接清空，无需等待整批预览；也可以先预览或下载备份。') {
       plan = null; downloaded = false; message(text); controls();
     }
     const scopeChanged = () => location.href !== route || projectFromUrl() !== plan?.projectId;
@@ -592,26 +703,36 @@
       } catch (error) { message(`备份导出失败：${error.message}`, 'error'); }
     };
     $('.run').onclick = async () => {
-      if (busy || !validPlan()) return;
-      if (scopeChanged()) { invalidate(); return; }
-      const executionPlan = plan;
-      const total = kind => executionPlan.entries.reduce((n, e) => n + (kind === 'drafts' ? e.drafts.length : e.task[kind].length), 0);
-      const accepted = downloaded || window.confirm(`尚未下载本次备份，仍要清空项目 ${executionPlan.projectId} 的 ${executionPlan.taskIds.length} 个任务吗？\n\n将删除：标注 ${total('annotations')} 条、草稿 ${total('drafts')} 条、预标注 ${total('predictions')} 条。\n任务 ID 与原始视频保留。\n\n删除无法直接撤销。点击“确定”开始清空，或“取消”返回下载备份。`);
-      if (!accepted) { message('已取消，未执行清空。'); return; }
-      if (scopeChanged() || plan !== executionPlan) { invalidate(); return; }
-      busy = true; stopRequested = false; controls();
+      if (busy) return;
+      let executionPlan, hasPreview;
+      const pageRoute = location.href, scopeText = input.value;
       try {
-        report = await execute({ api, plan: executionPlan, persist: backupStore,
+        const taskIds = parseIds(scopeText), projectId = idOf(projectFromUrl());
+        hasPreview = validPlan() && !scopeChanged() && stableJson(plan.taskIds) === stableJson(taskIds);
+        executionPlan = hasPreview ? plan : createDirectPlan(projectId, taskIds);
+      } catch (error) { message(error.message, 'error'); return; }
+      const detail = hasPreview ? (() => {
+        const total = kind => executionPlan.entries.reduce((n, e) => n + (kind === 'drafts' ? e.drafts.length : e.task[kind].length), 0);
+        return `将删除：标注 ${total('annotations')} 条、草稿 ${total('drafts')} 条、预标注 ${total('predictions')} 条。`;
+      })() : '本次未预览：确认后将逐个任务读取并删除标注、草稿和预标注，不等待整批预览完成。';
+      const accepted = (hasPreview && downloaded) || window.confirm(`尚未下载本次备份，仍要清空项目 ${executionPlan.projectId} 的 ${executionPlan.taskIds.length} 个任务吗？\n\n${detail}\n同时执行平台实际提供的审核评分、验收、审核员与标注员关联删除。任务 ID 与原始视频保留。\n\n删除无法直接撤销。点击“确定”开始清空，或“取消”返回。`);
+      if (!accepted) { message('已取消，未执行清空。'); return; }
+      if (location.href !== pageRoute || input.value !== scopeText || (hasPreview && plan !== executionPlan)) { invalidate('确认期间任务范围或页面发生变化，请重新操作'); return; }
+      route = pageRoute; report = null; log.textContent = '';
+      busy = true; stopRequested = false; controls();
+      message(`开始${hasPreview ? '清空' : '直接清空'} ${executionPlan.taskIds.length} 个任务；正在读取首批任务并逐个处理。`);
+      try {
+        report = await execute({ api, plan: executionPlan, persist: backupStore, nativeCleanup: true,
           shouldStop: () => stopRequested || location.href !== route,
           onProgress: current => {
             report = current; const result = current.results.at(-1);
-            writeLog(`${result.taskId} · ${result.status === 'success' ? '完成' : result.status === 'partial' ? '部分完成' : result.status === 'unknown' ? '待核实' : '失败'} · ${result.message || result.error}`);
+            writeLog(`${result.taskId} · ${result.status === 'success' ? '完成' : result.status === 'partial' ? '部分完成' : result.status === 'unknown' ? '待核实' : result.status === 'stopped' ? '已停止' : '失败'} · ${result.message || result.error}`);
             message(`已处理 ${current.results.length} / ${executionPlan.entries.length}`);
           } });
         const count = value => report.results.filter(r => r.status === value).length;
         const nextStep = report.stopped || count('failed') || count('partial') || count('unknown')
-          ? '请查看下方错误详情或导出结果核查，重新预览后再操作。' : '可刷新列表查看待标注状态。';
-        message(`${report.stopped ? '处理已停止' : '本批处理结束'}\n完成 ${count('success')} · 失败 ${count('failed')} · 部分完成 ${count('partial')} · 待核实 ${count('unknown')}\n${nextStep}`,
+          ? '请查看下方错误详情或导出结果核查，重新核对范围后再操作。' : '可刷新列表查看待标注状态。';
+        message(`${report.stopped ? '处理已停止' : '本批处理结束'}\n完成 ${count('success')} · 失败 ${count('failed')} · 部分完成 ${count('partial')} · 待核实 ${count('unknown')} · 已停止 ${count('stopped')} · 未开始 ${executionPlan.entries.length - report.results.length}\n${nextStep}`,
           report.stopped || count('failed') ? 'error' : 'success');
       } catch (error) { message(`执行中断：${error.message}。请导出本机备份核查。`, 'error'); }
       finally { busy = false; plan = null; downloaded = false; controls(); }
