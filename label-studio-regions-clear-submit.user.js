@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Insta360 Regions 批量清空并提交
 // @namespace    local.insta360.regions-cleaner
-// @version      3.2.2
-// @description  输入 ID 或导入勾选后直接逐条清空 Regions 并原生提交；无需预览，提交后回读验证。
+// @version      3.2.3
+// @description  直接清空 Regions，Ctrl+Enter 提交；空轨迹快速跳过，下一任务只读预取，提交后回读验证。
 // @homepageURL  https://github.com/chengzi-1225/Insta360-chengzi
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-regions-clear-submit.meta.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-regions-clear-submit.user.js
@@ -14,7 +14,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '3.2.2';
+  const VERSION = '3.2.3';
   const MAX_TASKS = 10000;
   const clone = value => JSON.parse(JSON.stringify(value));
   const canonical = value => JSON.stringify(normalize(value));
@@ -101,6 +101,36 @@
   function actionFor(snapshot) {
     return roots(snapshot.result).length ? 'workflow' : 'skip';
   }
+  function serverHasNoRegions(task) {
+    // Only skip when every persisted version is understood and empty of Regions.
+    // Unknown draft shapes and new/unannotated tasks still use the native editor.
+    return Array.isArray(task?.annotations) && task.annotations.length > 0 &&
+      ['annotations', 'drafts', 'predictions'].every(name => Array.isArray(task[name]) && task[name].every(record =>
+        record && Array.isArray(record.result) && !record.result.some(r => !r || r.type === 'reframe') &&
+        (record.draft == null || (Array.isArray(record.draft) && !record.draft.some(r => !r || r.type === 'reframe')))));
+  }
+  function dispatchSubmitShortcut(doc, macAction) {
+    const options = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, ctrlKey: true,
+      metaKey: false, altKey: false, shiftKey: false, bubbles: true, cancelable: true, repeat: false };
+    const down = new doc.defaultView.KeyboardEvent('keydown', options);
+    const up = new doc.defaultView.KeyboardEvent('keyup', options);
+    let result, failure;
+    // The platform binds Command+Enter on macOS. Route only this exact synthetic
+    // Ctrl+Enter to the same native action, without changing physical shortcuts.
+    const bridge = event => {
+      if (event !== down) return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      try { result = macAction(); } catch (error) { failure = error; }
+    };
+    if (macAction) doc.addEventListener('keydown', bridge, true);
+    try { doc.body.dispatchEvent(down); }
+    finally {
+      if (macAction) doc.removeEventListener('keydown', bridge, true);
+      doc.body.dispatchEvent(up);
+    }
+    if (failure) throw failure;
+    return result;
+  }
   // Observe the native request promises without changing request data or responses.
   // History is loaded after hydration and can replace an initially empty annotation.
   function trackNativeRequests(manager) {
@@ -185,14 +215,25 @@
   // The runner is independent of the page so success, failure and ordering can be tested offline.
   async function runBatch(entries, adapter, report, shouldStop = () => false) {
     const outcomes = [];
-    for (const entry of entries) {
+    // Keep at most the current read and one next-task read. A settled wrapper
+    // handles prefetched failures even if this batch stops before consuming one.
+    const prepare = task => adapter.readTask ? Promise.resolve().then(() => adapter.readTask(task))
+      .then(value => ({ value }), error => ({ error })) : null;
+    let prepared = null;
+    for (let index = 0; index < entries.length; index++) {
       if (shouldStop()) break;
+      const entry = entries[index];
+      prepared ||= prepare(entry.task);
+      const taskRead = prepared?.then(record => { if (record.error) throw record.error; return record.value; });
+      taskRead?.catch(() => {}); // inspect may reject before consuming its read.
+      prepared = null;
       const outcome = { task: entry.task, stage: 'checking', annotationId: null, startedAt: new Date().toISOString() };
       outcomes.push(outcome);
       const emit = (stage, message) => { outcome.stage = stage; report(outcomes, message); };
       try {
         emit('checking', `任务 ${entry.task}：读取当前编辑器内容`);
-        const current = await adapter.inspect(entry.task);
+        const current = await adapter.inspect(entry.task, taskRead);
+        if (!shouldStop() && index + 1 < entries.length) prepared = prepare(entries[index + 1].task);
         outcome.state = current.state; outcome.source = current.source;
         outcome.regions = roots(current.result).length;
         const action = actionFor(current);
@@ -201,7 +242,7 @@
         emit('cleaning', `任务 ${entry.task}：清空 ${roots(current.result).length} 条轨迹`);
         const cleaned = await adapter.clear(current);
         if (!same(cleaned, expected)) throw new Error('原生删除后的结果与预期不同，停止提交');
-        emit('submitting', `任务 ${entry.task}：点击原生提交`);
+        emit('submitting', `任务 ${entry.task}：Ctrl+Enter 原生提交`);
         const submitted = await adapter.submit(entry.task);
         if (!Number.isSafeInteger(submitted.id) || submitted.id <= 0) throw new Error('提交成功事件缺少标注 ID');
         outcome.annotationId = submitted.id;
@@ -218,7 +259,7 @@
     }
     return outcomes;
   }
-  if (typeof module === 'object' && module.exports) { module.exports = { cleanResult, roots, parseIds, same, comparisonResult, actionFor, resolveSelection, trackNativeRequests, waitForNativeReady, readWhileNativeReady, verifySubmittedResult, loadNativeTask, runBatch }; return; }
+  if (typeof module === 'object' && module.exports) { module.exports = { cleanResult, roots, parseIds, same, comparisonResult, actionFor, serverHasNoRegions, dispatchSubmitShortcut, resolveSelection, trackNativeRequests, waitForNativeReady, readWhileNativeReady, verifySubmittedResult, loadNativeTask, runBatch }; return; }
   if (location.origin !== 'https://label.insta360.com') return;
   const project = Number(location.pathname.match(/\/projects\/(\d+)\/data/)?.[1]);
   if (!project) return;
@@ -239,7 +280,7 @@
   frame.srcdoc = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><style>
     *{box-sizing:border-box}body{margin:0;background:#f8fafb;color:#203648;font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}header{position:sticky;top:0;background:#143f50;color:white;padding:16px 20px;display:flex;justify-content:space-between;z-index:1}h2{font-size:18px;margin:0}small{color:#c6dce5}#close{color:white;background:transparent;border:0;font-size:23px}main{padding:18px 20px}p{margin:0 0 10px}.hint{color:#607586;font-size:12px}button,input,textarea{font:inherit}button{cursor:pointer;border:1px solid #c4d4dc;border-radius:7px;padding:7px 12px;background:white;color:#203648}button:disabled{opacity:.45;cursor:default}.primary{background:#126c76;color:white;border-color:#126c76}.danger{background:#a73333;color:white;border-color:#a73333}.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:10px 0}textarea{display:block;width:100%;min-height:90px;resize:vertical;background:white;border:1px solid #9eb7c4;border-radius:8px;padding:10px;user-select:text!important;pointer-events:auto!important;cursor:text!important}textarea:focus{outline:2px solid #52a6af;outline-offset:1px}.step{display:flex;gap:7px;flex-wrap:wrap;background:#eaf2f4;padding:10px 12px;border-radius:8px;margin-bottom:16px}.notice{border-left:3px solid #c79737;background:#fff4dc;padding:10px 12px;font-size:12px;margin:14px 0}table{width:100%;border-collapse:collapse;background:white;font-size:12px}th,td{text-align:left;border-bottom:1px solid #e2e9ee;padding:9px 6px;vertical-align:top}th{background:#edf3f6;position:sticky;top:0}.table{max-height:280px;overflow:auto;border:1px solid #d3e0e6;border-radius:8px}input[type=checkbox]{accent-color:#126c76}#log{white-space:pre-wrap;background:#eaf0f3;padding:12px;border-radius:8px;max-height:190px;overflow:auto;font-size:12px}#summary{font-weight:600;margin:12px 0}.error{color:#a73333}.ok{color:#126c76}a{color:#126c76}footer{font-size:12px;color:#607586;margin-top:15px}
   </style></head><body><header><div><h2>Regions 清空并提交</h2><small>v${VERSION} · 项目 ${project} · 清空轨迹与原生提交</small></div><button id="close" aria-label="收起面板">×</button></header><main>
-    <div class="step"><span>① 进入任务</span><span>→</span><span>② 清空轨迹</span><span>→</span><span>③ 提交</span><span>→</span><span>④ 核对结果</span></div>
+    <div class="step"><span>① 进入任务</span><span>→</span><span>② 清空轨迹</span><span>→</span><span>③ Ctrl+Enter 提交</span><span>→</span><span>④ 核对结果</span></div>
     <p>选择任务</p><p class="hint">输入任务 ID，或导入原列表勾选 / 全选结果。全选遵循当前筛选及取消勾选项，每批最多 10000 个。</p>
     <textarea id="ids" aria-label="任务 ID" autocomplete="off" spellcheck="false" placeholder="例如：4361049, 4361050&#10;支持逗号或换行分隔"></textarea>
     <div class="row"><button id="readSelected" data-action>导入页面勾选 / 全选</button><button id="current" data-action>填入当前打开任务</button></div>
@@ -292,13 +333,21 @@
     return { annotations: t.annotations.map(record), drafts: t.drafts.map(record), predictions: t.predictions.map(record) };
   }
   const adapter = {
-    async inspect(task) {
+    readTask(task) { dm(); return getTask(task); },
+    async inspect(task, prepared) {
       const manager = dm();
       if (manager.lsf?.lsf?.commentStore?.hasUnsaved) throw new Error('当前任务有未提交评论，请先保存');
+      let t = await (prepared || getTask(task));
+      // A prefetched empty result can become stale while the previous task runs.
+      if (prepared && Number(manager.lsf?.taskID) !== task && serverHasNoRegions(t)) t = await getTask(task);
+      // Do not skip an open task: its editor may contain unsaved Regions.
+      if (Number(manager.lsf?.taskID) !== task && serverHasNoRegions(t)) {
+        return { task, state: t.state, source: '服务器确认所有版本无轨迹', result: [] };
+      }
       const tracker = trackNativeRequests(manager);
       try {
         await loadNativeTask(manager, task);
-        const { task: t, sample: stable } = await readWhileNativeReady(() => readySample(task), tracker, () => getTask(task));
+        const { sample: stable } = await readWhileNativeReady(() => readySample(task), tracker, async () => t);
         const { b, a } = stable;
         if (a.isReadOnly() || a.readonly || a.editable === false) throw new Error('默认标注只读，无法按原生流程清理');
         if (typeof a.serializeAnnotation !== 'function' || typeof a.pauseAutosave !== 'function') throw new Error('当前编辑器版本不支持所需操作');
@@ -323,8 +372,19 @@
       const manager = dm();
       const { a } = nativeAnnotation(task) || {};
       if (!a) throw new Error('提交前编辑器未就绪');
-      const buttons = [...document.querySelectorAll('button[aria-label="submit"]')].filter(b => b.getClientRects().length);
-      if (buttons.length !== 1 || buttons[0].disabled) throw new Error('未找到唯一可用的原生提交按钮');
+      const store = manager.lsf.lsf;
+      const isMac = /Mac|iPhone|iPad|iPod/.test(window.navigator?.platform || '');
+      const nativeAction = () => {
+        if (nativeAnnotation(task)?.a !== a || store.annotationStore?.selected !== a || store.annotationStore.viewingAll || store.isSubmitting)
+          throw new Error('提交前任务、默认标注或提交状态发生变化');
+        if (!store.settings?.enableHotkeys) throw new Error('请先在平台设置中开启快捷键');
+        if (store.hasInterface('review') || store.task?.state === 'APPEALED' || store.task?.status === 'APPEALED' || store.task?.appeal_id || a.appeal_id)
+          throw new Error('审核或申诉任务不可通过本脚本快捷提交');
+        const method = a.pk == null && store.hasInterface('submit') ? 'submitAnnotation' : store.hasInterface('update') ? 'updateAnnotation' : null;
+        if (!method || typeof store[method] !== 'function') throw new Error('当前编辑器不支持原生快捷提交');
+        return method;
+      };
+      nativeAction();
       const tracker = trackNativeRequests(manager);
       let submitted;
       try {
@@ -339,7 +399,11 @@
           };
           const timer = setTimeout(() => { if (!finished) { finished = true; cleanup(); reject(new Error('30 秒内未收到提交成功事件。请检查原生校验提示或网络；不要直接重复提交')); } }, 30000);
           manager.on('submitAnnotation', handler); manager.on('updateAnnotation', handler);
-          try { buttons[0].click(); } catch (e) { finished = true; cleanup(); reject(e); }
+          const failed = error => { if (!finished) { finished = true; cleanup(); reject(error); } };
+          try {
+            const result = dispatchSubmitShortcut(document, isMac ? () => store[nativeAction()]() : null);
+            if (result?.then) result.catch(failed);
+          } catch (error) { failed(error); }
         });
         // Success precedes the native reload and its history request. Wait before
         // the runner opens another task, even though the submission has succeeded.
