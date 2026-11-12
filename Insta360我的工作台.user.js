@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         Insta360 我的工作台（标注员 / 审核员）
 // @namespace    https://label.insta360.com/personal-toolbox/
-// @version      1.7.0
+// @version      1.8.0
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360我的工作台.user.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360我的工作台.user.js
-// @description  只看本人：按日期统计标注、审核工作量，汇总个人返修和返工并直达原生处理流程
+// @description  个人数据工作台：总览、项目搜索排序、分页合计、CSV 导出与返修返工快捷入口
 // @author       chengzi / Codex
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
@@ -244,11 +244,42 @@
     return match ? {workspace: match[1], role: 'annotator'} : null;
   }
 
-  var core = {identity: identity, selfRows: selfRows, sumMetric: sumMetric, summarizeMetric: summarizeMetric, accuracySummary: accuracySummary, parseProjectIds: parseProjectIds, sumRegionMetric: sumRegionMetric, statsParams: statsParams, personalProjects: personalProjects, projectRegionTotals: projectRegionTotals, workUrl: workUrl, pageOrder: pageOrder, loadPages: loadPages, presetRange: presetRange, activeRange: activeRange, routeContext: routeContext};
+  function rowMetric(row, key, totals) {
+    if (key === 'project_title') return String(row.project_title || ('项目 #' + row.project_id));
+    if (key === 'accuracy') return accuracySummary([row]).value;
+    if (key === 'project_regions') return number(totals && totals[id(row.project_id)]);
+    return number(row.stats && row.stats[key === 'regions' ? 'label__region' : key]);
+  }
+
+  function browseRows(rows, query, key, direction, totals) {
+    var needle = String(query || '').trim().toLocaleLowerCase();
+    return rows.filter(function (row) {
+      return !needle || (String(row.project_title || '') + ' #' + row.project_id).toLocaleLowerCase().includes(needle);
+    }).slice().sort(function (a, b) {
+      var x = rowMetric(a, key, totals), y = rowMetric(b, key, totals);
+      if (x == null && y == null) return Number(a.project_id) - Number(b.project_id);
+      if (x == null) return 1;
+      if (y == null) return -1;
+      var order = typeof x === 'string' ? x.localeCompare(y, 'zh-CN', {numeric: true}) : x - y;
+      return order ? order * (direction === 'asc' ? 1 : -1) : Number(a.project_id) - Number(b.project_id);
+    });
+  }
+
+  function csvText(rows) {
+    return '\ufeff' + rows.map(function (row) {
+      return row.map(function (value) {
+        var cell = value == null ? '' : String(value);
+        if (typeof value === 'string' && /^[\s]*[=+@\-\t\r]/.test(cell)) cell = "'" + cell;
+        return '"' + cell.replace(/"/g, '""') + '"';
+      }).join(',');
+    }).join('\r\n');
+  }
+
+  var core = {browseRows: browseRows, rowMetric: rowMetric, csvText: csvText, identity: identity, selfRows: selfRows, sumMetric: sumMetric, summarizeMetric: summarizeMetric, accuracySummary: accuracySummary, parseProjectIds: parseProjectIds, sumRegionMetric: sumRegionMetric, statsParams: statsParams, personalProjects: personalProjects, projectRegionTotals: projectRegionTotals, workUrl: workUrl, pageOrder: pageOrder, loadPages: loadPages, presetRange: presetRange, activeRange: activeRange, routeContext: routeContext};
   if (typeof module === 'object' && module.exports) module.exports = core;
   if (typeof window === 'undefined' || typeof document === 'undefined') return;
   if (window.__INSTA360_PERSONAL_TOOLBOX__) return;
-  window.__INSTA360_PERSONAL_TOOLBOX__ = {version: '1.7.0'};
+  window.__INSTA360_PERSONAL_TOOLBOX__ = {version: '1.8.0'};
 
   var METRICS = {
     annotator: [
@@ -273,6 +304,7 @@
   };
 
   var state = {
+    quick: '', sortKey: '', sortDirection: 'desc', page: 1, pageSize: 10, pendingMode: 'all',
     context: null, role: 'annotator', workspace: 'all', range: presetRange('today'), preset: 'today',
     user: null, stats: null, regions: null, pending: null, statsProgress: null, pendingProgress: null, error: '', statsError: '', regionError: '', pendingError: '',
     busy: false, statsBusy: false, regionBusy: false, pendingBusy: false, opened: false, filter: '', projectIdsText: '', queryScope: null, queryRange: null, queryWorkspace: null, discarded: 0, updated: '', regionUpdated: '', pendingUpdated: '',
@@ -527,7 +559,9 @@
     root.querySelectorAll('.metric-value[data-count-target]').forEach(function (node) {
       var key = node.getAttribute('data-count-key'), target = Number(node.getAttribute('data-count-target')), strong = node.querySelector('strong');
       if (!key || !Number.isFinite(target) || !strong) return;
+      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) { strong.textContent = display(target, key.split(':').pop()); countCurrent[key] = target; return; }
       var start = Number.isFinite(countCurrent[key]) ? countCurrent[key] : 0, began = null;
+      if (start === target) { strong.textContent = display(target, key.split(':').pop()); return; }
       strong.textContent = metricAnimationText(start, key.split(':').pop());
       function step(now) {
         if (began == null) began = now;
@@ -547,7 +581,7 @@
     countCurrent = Object.create(null);
   }
   function abort() { runNumber++; if (controller) controller.abort(); state.busy = false; state.statsBusy = false; state.regionBusy = false; state.pendingBusy = false; }
-  function clearResults() { resetCountAnimations(); state.user = null; state.stats = null; state.regions = null; state.pending = null; state.queryScope = null; state.queryRange = null; state.queryWorkspace = null; state.statsProgress = null; state.pendingProgress = null; state.updated = ''; state.regionUpdated = ''; state.pendingUpdated = ''; state.discarded = 0; state.error = ''; state.statsError = ''; state.regionError = ''; state.pendingError = ''; }
+  function clearResults() { state.page = 1; resetCountAnimations(); state.user = null; state.stats = null; state.regions = null; state.pending = null; state.queryScope = null; state.queryRange = null; state.queryWorkspace = null; state.statsProgress = null; state.pendingProgress = null; state.updated = ''; state.regionUpdated = ''; state.pendingUpdated = ''; state.discarded = 0; state.error = ''; state.statsError = ''; state.regionError = ''; state.pendingError = ''; }
 
   async function request(path, params, signal) {
     var url = new URL(path, location.origin);
@@ -778,10 +812,40 @@
     }
   }
 
-  function matches(name) { return String(name || '').toLocaleLowerCase().includes(state.filter.trim().toLocaleLowerCase()); }
+  function matches(name) { var applied = state.queryScope ? state.queryScope.title : ''; return String(name || '').toLocaleLowerCase().includes(applied.toLocaleLowerCase()); }
+
+  function visibleRows() {
+    if (!state.stats || state.statsError || state.error) return null;
+    return browseRows(state.stats.filter(function (r) { return matches(r.project_title); }), state.quick, state.sortKey || (state.role === 'annotator' ? 'submit_total' : 'review_total'), state.sortDirection, state.regions);
+  }
+
+  function exportStats() {
+    if ($('#export').disabled) return;
+    var rows = visibleRows(), metrics = METRICS[state.role].filter(metricMatches);
+    if (!rows || !rows.length || !state.user) return;
+    var table = [
+      ['统计类型', roleTitle(state.role)],
+      ['账号', state.user.name, 'ID', state.user.id],
+      ['日期', state.queryRange[0], state.queryRange[1]],
+      ['工作区', state.queryWorkspace],
+      ['服务器项目筛选', state.queryScope.title, state.queryScope.ids.join(',')],
+      ['本地搜索', state.quick],
+      ['完整性', '已完成本人查询', '缺失字段留空，真实零保留 0'],
+      ['导出范围', '全部匹配项目', rows.length],
+      ['统计说明', '准确率仅纳入通过和驳回均有值的项目；项目 regions 为全部成员全日期累计参考'],
+      ['项目 ID', '项目名称'].concat(metrics.map(function (m) { return m[1] + '（' + m[2] + '）'; })),
+    ];
+    rows.forEach(function (row) {
+      table.push([row.project_id, row.project_title || ('项目 #' + row.project_id)].concat(metrics.map(function (m) { return rowMetric(row, m[0], state.regions); })));
+    });
+    var blob = new Blob([csvText(table)], {type: 'text/csv;charset=utf-8;'}), url = URL.createObjectURL(blob), link = document.createElement('a');
+    link.href = url; link.download = 'Insta360-' + roleTitle(state.role) + '-' + state.queryRange.join('_') + '.csv';
+    document.body.appendChild(link); link.click(); link.remove(); setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    $('#export-feedback').textContent = '已导出 ' + rows.length + ' 个匹配项目';
+  }
 
   function renderStats() {
-    var metrics = METRICS[state.role].filter(metricMatches), rows = state.stats && state.stats.filter(function (r) { return matches(r.project_title); });
+    var metrics = METRICS[state.role].filter(metricMatches), rows = visibleRows();
     var hasMissing = false;
     function card(m) {
       var summary = rows && m[0] !== 'project_regions' ? (m[0] === 'accuracy' ? accuracySummary(rows) : summarizeMetric(rows, m[0] === 'regions' ? 'label__region' : m[0])) : null;
@@ -800,17 +864,40 @@
     $('#project-reference').hidden = !projectMetrics.length;
     var projectChanged = setMarkup('#project-metrics', projectMetrics.map(card).join(''));
     if (cardsChanged || projectChanged) animateCounts();
-    var head = '<thead><tr><th>项目名称</th>' + metrics.map(function (m) { return '<th title="' + escape(m[3]) + '">' + m[1] + '</th>'; }).join('') + '</tr></thead>';
+    var primary = state.role === 'annotator' ? 'submit_total' : 'review_total';
+    var key = state.sortKey || primary;
+    var head = '<thead><tr>' + [['project_title', '项目名称']].concat(metrics).map(function (m) {
+      var active = key === m[0];
+      return '<th scope="col" aria-sort="' + (active ? state.sortDirection === 'asc' ? 'ascending' : 'descending' : 'none') + '"><button type="button" data-sort="' + escape(m[0]) + '" title="点击按' + escape(m[1]) + '排序">' + escape(m[1]) + '<span aria-hidden="true">' + (active ? state.sortDirection === 'asc' ? ' ↑' : ' ↓' : ' ↕') + '</span></button></th>';
+    }).join('') + '</tr></thead>';
+    var count = rows ? rows.length : 0, pages = Math.max(1, Math.ceil(count / state.pageSize));
+    state.page = Math.min(state.page, pages);
+    $('#result-count').textContent = rows ? count + ' / ' + state.stats.length + ' 个项目' + (state.quick ? ' · 搜索结果' : '') : '尚未查询';
+    $('#page-info').textContent = '第 ' + state.page + ' / ' + pages + ' 页';
+    $('#prev-page').disabled = state.page <= 1;
+    $('#next-page').disabled = state.page >= pages;
+    $('#pagination').hidden = !count;
+    $('#export').disabled = !count || state.statsBusy || !!state.statsError || !!state.error || !metrics.length || (metrics.some(function (m) { return m[0] === 'project_regions'; }) && (state.regionBusy || !!state.regionError || !state.regions));
     if (state.statsError) setMarkup('#stats-data', '<p class="error" role="alert">' + escape(state.statsError) + '</p>');
-    else if (!rows) setMarkup('#stats-data', '<p class="empty">' + (state.statsBusy ? '正在读取本人工作量…' : '点击“查询 / 刷新”读取数据') + '</p>');
-    else if (!rows.length) setMarkup('#stats-data', '<p class="empty">' + (state.filter ? '没有匹配项目名称的本人记录' : state.statsBusy ? '已读取部分项目包，正在继续查询…' : '这个日期范围内，本人暂无' + (state.role === 'annotator' ? '标注' : '审核') + '记录') + '</p>');
-    else setMarkup('#stats-data', '<div class="table-wrap"><table>' + head + '<tbody>' + rows.map(function (row) {
-      return '<tr><td><span class="project-name">' + escape(row.project_title || ('项目 #' + row.project_id)) + '</span><small class="project-id">#' + escape(row.project_id) + '</small></td>' + metrics.map(function (m) {
-        var value = m[0] === 'accuracy' ? accuracySummary([row]).value : m[0] === 'project_regions' ? state.regions && state.regions[id(row.project_id)] : row.stats && row.stats[m[0] === 'regions' ? 'label__region' : m[0]];
-        var numeric = number(value);
-        return '<td>' + display(numeric, m[0]) + (m[0] === 'accuracy' && numeric != null ? '%' : '') + '</td>';
-      }).join('') + '</tr>';
-    }).join('') + '</tbody></table></div>');
+    else if (!rows) setMarkup('#stats-data', '<div class="empty"><span class="empty-symbol" aria-hidden="true">▦</span><strong>' + (state.statsBusy ? '正在读取本人工作量…' : '选择日期，开始查看工作数据') + '</strong><span>' + (state.statsBusy ? '分页数据返回后会逐步显示' : '点击上方“查询 / 刷新”读取当前账号数据') + '</span></div>');
+    else if (!rows.length) setMarkup('#stats-data', '<div class="empty"><span class="empty-symbol" aria-hidden="true">⌕</span><strong>' + (state.quick ? '没有找到匹配的项目' : state.statsBusy ? '正在继续查询项目…' : '当前范围暂无个人记录') + '</strong><span>' + (state.quick ? '试试项目名称、ID，或清空搜索' : '可以更改日期或工作区后重新查询') + '</span></div>');
+    else {
+      var pageRows = rows.slice((state.page - 1) * state.pageSize, state.page * state.pageSize);
+      var maximum = Math.max.apply(null, rows.map(function (r) { return rowMetric(r, primary) || 0; }));
+      var body = pageRows.map(function (row) {
+        var share = maximum ? (rowMetric(row, primary) || 0) / maximum * 100 : 0;
+        return '<tr><td><span class="project-name" title="' + escape(row.project_title) + '">' + escape(row.project_title || ('项目 #' + row.project_id)) + '</span><small class="project-id">#' + escape(row.project_id) + '</small><span class="row-meter" aria-hidden="true"><i style="width:' + share + '%"></i></span></td>' + metrics.map(function (m) {
+          var value = rowMetric(row, m[0], state.regions);
+          var content = display(value, m[0]) + (m[0] === 'accuracy' && value != null ? '%' : '');
+          return '<td class="' + (value == null ? 'missing' : m[0] === primary ? 'primary-number' : '') + '">' + (m[0] === 'accuracy' && value != null ? '<span class="accuracy ' + (value >= 95 ? 'good' : value >= 80 ? 'medium' : 'low') + '">' + content + '</span>' : content) + '</td>';
+        }).join('') + '</tr>';
+      }).join('');
+      var totals = '<tfoot><tr><th scope="row">匹配项目合计 <small>' + rows.length + ' 项</small></th>' + metrics.map(function (m) {
+        var total = m[0] === 'accuracy' ? accuracySummary(rows).value : m[0] === 'project_regions' ? sumRegions(rows) : summarizeMetric(rows, m[0] === 'regions' ? 'label__region' : m[0]).value;
+        return '<td>' + display(total, m[0]) + (m[0] === 'accuracy' && total != null ? '%' : '') + '</td>';
+      }).join('') + '</tr></tfoot>';
+      setMarkup('#stats-data', '<div class="table-wrap" tabindex="0" role="region" aria-label="项目产量明细，可横向滚动"><table>' + head + '<tbody>' + body + '</tbody>' + totals + '</table></div>');
+    }
     $('#stats-note').textContent = state.role === 'annotator'
       ? '新标注提交与返修 / 返工更新分别统计。通过、驳回按平台统计口径；缺失数据用“—”表示。'
       : '审核数量按通过 / 驳回的动作次数统计。同一条数据重复审核可能计多次，与平台“数据统计”一致。';
@@ -820,7 +907,7 @@
     if (state.role === 'annotator') $('#stats-note').textContent += ' 准确率 = 审核通过 /（审核通过 + 审核驳回）× 100%；先合计再计算，只纳入通过、驳回均有值的项目，分母为 0 时显示“—”。';
     if (projectMetrics.length && state.regionError) $('#stats-note').textContent += ' 项目参考区域总数读取失败：' + state.regionError;
     else if (projectMetrics.length && !state.regions && !state.regionBusy) $('#stats-note').textContent += ' 项目 regions 总数需勾选后点击“查询 / 刷新”读取。';
-    $('#range-caption').textContent = state.queryRange ? state.queryRange[0] + ' 至 ' + state.queryRange[1] + ' · 全天 · ' + (state.queryWorkspace === 'all' ? '全部可访问项目' : '工作区 #' + state.queryWorkspace) + (rows ? ' · ' + rows.length + ' 个项目' : '') + progressText(state.statsProgress) : '尚未查询，请点击“查询 / 刷新”';
+    $('#range-caption').textContent = state.queryRange ? state.queryRange[0] + ' 至 ' + state.queryRange[1] + ' · 全天 · ' + (state.queryWorkspace === 'all' ? '全部可访问项目' : '工作区 #' + state.queryWorkspace) + (rows ? ' · ' + rows.length + ' 个匹配项目' : '') + progressText(state.statsProgress) : '尚未查询，请点击“查询 / 刷新”';
     if (state.queryScope && (state.queryScope.title || state.queryScope.ids.length)) $('#range-caption').textContent += ' · 服务端项目筛选：' + [state.queryScope.title, state.queryScope.ids.length ? 'ID ' + state.queryScope.ids.join(', ') : ''].filter(Boolean).join('；');
   }
 
@@ -832,7 +919,7 @@
     $('#pending-updated').textContent = state.pendingUpdated ? '读取于 ' + state.pendingUpdated + ' · 仅点击“查询 / 刷新”时更新' : '';
     if (state.pendingError) { setMarkup('#pending-data', '<p class="error" role="alert">' + escape(state.pendingError) + '</p>'); $('#pending-total').textContent = ''; return; }
     if (!state.pending) { setMarkup('#pending-data', '<p class="empty">' + (state.pendingBusy ? '正在读取本人待处理项目…' : '点击“查询 / 刷新”读取待处理数据') + '</p>'); $('#pending-total').textContent = ''; return; }
-    var items = state.pending.items.filter(function (p) { return matches(p.name); });
+    var items = state.pending.items.filter(function (p) { return matches(p.name) && (!state.quick.trim() || (p.name + ' #' + p.id).toLocaleLowerCase().includes(state.quick.trim().toLocaleLowerCase())) && (state.pendingMode === 'all' || p[state.pendingMode] > 0); });
     var repair = 0, rework = 0;
     items.forEach(function (p) { repair += p.repair || 0; rework += p.rework || 0; });
     $('#pending-total').textContent = items.length + ' 个项目 · 返修 ' + repair + ' · 返工 ' + rework + (state.pending.unknown ? '（部分计数未取得）' : '') + progressText(state.pendingProgress);
@@ -856,7 +943,10 @@
     $('#work-title').textContent = roleTitle(state.role);
     $('#panel').setAttribute('aria-label', roleTitle(state.role));
     $('#center-label').textContent = state.role === 'reviewer' ? '审核中心 · 本人审核数据' : '标注中心 · 本人标注数据';
-    $('#stats-title').textContent = state.role === 'reviewer' ? '我的审核产量' : '我的标注产量';
+    $('#stats-title').textContent = state.role === 'reviewer' ? '审核工作总览' : '标注工作总览';
+    $('#nav-pending').hidden = state.role !== 'annotator';
+    $('#clear-quick').hidden = !state.quick;
+    root.querySelectorAll('[data-pending-mode]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.pendingMode === state.pendingMode)); });
     $('#account').textContent = state.user ? '查询账号：' + state.user.name + ' · ID ' + state.user.id : state.busy ? '正在确认当前账号…' : '仅显示当前登录账号的数据';
     $('#start').value = state.range[0]; $('#end').value = state.range[1];
     $('#project-ids').value = state.projectIdsText;
@@ -869,7 +959,10 @@
       try { changed = JSON.stringify(state.range) !== JSON.stringify(state.queryRange) || state.workspace !== state.queryWorkspace || !state.queryScope || state.filter.trim() !== state.queryScope.title || parseProjectIds(state.projectIdsText).join(',') !== state.queryScope.ids.join(','); }
       catch (_) { changed = true; }
     }
-    $('#query-help').textContent = (changed ? '筛选已修改，点击“查询 / 刷新”后读取新范围；当前数据仍属于上次查询。' : '只有点击“查询 / 刷新”才读取数据。') + ' 名称输入可筛选当前结果；勾选项目累计 regions 后也需点击按钮读取。';
+    $('#query-help').textContent = changed ? '筛选条件已修改，点击“查询 / 刷新”应用；下方仍为上次查询结果。' : '手动查询 · 本地搜索、排序和翻页无需重复请求。';
+    $('#query-help').classList.toggle('changed', changed);
+    $('#query-state').textContent = state.busy ? '正在读取数据' : state.error || state.statsError ? '查询遇到问题' : changed ? '查询条件未应用' : state.updated ? '查询完成' : '等待查询';
+    $('#query-state').setAttribute('data-status', state.busy ? 'busy' : state.error || state.statsError ? 'error' : changed ? 'changed' : 'ready');
     root.querySelectorAll('[data-preset]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.preset === state.preset)); });
     renderStats(); renderPending();
   }
@@ -902,16 +995,21 @@
     host = document.createElement('div'); host.id = 'insta360-personal-toolbox'; host.setAttribute('translate', 'no');
     root = host.attachShadow({mode: 'open'});
     root.innerHTML = '<style>' + CSS + '</style>' +
-      '<section id="panel" aria-label="我的工作台"><header><div><div class="eyebrow">INSTA360 · 个人工作台</div><h1 id="work-title"></h1><p id="account"></p></div><button id="close" type="button" aria-label="收起工作台">×</button></header>' +
-      '<div class="scroll"><div class="filters"><div class="filter-line"><div id="center-label"></div><label class="scope-label">范围 <select id="scope" aria-label="统计范围"></select></label></div>' +
-      '<div class="presets"><button type="button" data-preset="today">今天</button><button type="button" data-preset="yesterday">昨天</button><button type="button" data-preset="week">近 7 天</button><button type="button" data-preset="month">本月</button></div>' +
-      '<div class="filter-line dates"><label>开始日期 <input id="start" type="date" aria-label="开始日期"></label><span class="date-separator">至</span><label>结束日期 <input id="end" type="date" aria-label="结束日期"></label><button id="query" class="primary" type="button">查询 / 刷新</button><input id="search" type="search" placeholder="项目名称，点击查询" aria-label="筛选项目名称"></div>' +
-      '<div class="filter-line project-filters"><label>项目 ID（选填） <input id="project-ids" type="text" aria-label="筛选项目 ID" placeholder="多个 ID 用逗号或空格分隔"></label></div><p id="query-help" class="query-help"></p>' +
-      '<div class="field-picker" role="group" aria-label="显示统计字段"><div class="field-toolbar"><span>显示字段</span><small id="field-count"></small><button id="field-all" type="button">全选</button><button id="field-none" type="button">清空</button></div><div id="field-options" class="field-options"></div></div></div>' +
-      '<p id="error" class="error" role="alert" hidden></p><div class="section-title"><h2 id="stats-title"></h2><span id="updated" aria-live="polite"></span></div><p id="range-caption" class="caption"></p><div id="metrics" class="metrics"></div><div id="stats-data" aria-live="polite"></div><p id="stats-note" class="note"></p>' +
+      '<section id="panel" aria-label="我的工作台"><header><div class="heading"><div class="eyebrow">INSTA360 <span> / </span> PERSONAL WORKSPACE</div><div class="title-line"><h1 id="work-title"></h1><span id="query-state" role="status"></span></div><p id="account"></p></div><button id="close" type="button" aria-label="收起工作台">×</button></header>' +
+      '<div class="scroll"><div class="filters"><div class="filter-line"><div id="center-label"></div><label class="scope-label">工作区 <select id="scope" aria-label="统计范围"></select></label></div>' +
+      '<div class="query-row"><div class="presets" role="group" aria-label="日期快捷选择"><button type="button" data-preset="today">今天</button><button type="button" data-preset="yesterday">昨天</button><button type="button" data-preset="week">近 7 天</button><button type="button" data-preset="month">本月</button></div>' +
+      '<div class="dates"><input id="start" type="date" aria-label="开始日期"><span>—</span><input id="end" type="date" aria-label="结束日期"></div><button id="query" class="primary" type="button">查询 / 刷新</button></div>' +
+      '<details class="advanced"><summary>项目范围与显示字段 <span id="field-count"></span></summary><div class="advanced-body"><div class="filter-line project-filters"><label>查询项目名称<input id="search" type="search" placeholder="按名称查询服务器" aria-label="查询项目名称"></label><label>查询项目 ID<input id="project-ids" type="text" aria-label="筛选项目 ID" placeholder="多个 ID 用逗号或空格分隔"></label></div>' +
+      '<div class="field-picker" role="group" aria-label="显示统计字段"><div class="field-toolbar"><span>显示字段</span><button id="field-default" type="button">常用字段</button><button id="field-all" type="button">全选</button><button id="field-none" type="button">清空</button></div><div id="field-options" class="field-options"></div></div></div></details><p id="query-help" class="query-help"></p></div>' +
+      '<p id="error" class="error" role="alert" hidden></p><nav class="view-nav" aria-label="工作台内容"><button data-jump="overview" class="current">工作总览</button><button data-jump="details">项目明细</button><button id="nav-pending" data-jump="pending">返修 / 返工</button></nav>' +
+      '<div class="browse-bar"><div class="quick-search"><span aria-hidden="true">⌕</span><input id="quick-search" type="search" placeholder="搜索当前结果：项目名称 / ID" aria-label="搜索当前结果"><button id="clear-quick" type="button" aria-label="清空当前搜索" hidden>×</button></div><small>即时筛选总览、明细与待处理</small></div>' +
+      '<section id="overview"><div class="section-title"><h2 id="stats-title"></h2><span id="updated" aria-live="polite"></span></div><p id="range-caption" class="caption"></p><div id="metrics" class="metrics"></div></section>' +
+      '<section id="details" class="detail-section"><div class="section-title"><div class="detail-heading"><h2>项目明细</h2><span id="result-count"></span></div><button id="export" type="button" disabled>↓ 导出 CSV</button></div><p id="export-feedback" class="sr-only" role="status"></p><p class="table-hint">点击表头排序 · 名称下方蓝条表示相对产量 · 合计包含全部匹配项目</p><div id="stats-data" aria-live="polite"></div>' +
+      '<div id="pagination" class="pagination" hidden><label>每页 <select id="page-size" aria-label="每页项目数"><option value="10">10 项</option><option value="20">20 项</option><option value="50">50 项</option></select></label><span id="page-info"></span><button id="prev-page" type="button" aria-label="上一页">← 上一页</button><button id="next-page" type="button" aria-label="下一页">下一页 →</button></div></section>' +
+      '<details class="metric-notes"><summary>统计口径与数据说明</summary><p id="stats-note" class="note"></p></details>' +
       '<section id="project-reference" class="project-reference" aria-label="项目累计参考" hidden><h2>项目参考 · 全部成员累计</h2><p class="note">项目 regions 总数包含全部成员、所有日期的区域，不受上方个人日期筛选影响，不计入本人产量。</p><div id="project-metrics" class="metrics"></div></section>' +
-      '<section id="pending-section" class="pending-section" aria-label="我的返修和返工"><div class="section-title"><h2>我的返修 / 返工</h2><span id="pending-total"></span></div><p class="note">当前仍需本人处理的标注数据，包含以前遗留的返修 / 返工，不受上方日期影响。个人计数与标注中心卡片一致。</p><div id="pending-data" aria-live="polite"></div><p id="pending-updated" class="caption"></p></section>' +
-      '<footer>个人产量按当前账号统计 · 不提供其他成员切换</footer></div></section>';
+      '<section id="pending-section" class="pending-section" aria-label="我的返修和返工"><div id="pending" class="section-title"><h2>我的返修 / 返工</h2><span id="pending-total"></span></div><div class="pending-toolbar"><p class="note">当前待处理，包含历史遗留数据 · 不受日期筛选影响</p><div class="pending-tabs" role="group" aria-label="待处理类型"><button data-pending-mode="all" aria-pressed="true">全部</button><button data-pending-mode="repair">仅待返修</button><button data-pending-mode="rework">仅待返工</button></div></div><div id="pending-data" aria-live="polite"></div><p id="pending-updated" class="caption"></p></section>' +
+      '<footer>仅显示当前登录账号 · 缺失值以 — 表示 · v1.8.0</footer></div></section>';
     document.body.appendChild(host);
     $('#close').addEventListener('click', function () {
       if (state.statsBusy) { state.stats = null; state.statsProgress = null; state.updated = ''; }
@@ -923,7 +1021,7 @@
     root.querySelectorAll('[data-preset]').forEach(function (b) { b.addEventListener('click', function () { state.preset = b.dataset.preset; state.range = presetRange(state.preset); render(); }); });
     ['start','end'].forEach(function (key, index) { $('#' + key).addEventListener('change', function () { state.range[index] = this.value; state.preset = ''; render(); }); });
     $('#scope').addEventListener('change', function () { state.workspace = this.value; render(); });
-    $('#search').addEventListener('input', function () { state.filter = this.value; render(); });
+    $('#search').addEventListener('input', function () { state.filter = this.value; state.page = 1; render(); });
     $('#project-ids').addEventListener('input', function () { state.projectIdsText = this.value; render(); });
     $('#field-options').addEventListener('change', function (event) {
       var input = event.target, key = input && input.dataset && input.dataset.field;
@@ -932,28 +1030,51 @@
       renderFieldOptions(); renderStats();
     });
     $('#field-all').addEventListener('click', function () { selectFields(true); });
+    $('#field-default').addEventListener('click', function () { state.fieldSelection[state.role] = defaultFields(state.role); renderFieldOptions(); renderStats(); });
     $('#field-none').addEventListener('click', function () { selectFields(false); });
-    root.addEventListener('keydown', function (event) { if (event.key === 'Escape' && state.opened) $('#close').click(); });
+    $('#quick-search').addEventListener('input', function () { state.quick = this.value; state.page = 1; renderStats(); renderPending(); $('#clear-quick').hidden = !state.quick; });
+    $('#clear-quick').addEventListener('click', function () { state.quick = ''; state.page = 1; $('#quick-search').value = ''; render(); $('#quick-search').focus(); });
+    $('#page-size').addEventListener('change', function () { state.pageSize = Number(this.value); state.page = 1; renderStats(); });
+    $('#prev-page').addEventListener('click', function () { state.page--; renderStats(); });
+    $('#next-page').addEventListener('click', function () { state.page++; renderStats(); });
+    $('#export').addEventListener('click', exportStats);
+    root.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' && ['start', 'end', 'search', 'project-ids'].indexOf(event.target.id) >= 0) { event.preventDefault(); refresh(true); }
+      if (event.key === 'Escape' && state.opened) { if (event.target.id === 'quick-search' && state.quick) { event.preventDefault(); $('#clear-quick').click(); } else $('#close').click(); }
+    });
     ['pointerdown', 'mousedown', 'touchstart'].forEach(function (type) { root.addEventListener(type, function (event) { event.stopPropagation(); }); });
-    root.addEventListener('click', function (event) { event.stopPropagation(); var button = event.target.closest('[data-work]'); if (button) goToWork(button.dataset.project, button.dataset.work, button); });
+    root.addEventListener('click', function (event) {
+      event.stopPropagation();
+      var button = event.target.closest('[data-work]');
+      if (button) goToWork(button.dataset.project, button.dataset.work, button);
+      var sort = event.target.closest('[data-sort]');
+      if (sort) {
+        var oldKey = state.sortKey || (state.role === 'annotator' ? 'submit_total' : 'review_total');
+        state.sortDirection = oldKey === sort.dataset.sort && state.sortDirection === 'desc' ? 'asc' : 'desc';
+        state.sortKey = sort.dataset.sort; state.page = 1; renderStats();
+        var next = root.querySelector('[data-sort="' + state.sortKey + '"]'); if (next) next.focus({preventScroll: true});
+      }
+      var mode = event.target.closest('[data-pending-mode]');
+      if (mode) { state.pendingMode = mode.dataset.pendingMode; render(); }
+      var jump = event.target.closest('[data-jump]');
+      if (jump) { root.querySelectorAll('[data-jump]').forEach(function (b) { b.classList.toggle('current', b === jump); }); $('#' + jump.dataset.jump).scrollIntoView({behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start'}); }
+    });
   }
 
   var CSS = `
-    :host{all:initial;position:fixed;z-index:1000003;top:0;right:0;bottom:0;left:0;display:block;overflow:hidden;pointer-events:none;--ink:#182c46;--muted:#69798e;--line:#e4eaf2;--blue:#1767c7;--soft:#f4f7fb;--red:#b83a48;--amber:#986315;font:13px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--ink)}
-    :host([hidden]){display:none!important}*{box-sizing:border-box}[hidden]{display:none!important}button,input,select{font:inherit}button{cursor:pointer}button:disabled{cursor:default;opacity:.42}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--blue);outline-offset:3px}button{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:6px;padding:6px 12px}button:hover:not(:disabled){background:var(--soft)}
-    #panel{width:100%;height:100%;min-width:0;min-height:0;background:#fff;border:0;border-left:1px solid #dae2ed;display:flex;flex-direction:column;overflow:hidden;pointer-events:auto;animation:drawer-enter .22s ease-out both}
-    @keyframes drawer-enter{from{transform:translateX(-100%)}to{transform:translateX(0)}}@media(prefers-reduced-motion:reduce){#panel{animation:none}}
-    header{display:flex;justify-content:space-between;align-items:flex-start;padding:22px 26px 17px;border-bottom:1px solid var(--line);background:#fafcff}h1,h2,p{margin:0}h1{font-size:24px;line-height:1.35;font-weight:650;letter-spacing:.5px;margin:4px 0}h2{font-size:16px;font-weight:650}.eyebrow{font-size:10px;letter-spacing:1.1px;font-weight:650;color:var(--blue)}#account{color:var(--muted);font-size:12px}#close{border:0;background:transparent;font-size:25px;line-height:1;padding:3px 5px;color:var(--muted)}
-    .scroll{overflow:auto;flex:1;min-height:0;padding:20px 26px 0}.filters{padding-bottom:19px;border-bottom:1px solid var(--line)}.filter-line{display:flex;gap:12px;align-items:center;flex-wrap:wrap}#center-label{color:var(--muted);font-size:12px}.scope-label{margin-left:auto;display:flex;gap:8px;align-items:center;color:var(--muted)}select{max-width:245px;border:1px solid var(--line);border-radius:6px;color:var(--ink);padding:7px 8px;background:#fff}
-    .presets{display:flex;gap:6px;margin:16px 0 12px}.presets button{padding:3px 12px;font-size:12px}.presets button[aria-pressed=true]{background:#edf4fd;border-color:#bcd5f4;color:var(--blue)}.dates{gap:10px}.dates label{display:flex;flex-direction:column;gap:3px;font-size:10px;color:var(--muted)}input{min-width:0;padding:7px 8px;border:1px solid #d4deea;border-radius:5px;background:#fff;color:var(--ink);font-size:12px}input[type=date]{width:146px}.date-separator{margin-top:18px;color:var(--muted)}#query{margin-top:18px}button.primary{background:var(--blue);color:white;border-color:var(--blue)}button.primary:hover{background:#145aaf}#search{margin-left:auto;margin-top:18px;width:184px}
-    .field-picker{margin-top:16px;padding-top:12px;border-top:1px solid var(--line)}.field-toolbar{display:flex;align-items:center;gap:8px;margin-bottom:9px;color:var(--muted);font-size:11px}.field-toolbar>span{font-weight:600;color:var(--ink)}.field-toolbar small{margin-right:auto;font-size:10px}.field-toolbar button{padding:2px 9px;font-size:11px}.field-options{display:flex;flex-wrap:wrap;gap:8px 16px}.field-option{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);cursor:pointer}.field-option input{margin:0;padding:0;width:14px;height:14px;accent-color:var(--blue);cursor:pointer}.field-option:has(input:checked){color:var(--ink)}.project-reference{margin-top:20px;padding:15px;background:#fffcf4;border:1px solid #eee0b9;border-radius:7px}.project-reference h2{font-size:14px;color:#805c16}.project-reference .note{margin:5px 0 10px}.project-reference .metrics{margin-bottom:0}
-    .section-title{display:flex;align-items:baseline;gap:10px;justify-content:space-between;margin-top:21px}.section-title>span{font-size:11px;color:var(--muted)}.caption{font-size:11px;color:var(--muted);margin:3px 0 12px}.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:15px}.metric{padding:13px 12px;background:var(--soft);border-radius:7px;border-top:2px solid #d9e6f6}.metric:first-child{border-top-color:var(--blue)}.metric>span{font-size:11px;color:var(--muted)}.metric>div{display:flex;gap:5px;align-items:baseline;margin-top:5px}.metric strong{font:600 26px/1.35 "SFMono-Regular",Consolas,monospace;letter-spacing:-1px;color:var(--ink)}.metric small{font-size:10px;color:var(--muted)}
-    .table-wrap{max-height:275px;overflow:auto;border:1px solid var(--line);border-radius:7px}table{border-collapse:collapse;width:100%;font-size:12px}th,td{padding:11px 13px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}th{background:#f8fafc;font-size:10px;color:var(--muted);font-weight:500;position:sticky;top:0}td:first-child,th:first-child{text-align:left;min-width:180px}tr:last-child td{border-bottom:0}td:first-child{white-space:normal}.project-name{max-width:300px;display:block;overflow-wrap:anywhere}.project-id{color:#8b99aa;font-size:10px}tbody tr:hover{background:#fbfcfe}.note{font-size:11px;color:var(--muted);margin:9px 0 0;line-height:1.8}.empty{padding:25px 12px;text-align:center;color:var(--muted);background:#fafbfd;border:1px dashed var(--line);border-radius:7px;font-size:12px}
-    .pending-section{border-top:1px solid var(--line);margin-top:22px;padding-bottom:8px}.pending-section .note{margin-bottom:12px}.pending-list{border:1px solid var(--line);border-radius:8px;overflow:hidden}.pending-row{display:grid;grid-template-columns:minmax(0,1fr) 182px 182px;align-items:center;padding:14px 16px;gap:15px;border-bottom:1px solid var(--line)}.pending-row:last-child{border-bottom:0}.pending-project strong{font-size:13px;font-weight:600;overflow-wrap:anywhere;display:block}.pending-project small{font-size:10px;color:var(--muted)}.lane{display:flex;gap:8px;align-items:center;justify-content:space-between}.lane>span{font-size:11px;white-space:nowrap}.lane b{font:600 15px Consolas,monospace;margin-left:2px}.lane button{font-size:11px;padding:4px 9px;white-space:nowrap}.repair{color:var(--red)}.repair button{color:var(--red);border-color:#f0cdd2;background:#fff9fa}.rework{color:var(--amber)}.rework button{color:var(--amber);border-color:#eddcc0;background:#fffcf6}
-    .error,.notice{padding:11px 13px;border-radius:6px;font-size:12px;line-height:1.8;margin:12px 0}.error{color:#a62d3b;background:#fff1f3;border:1px solid #f3cbd1}.notice{color:#805c16;background:#fff9e9;border:1px solid #eee0b9}footer{border-top:1px solid var(--line);padding:14px 0;margin-top:18px;font-size:10px;color:#8b99aa;text-align:right}
-    @media(max-width:760px){header{padding:17px 18px}.scroll{padding:16px 18px 0}.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.scope-label{margin-left:0}.pending-row{grid-template-columns:minmax(0,1fr);gap:7px}.lane{justify-content:flex-start;gap:16px}.lane>span{min-width:85px}#search{margin-left:0;width:180px}.section-title{flex-wrap:wrap;gap:4px}.metric strong{font-size:23px}}@media(max-width:420px){.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}input[type=date]{width:132px}.dates{gap:6px}#search{width:100%;margin-top:7px}.field-options{gap:8px 12px}}
-    .metric .metric-coverage{display:block;margin-top:6px;line-height:1.5;color:#856327}
-    .project-filters{margin-top:12px}.project-filters label{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:11px;flex-wrap:wrap}.project-filters input{width:min(340px,100%)}.query-help{margin-top:6px;font-size:10px;line-height:1.6;color:var(--muted)}
+    :host{all:initial;position:fixed;z-index:1000003;inset:0;display:block;overflow:hidden;pointer-events:none;--ink:#1e293b;--muted:#718096;--line:#e5eaf1;--blue:#2366d1;--soft:#f5f7fa;--red:#c33d4b;--amber:#986315;font:13px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--ink)}
+    :host([hidden]),[hidden]{display:none!important}*{box-sizing:border-box}h1,h2,p{margin:0}button,input,select{font:inherit}button{cursor:pointer;border:1px solid #dce3ed;background:white;color:var(--ink);border-radius:7px;padding:7px 12px;transition:background .12s,border-color .12s}button:disabled{cursor:default;opacity:.4}button:hover:not(:disabled){background:#f0f5fc;border-color:#b8cbea}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,.table-wrap:focus-visible{outline:2px solid var(--blue);outline-offset:3px}input,select{min-width:0;border:1px solid #dce3ed;border-radius:7px;padding:7px 10px;background:#fff;color:var(--ink)}input[type=checkbox]{accent-color:var(--blue)}
+    #panel{height:100%;width:100%;min-width:0;background:#f7f9fc;border-left:1px solid var(--line);display:flex;flex-direction:column;pointer-events:auto;overflow:hidden}header{background:#fff;padding:23px 32px 21px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);flex:none}.eyebrow{font-size:10px;letter-spacing:1.4px;font-weight:700;color:#526178}.eyebrow span{margin:0 7px;color:#bcc7d8}.title-line{display:flex;align-items:center;gap:14px;margin:5px 0}h1{font-size:26px;font-weight:700;letter-spacing:-.7px;line-height:1.4}#account{font-size:12px;color:var(--muted)}#close{font-size:25px;border:0;color:#8793a5;background:transparent;padding:3px 10px}#query-state{display:inline-flex;align-items:center;gap:5px;font-size:10px;color:#527469;background:#eff7f3;border-radius:20px;padding:2px 8px;white-space:nowrap}#query-state:before{content:"";width:5px;height:5px;border-radius:50%;background:#54a489}#query-state[data-status=busy]{background:#eaf1ff;color:#285ec1}#query-state[data-status=busy]:before{background:#4a7adc;animation:pulse 1s infinite}#query-state[data-status=error],#query-state[data-status=changed]{background:#fff1e6;color:#a36329}#query-state[data-status=error]:before,#query-state[data-status=changed]:before{background:#d38c46}@keyframes pulse{50%{opacity:.3}}
+    .scroll{flex:1;min-height:0;overflow:auto;padding:22px 32px 0;scroll-padding-top:20px}.filters{background:white;border:1px solid var(--line);border-radius:11px;padding:15px 18px 10px}.filter-line{display:flex;gap:14px;align-items:center;flex-wrap:wrap}#center-label{font-size:12px;font-weight:600;color:#667790}.scope-label{margin-left:auto;display:flex;gap:8px;align-items:center;color:var(--muted);font-size:11px}.scope-label select{font-size:12px;max-width:240px;padding:5px 8px}.query-row{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-top:14px}.presets{display:flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;flex-shrink:0}.presets button{border:0;border-radius:0;font-size:12px;padding:7px 13px;background:#fff;white-space:nowrap}.presets button[aria-pressed=true]{background:#eaf1fe;color:#215dc3;font-weight:650}.dates{display:flex;align-items:center;gap:8px;color:#9aa5b6}input[type=date]{font-size:12px;width:144px;padding:7px 8px}button.primary{background:var(--blue);border-color:var(--blue);color:white;padding:7px 18px;white-space:nowrap}button.primary:hover{background:#1b55b5}.query-help{font-size:10px;line-height:1.5;color:#8a96a6;margin:7px 0 0}.query-help.changed{color:#a8692c;background:#fff6e8;padding:6px 9px;border-radius:5px}
+    .advanced{margin-top:12px;border-top:1px solid #eef1f5}.advanced summary{padding-top:9px;font-size:11px;color:#6d7b90;cursor:pointer;list-style-position:inside}.advanced summary span{font-size:10px;margin-left:8px;color:#9aa4b2}.advanced-body{padding:12px 0 5px}.project-filters label{display:flex;flex-direction:column;gap:5px;min-width:190px;color:var(--muted);font-size:11px}.project-filters input{width:260px;max-width:100%}.field-picker{margin-top:14px}.field-toolbar{display:flex;align-items:center;gap:7px;margin-bottom:8px;font-size:11px;color:#6a778b}.field-toolbar>span{margin-right:auto}.field-toolbar button{font-size:10px;padding:2px 8px}.field-options{display:flex;flex-wrap:wrap;gap:7px 16px}.field-option{display:flex;align-items:center;gap:5px;font-size:11px;cursor:pointer;color:#5e6e83}.field-option input{margin:0;width:13px;height:13px}
+    .view-nav{display:flex;gap:24px;border-bottom:1px solid #dde5f0;margin:17px 0 16px}.view-nav button{padding:9px 0 10px;border:0;border-radius:0;background:transparent;font-size:13px;font-weight:600;color:#8b97a7;position:relative}.view-nav button.current{color:var(--blue)}.view-nav button.current:after{content:"";position:absolute;bottom:-1px;left:0;right:0;height:2px;background:var(--blue)}.browse-bar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:22px}.browse-bar>small{font-size:10px;color:#9aa5b6}.quick-search{display:flex;align-items:center;background:#fff;border:1px solid #dfe6ef;border-radius:7px;padding:0 10px;gap:6px;width:335px;max-width:100%}.quick-search>span{font-size:22px;color:#8a9bb4;line-height:1}.quick-search input{border:0;outline:0;flex:1;width:100%;background:transparent;padding:8px 3px;font-size:12px}.quick-search:focus-within{border-color:#8caee9;box-shadow:0 0 0 2px #e7effc}.quick-search button{padding:0 3px;border:0;font-size:17px;color:#8b98aa;background:transparent}.section-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}h2{font-size:15px;font-weight:650;letter-spacing:-.2px}.section-title>span{font-size:10px;color:#95a0ae}.caption{font-size:11px;color:#8a96a8;margin-bottom:12px}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:14px 0 24px}.metric{padding:15px 18px;background:white;border:1px solid #e4eaf2;border-radius:9px;min-width:0}.metric:first-child{border-color:#abc7f4;background:#f0f5ff}.metric>span{font-size:11px;color:#7a879b}.metric:first-child>span{color:#5272ab}.metric-value{display:flex;align-items:baseline;gap:5px;margin-top:3px;white-space:nowrap}.metric-value strong{font-size:27px;font-weight:650;letter-spacing:-.6px;font-variant-numeric:tabular-nums;line-height:1.45}.metric:first-child strong{color:#215fc6}.metric-value small{font-size:10px;color:#9ba5b3}.metric .metric-coverage{display:block;font-size:9px;color:#a47942;margin-top:4px}
+    .detail-section{background:#fff;border:1px solid var(--line);border-radius:11px;padding:18px 0 0;overflow:hidden}.detail-section>.section-title,.table-hint{margin-left:18px;margin-right:18px}.detail-heading{display:flex;align-items:center;gap:10px}.detail-heading>span{font-size:10px;color:#8794a6;background:#f1f4f9;border-radius:20px;padding:2px 8px}#export{font-size:11px;padding:5px 11px}.table-hint{font-size:10px;color:#a2acba;margin-top:7px;margin-bottom:13px}.table-wrap{overflow:auto;max-height:510px;overscroll-behavior:contain;scrollbar-width:thin}table{width:100%;border-collapse:separate;border-spacing:0;font-size:12px;white-space:nowrap}thead th{position:sticky;top:0;z-index:2;background:#f6f8fc;border-top:1px solid #e9edf4;border-bottom:1px solid #e6ebf2;padding:0;text-align:right;color:#8490a2;font-size:10px;font-weight:500}thead th button{border:0;border-radius:0;background:transparent;font-size:10px;color:inherit;width:100%;text-align:right;padding:12px 13px;white-space:nowrap}thead th[aria-sort=ascending],thead th[aria-sort=descending]{color:#2565cb;background:#edf3fe}thead th button span{font-size:11px;color:#aebbd0}thead th[aria-sort=ascending] span,thead th[aria-sort=descending] span{color:#2565cb}th:first-child,td:first-child{text-align:left;position:sticky;left:0;min-width:230px;max-width:280px;box-shadow:1px 0 0 #e9edf4}thead th:first-child{z-index:3}thead th:first-child button{text-align:left;padding-left:18px}td{padding:13px;border-bottom:1px solid #edf1f6;text-align:right;background:white;font-variant-numeric:tabular-nums;color:#566579}td:first-child{padding:12px 18px;background:white}tbody tr:hover td{background:#f7faff}.project-name{display:block;font-weight:550;color:#34445c;overflow:hidden;text-overflow:ellipsis;max-width:244px;font-size:11px}.project-id{display:inline-block;font-size:9px;color:#a1adbd;margin:2px 0 0}.row-meter{height:3px;display:block;border-radius:2px;overflow:hidden;background:#eef2f8;width:100%;max-width:130px;margin-top:4px}.row-meter i{display:block;height:100%;background:#9dbcef}.primary-number{font-weight:650;color:#2462c5}.missing{color:#c0c8d3}.accuracy{border-radius:4px;font-size:10px;padding:3px 6px;display:inline-block}.accuracy.good{color:#328064;background:#eaf6f0}.accuracy.medium{color:#a07628;background:#fff6e2}.accuracy.low{color:#bd5263;background:#fceef0}tfoot th,tfoot td{position:sticky;bottom:0;border-top:1px solid #dce6f2;border-bottom:0;background:#f2f6fc;font-weight:650;padding:13px;color:#485d7e;font-size:11px;z-index:1}tfoot th:first-child{z-index:2;padding-left:18px;background:#f2f6fc}tfoot small{font-size:9px;color:#97a4b6;font-weight:400;margin-left:5px}.pagination{display:flex;align-items:center;gap:8px;padding:12px 18px;border-top:1px solid var(--line);font-size:10px;color:#8592a5}.pagination label{display:flex;align-items:center;gap:5px}.pagination select{padding:3px 6px;font-size:10px}.pagination #page-info{margin-left:auto;margin-right:6px}.pagination button{font-size:10px;padding:4px 9px}.metric-notes{margin:11px 0 24px}.metric-notes summary{font-size:10px;color:#8a97aa;cursor:pointer}.metric-notes p{margin:8px 0;background:#fff;border:1px solid var(--line);border-radius:7px;padding:12px 14px;line-height:1.9}.note{font-size:11px;color:#929eb0;line-height:1.8}.empty{padding:36px 18px;display:flex;flex-direction:column;align-items:center;gap:6px;color:#9aa7b9;font-size:11px}.empty strong{font-weight:550;color:#6a7b94;font-size:13px}.empty-symbol{font-size:25px;color:#b8c9e4}.error{color:#b64352;background:#fff0f1;border:1px solid #f2d4d9;border-radius:7px;padding:12px 16px;margin:14px 0;font-size:12px}.notice{color:#9d702a;background:#fff8e8;padding:9px 12px;font-size:11px;border-radius:6px;margin:10px 0}
+    .pending-section{border-top:1px solid #dfe6ef;padding-top:23px;margin-top:8px}.pending-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:10px 0 14px;flex-wrap:wrap}.pending-tabs{display:flex;gap:4px}.pending-tabs button{font-size:10px;padding:4px 9px}.pending-tabs button[aria-pressed=true]{background:#eaf1ff;color:#2862c3;border-color:#cbdcf8}.pending-list{display:grid;gap:8px}.pending-row{display:grid;grid-template-columns:minmax(0,1fr) 190px 190px;align-items:center;gap:18px;background:white;border:1px solid var(--line);border-radius:8px;padding:14px 18px}.pending-project{min-width:0}.pending-project strong{font-size:12px;font-weight:550;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pending-project small{font-size:10px;color:#a1adbd}.lane{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:#96a2b2}.lane b{font-size:14px;font-variant-numeric:tabular-nums;margin-left:3px}.lane.repair b{color:#c38a35}.lane.rework b{color:#c76b7c}.lane button{font-size:10px;padding:4px 8px}.pending-section>.caption{margin-top:10px}.project-reference{border:1px dashed #c9d7eb;border-radius:10px;padding:16px;margin:20px 0}.project-reference .metrics{margin-bottom:0}footer{font-size:9px;color:#aab5c4;text-align:center;padding:24px 0 20px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}#overview,#details,#pending{scroll-margin-top:20px}
+    @media(min-width:1500px){.metrics{grid-template-columns:repeat(7,minmax(0,1fr))}.metric{padding:16px}.metric-value strong{font-size:28px}}
+    @media(max-width:1100px){header{padding:20px 24px}.scroll{padding:20px 24px 0}.pending-row{grid-template-columns:minmax(0,1fr) 155px 155px;gap:12px}.metric{padding:12px 14px}.metric-value strong{font-size:24px}.browse-bar>small{display:none}}
+    @media(max-width:760px){header{padding:17px 18px}.scroll{padding:16px 16px 0}.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.scope-label{margin-left:0}.filters{padding:12px}.query-row{gap:10px}.query-row>.dates{order:2}.query-row>#query{margin-left:auto;order:3}.pending-row{grid-template-columns:minmax(0,1fr);gap:9px}.lane{justify-content:flex-start;gap:20px}.lane>span{min-width:85px}.section-title{flex-wrap:wrap;gap:6px}.project-filters label{width:100%;min-width:0}.project-filters input{width:100%}.eyebrow{font-size:9px}.metrics{gap:7px}.view-nav{gap:20px}.pagination{gap:4px;padding:10px}.pagination button{padding:4px 6px}.detail-section>.section-title,.table-hint{margin-left:12px;margin-right:12px}}
+    @media(max-width:420px){h1{font-size:23px}.title-line{gap:8px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.metric{padding:12px}.metric-value strong{font-size:25px}.metric:last-child:nth-child(odd){grid-column:span 2}.query-row{gap:10px}.presets{width:100%}.presets button{flex:1;padding:6px}.dates{width:100%;justify-content:space-between}input[type=date]{width:calc(50% - 16px)}.query-row>#query{width:100%;margin-left:0;padding:8px}.browse-bar{margin-bottom:17px}.quick-search{width:100%}.scope-label select{max-width:190px}.detail-heading{gap:6px}.detail-heading>span{font-size:9px}#export{font-size:10px;padding:5px 7px}.table-hint{line-height:1.7;font-size:9px}.section-title>span{font-size:9px}#pending-total{width:100%}.view-nav{margin-top:12px;margin-bottom:13px}.view-nav button{font-size:12px}.filter-line{gap:9px}.advanced summary{font-size:10px}.advanced summary span{font-size:9px}}
+    @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
   `;
 
   function syncRoute() {
@@ -966,7 +1087,7 @@
       resetCountAnimations();
       mount(); host.hidden = false;
       configureScope(context);
-      $('#search').value = state.filter;
+      $('#search').value = state.filter; $('#quick-search').value = state.quick; $('#page-size').value = String(state.pageSize);
       render();
       return;
     }
@@ -977,6 +1098,7 @@
     if (!context) { clearCache(); if (host) host.hidden = true; updateMenuState(); return; }
     if (!host || !host.isConnected) mount();
     host.hidden = false;
+    state.sortKey = ''; state.sortDirection = 'desc'; state.quick = ''; state.pendingMode = 'all'; $('#quick-search').value = '';
     state.role = context.role; state.workspace = context.workspace; state.filter = ''; state.projectIdsText = ''; $('#search').value = ''; $('#project-ids').value = '';
     state.opened = !!keepOpened || location.hash === '#insta360-personal';
     configureScope(context);

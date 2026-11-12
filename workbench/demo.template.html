@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Insta360 我的工作台 · 优化版测试页</title>
+<style>
+*{box-sizing:border-box}html,body{height:100%;overflow:hidden}body{margin:0;background:#f7f9fc;font:13px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;color:#334155}.ls-sidebar{position:fixed;inset:0 auto 0 0;width:196px;background:white;border-right:1px solid #e5eaf1;padding:28px 12px 18px;display:flex;flex-direction:column}.brand{font-size:21px;font-weight:800;letter-spacing:-1px;margin:0 10px 4px;color:#17243a}.tag{font-size:9px;color:#9ba6b5;letter-spacing:2px;margin:0 10px 32px}.menu-label{font-size:9px;color:#a7b1c0;letter-spacing:1px;margin:0 14px 10px}.ls-main-menu{list-style:none;margin:0;padding:0}.ls-main-menu li{margin-bottom:5px}.ls-main-menu__item{display:flex;align-items:center;gap:10px;text-decoration:none;color:#7a889c;padding:11px 13px;border-radius:7px;font-size:12px;cursor:pointer}.ls-main-menu__item-icon{font-size:16px;line-height:1;width:18px;text-align:center}.ls-main-menu__item_active{background:#edf3fe;color:#2863ca;font-weight:600}.ls-main-menu__item:hover{background:#f1f5fc}.demo-controls{margin-top:auto;padding:20px 10px 0;border-top:1px solid #edf1f6}.demo-controls label{display:block;font-size:10px;color:#718198;margin:0 0 7px}.demo-controls select{width:100%;border:1px solid #dce4f0;border-radius:6px;background:white;color:#586b86;font:11px inherit;padding:7px 4px}.demo-controls p{font-size:9px;color:#a3adbc;line-height:1.8}.demo-badge{display:inline-block;border-radius:4px;background:#fff6df;color:#a07a30;font-size:9px;padding:3px 7px;margin:20px 0 0}.request-count{font-size:9px;color:#9aa8bd;display:block;margin-top:8px}main{margin:80px 250px;padding:28px;background:white;border-radius:12px;max-width:550px}main h1{font-size:24px}main p{color:#8291a6}button{cursor:pointer}.demo-mobile{display:none}dialog{border:1px solid #dce4ee;border-radius:12px;max-width:440px;padding:26px;z-index:2000000;box-shadow:0 15px 60px #243d6633}dialog::backdrop{background:#162a4444}dialog p{font-size:12px;overflow-wrap:anywhere;color:#6d7e96}dialog button{border:1px solid #dce4ee;background:#2366d1;color:white;border-radius:6px;padding:7px 20px}#demo-target{background:#f2f6fd;padding:12px;border-radius:5px}
+@media(max-width:640px){main{margin:72px 16px;padding:20px}.ls-sidebar{display:none!important}.demo-mobile{display:block;position:fixed;left:0;right:0;bottom:0;padding:8px 10px;background:#fff;border-top:1px solid #d9e3f0;z-index:1000010;display:flex;align-items:center;justify-content:space-between;gap:8px}.demo-mobile select{border:1px solid #dce4ef;background:white;border-radius:5px;font-size:10px;padding:5px;width:130px}.demo-mobile button{font-size:10px;background:#edf3ff;border:0;border-radius:4px;padding:6px 8px;color:#3669bb}#insta360-personal-toolbox{bottom:46px!important}}
+</style></head><body>
+<aside class="ls-sidebar"><div class="brand">INSTA360</div><div class="tag">DATA WORKSPACE</div><div class="menu-label">工作空间</div><nav><ul class="ls-main-menu">
+<li><a class="ls-main-menu__item" href="/annotation/workspaces/109" data-demo-role="annotator"><span class="ls-main-menu__item-icon">▧</span><span class="ls-main-menu__item-label">标注中心</span></a></li>
+<li><a class="ls-main-menu__item" href="/review/workspaces/109" data-demo-role="reviewer"><span class="ls-main-menu__item-icon">☑</span><span class="ls-main-menu__item-label">审核中心</span></a></li>
+</ul></nav><div class="demo-controls"><label for="demo-scenario">测试数据场景</label><select id="demo-scenario"><option value="normal">日常数据 · 8 个项目</option><option value="many">多项目 · 36 个项目</option><option value="sparse">部分字段缺失</option><option value="zero">真实零值</option><option value="empty">暂无数据</option><option value="error">模拟接口失败</option><option value="slow">模拟慢查询</option><option value="account">模拟切换账号</option></select><p>切换场景会重新查询。<br>日期和范围可正常操作。</p><span class="demo-badge">本地测试 · 全部为模拟数据</span><span id="request-count" class="request-count"></span></div></aside>
+<main><h1>个人数据工作台</h1><p>查看本人产量、比较项目并处理返修和返工。点击侧栏“我的标注”或“我的审核”打开。</p></main>
+<div class="demo-mobile"><button id="demo-switch-role">切到审核</button><select id="demo-mobile-scenario" aria-label="测试数据场景（窄屏）"></select><button id="demo-reopen">打开工作台</button></div>
+<dialog id="demo-navigation"><h3>已验证原生处理入口</h3><p>真实平台会进入对应项目的处理页面。本测试页在此展示目标路径。</p><p id="demo-target"></p><form method="dialog"><button>返回工作台</button></form></dialog>
+<script>
+window.__demoRoute='/annotation/workspaces/109';
+window.__demoScenario='normal';
+location.hash='insta360-personal';
+window.__demoRequests=[];
+const projectNames=['固定 FOV · 人物数据','运动场景 · 三景别','室内人物与多景别数据 · 第二轮质量复核','室外道路与车辆','夜景行人跟踪','室内商品展示','运动员连续动作','户外骑行 · 全景视角'];
+function demoProjects(){return Array.from({length:window.__demoScenario==='many'?36:8},(_,i)=>({id:101+i,title:projectNames[i%8]+(i>=8?' · '+(Math.floor(i/8)+1)+'组':''),workspace:109,user_repair_count:i%3===0?i+2:0,user_rework_count:i%4===1?i+1:0,total_regions:(i+1)*24380}));}
+function queryWorkbench(){const root=document.querySelector('#insta360-personal-toolbox')?.shadowRoot;if(root){const panel=root.querySelector('#panel');if(panel.hidden)document.querySelector('[data-insta360-personal-menu="'+(window.__demoRoute.startsWith('/review')?'reviewer':'annotator')+'"] a')?.click();root.querySelector('#query').click();}}
+function switchRole(role){window.__demoRoute=(role==='reviewer'?'/review':'/annotation')+'/workspaces/109';window.dispatchEvent(new PopStateEvent('popstate'));const entry=document.querySelector('[data-insta360-personal-menu="'+role+'"] a');entry?.click();queryWorkbench();document.querySelector('#demo-switch-role').textContent=role==='reviewer'?'切到标注':'切到审核';}
+document.querySelectorAll('[data-demo-role]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();switchRole(a.dataset.demoRole);}));
+function setScenario(value){window.__demoScenario=value;document.querySelector('#demo-scenario').value=value;document.querySelector('#demo-mobile-scenario').value=value;queryWorkbench();}
+document.querySelector('#demo-scenario').onchange=e=>setScenario(e.target.value);
+document.querySelector('#demo-mobile-scenario').innerHTML=document.querySelector('#demo-scenario').innerHTML;
+document.querySelector('#demo-mobile-scenario').onchange=e=>setScenario(e.target.value);
+document.querySelector('#demo-switch-role').onclick=()=>switchRole(window.__demoRoute.startsWith('/review')?'annotator':'reviewer');
+document.querySelector('#demo-reopen').onclick=()=>{const role=window.__demoRoute.startsWith('/review')?'reviewer':'annotator';document.querySelector('[data-insta360-personal-menu="'+role+'"] a')?.click();};
+window.__demoGo=path=>{document.querySelector('#demo-target').textContent=path;document.querySelector('#demo-navigation').showModal();};
+window.fetch=async function(input,options={}){
+  const u=new URL(String(input),'https://demo.local'),scenario=window.__demoScenario;
+  window.__demoRequests.push({path:u.pathname,params:Object.fromEntries(u.searchParams)});
+  document.querySelector('#request-count').textContent='模拟请求 '+window.__demoRequests.length+' 次';
+  await new Promise((resolve,reject)=>{const timer=setTimeout(resolve,scenario==='slow'&&u.pathname!='/api/current-user/whoami'?1300:75);const stop=()=>{clearTimeout(timer);reject(new DOMException('Aborted','AbortError'));};if(options.signal?.aborted)stop();else options.signal?.addEventListener('abort',stop,{once:true});});
+  if(options.signal?.aborted)throw new DOMException('Aborted','AbortError');
+  const reply=(data,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=> 'application/json'},json:async()=>data});
+  const account=scenario==='account'?8:7;
+  if(u.pathname==='/api/current-user/whoami')return reply({id:account,first_name:account===7?'橙子':'测试账号 B',role:{name:'reviewer'}});
+  if(scenario==='error')return reply({error:'模拟接口错误'},503);
+  const projects=scenario==='empty'||scenario==='account'?[]:demoProjects();
+  const ids=(u.searchParams.get('project_id')||u.searchParams.get('ids')||'').split(',').filter(Boolean),title=(u.searchParams.get('title')||'').toLowerCase();
+  const selected=projects.filter(p=>(!ids.length||ids.includes(String(p.id)))&&(!title||p.title.toLowerCase().includes(title)));
+  const page=Number(u.searchParams.get('page')||1),pageSize=6;
+  const paged=(rows,key)=>reply({count:rows.length,page,page_size:pageSize,role:u.searchParams.get('role'),[key]:rows.slice((page-1)*pageSize,page*pageSize)});
+  if(u.pathname==='/api/projects')return paged(selected.map(p=>({...p,user_repair_count:scenario==='zero'?0:p.user_repair_count,user_rework_count:scenario==='zero'?0:p.user_rework_count})),'results');
+  if(u.pathname==='/api/statistics/project-overview')return paged(selected.map(p=>({project_id:p.id,stats:{label__region:p.total_regions}})),'projects_stats');
+  if(u.pathname==='/api/statistics/overview'){
+    const start=new Date((u.searchParams.get('start_date')||'').slice(0,10)+'T12:00:00'),end=new Date((u.searchParams.get('end_date')||'').slice(0,10)+'T12:00:00');
+    const days=Math.max(1,Math.round((end-start)/86400000)+1),reviewer=u.searchParams.get('role')==='reviewer';
+    const yesterday=start.toDateString()!==new Date().toDateString(),factor=days*(yesterday?.76:1);
+    const rows=selected.map((p,i)=>{const amount=Math.round((i===0?236:190-i%8*21)*factor),passed=Math.round(amount*.96),rejected=amount-passed;
+      let stats=reviewer?{review_total:amount,review_passed:passed,review_rejected:rejected,acceptance_rejected:i%4===0?1:0,total_time_min:Number((amount*.53).toFixed(1)),label__region:amount*3}:{submit_total:amount,update_total:Math.round(amount*.11),review_passed:passed,review_rejected_total:rejected,total_time_min:Number((amount*.76).toFixed(1)),label__region:amount*4};
+      if(scenario==='zero')for(const key of Object.keys(stats))stats[key]=0;
+      if(scenario==='sparse'){if(i%2===0)delete stats.label__region;if(i===0)delete stats.submit_total;if(i%3===0)delete stats.review_passed;}
+      return {id:account,project_id:p.id,project_title:p.title,stats};
+    });
+    // 故意包含其他账号的数据：交付脚本必须再次排除。
+    if(rows.length)rows.push({id:99,project_id:101,project_title:'不应显示的其他账号',stats:{submit_total:999999,review_total:999999,label__region:999999}});
+    return paged(rows,'users_stats');
+  }
+  return reply({error:'测试接口未定义'},404);
+};
+</script>
+<script>
+/*__WORKBENCH_SCRIPT__*/
+</script>
+<script>queryWorkbench();</script>
+</body></html>

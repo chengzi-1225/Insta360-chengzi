@@ -1,0 +1,1 @@
+{"private":true,"type":"commonjs","scripts":{"test":"node --test tests/*.test.cjs","build":"node build-demo.cjs","demo":"node tests/demo-server.cjs"}}

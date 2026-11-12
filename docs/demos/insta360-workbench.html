@@ -1,0 +1,1185 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Insta360 我的工作台 · 优化版测试页</title>
+<style>
+*{box-sizing:border-box}html,body{height:100%;overflow:hidden}body{margin:0;background:#f7f9fc;font:13px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;color:#334155}.ls-sidebar{position:fixed;inset:0 auto 0 0;width:196px;background:white;border-right:1px solid #e5eaf1;padding:28px 12px 18px;display:flex;flex-direction:column}.brand{font-size:21px;font-weight:800;letter-spacing:-1px;margin:0 10px 4px;color:#17243a}.tag{font-size:9px;color:#9ba6b5;letter-spacing:2px;margin:0 10px 32px}.menu-label{font-size:9px;color:#a7b1c0;letter-spacing:1px;margin:0 14px 10px}.ls-main-menu{list-style:none;margin:0;padding:0}.ls-main-menu li{margin-bottom:5px}.ls-main-menu__item{display:flex;align-items:center;gap:10px;text-decoration:none;color:#7a889c;padding:11px 13px;border-radius:7px;font-size:12px;cursor:pointer}.ls-main-menu__item-icon{font-size:16px;line-height:1;width:18px;text-align:center}.ls-main-menu__item_active{background:#edf3fe;color:#2863ca;font-weight:600}.ls-main-menu__item:hover{background:#f1f5fc}.demo-controls{margin-top:auto;padding:20px 10px 0;border-top:1px solid #edf1f6}.demo-controls label{display:block;font-size:10px;color:#718198;margin:0 0 7px}.demo-controls select{width:100%;border:1px solid #dce4f0;border-radius:6px;background:white;color:#586b86;font:11px inherit;padding:7px 4px}.demo-controls p{font-size:9px;color:#a3adbc;line-height:1.8}.demo-badge{display:inline-block;border-radius:4px;background:#fff6df;color:#a07a30;font-size:9px;padding:3px 7px;margin:20px 0 0}.request-count{font-size:9px;color:#9aa8bd;display:block;margin-top:8px}main{margin:80px 250px;padding:28px;background:white;border-radius:12px;max-width:550px}main h1{font-size:24px}main p{color:#8291a6}button{cursor:pointer}.demo-mobile{display:none}dialog{border:1px solid #dce4ee;border-radius:12px;max-width:440px;padding:26px;z-index:2000000;box-shadow:0 15px 60px #243d6633}dialog::backdrop{background:#162a4444}dialog p{font-size:12px;overflow-wrap:anywhere;color:#6d7e96}dialog button{border:1px solid #dce4ee;background:#2366d1;color:white;border-radius:6px;padding:7px 20px}#demo-target{background:#f2f6fd;padding:12px;border-radius:5px}
+@media(max-width:640px){main{margin:72px 16px;padding:20px}.ls-sidebar{display:none!important}.demo-mobile{display:block;position:fixed;left:0;right:0;bottom:0;padding:8px 10px;background:#fff;border-top:1px solid #d9e3f0;z-index:1000010;display:flex;align-items:center;justify-content:space-between;gap:8px}.demo-mobile select{border:1px solid #dce4ef;background:white;border-radius:5px;font-size:10px;padding:5px;width:130px}.demo-mobile button{font-size:10px;background:#edf3ff;border:0;border-radius:4px;padding:6px 8px;color:#3669bb}#insta360-personal-toolbox{bottom:46px!important}}
+</style></head><body>
+<aside class="ls-sidebar"><div class="brand">INSTA360</div><div class="tag">DATA WORKSPACE</div><div class="menu-label">工作空间</div><nav><ul class="ls-main-menu">
+<li><a class="ls-main-menu__item" href="/annotation/workspaces/109" data-demo-role="annotator"><span class="ls-main-menu__item-icon">▧</span><span class="ls-main-menu__item-label">标注中心</span></a></li>
+<li><a class="ls-main-menu__item" href="/review/workspaces/109" data-demo-role="reviewer"><span class="ls-main-menu__item-icon">☑</span><span class="ls-main-menu__item-label">审核中心</span></a></li>
+</ul></nav><div class="demo-controls"><label for="demo-scenario">测试数据场景</label><select id="demo-scenario"><option value="normal">日常数据 · 8 个项目</option><option value="many">多项目 · 36 个项目</option><option value="sparse">部分字段缺失</option><option value="zero">真实零值</option><option value="empty">暂无数据</option><option value="error">模拟接口失败</option><option value="slow">模拟慢查询</option><option value="account">模拟切换账号</option></select><p>切换场景会重新查询。<br>日期和范围可正常操作。</p><span class="demo-badge">本地测试 · 全部为模拟数据</span><span id="request-count" class="request-count"></span></div></aside>
+<main><h1>个人数据工作台</h1><p>查看本人产量、比较项目并处理返修和返工。点击侧栏“我的标注”或“我的审核”打开。</p></main>
+<div class="demo-mobile"><button id="demo-switch-role">切到审核</button><select id="demo-mobile-scenario" aria-label="测试数据场景（窄屏）"></select><button id="demo-reopen">打开工作台</button></div>
+<dialog id="demo-navigation"><h3>已验证原生处理入口</h3><p>真实平台会进入对应项目的处理页面。本测试页在此展示目标路径。</p><p id="demo-target"></p><form method="dialog"><button>返回工作台</button></form></dialog>
+<script>
+window.__demoRoute='/annotation/workspaces/109';
+window.__demoScenario='normal';
+location.hash='insta360-personal';
+window.__demoRequests=[];
+const projectNames=['固定 FOV · 人物数据','运动场景 · 三景别','室内人物与多景别数据 · 第二轮质量复核','室外道路与车辆','夜景行人跟踪','室内商品展示','运动员连续动作','户外骑行 · 全景视角'];
+function demoProjects(){return Array.from({length:window.__demoScenario==='many'?36:8},(_,i)=>({id:101+i,title:projectNames[i%8]+(i>=8?' · '+(Math.floor(i/8)+1)+'组':''),workspace:109,user_repair_count:i%3===0?i+2:0,user_rework_count:i%4===1?i+1:0,total_regions:(i+1)*24380}));}
+function queryWorkbench(){const root=document.querySelector('#insta360-personal-toolbox')?.shadowRoot;if(root){const panel=root.querySelector('#panel');if(panel.hidden)document.querySelector('[data-insta360-personal-menu="'+(window.__demoRoute.startsWith('/review')?'reviewer':'annotator')+'"] a')?.click();root.querySelector('#query').click();}}
+function switchRole(role){window.__demoRoute=(role==='reviewer'?'/review':'/annotation')+'/workspaces/109';window.dispatchEvent(new PopStateEvent('popstate'));const entry=document.querySelector('[data-insta360-personal-menu="'+role+'"] a');entry?.click();queryWorkbench();document.querySelector('#demo-switch-role').textContent=role==='reviewer'?'切到标注':'切到审核';}
+document.querySelectorAll('[data-demo-role]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();switchRole(a.dataset.demoRole);}));
+function setScenario(value){window.__demoScenario=value;document.querySelector('#demo-scenario').value=value;document.querySelector('#demo-mobile-scenario').value=value;queryWorkbench();}
+document.querySelector('#demo-scenario').onchange=e=>setScenario(e.target.value);
+document.querySelector('#demo-mobile-scenario').innerHTML=document.querySelector('#demo-scenario').innerHTML;
+document.querySelector('#demo-mobile-scenario').onchange=e=>setScenario(e.target.value);
+document.querySelector('#demo-switch-role').onclick=()=>switchRole(window.__demoRoute.startsWith('/review')?'annotator':'reviewer');
+document.querySelector('#demo-reopen').onclick=()=>{const role=window.__demoRoute.startsWith('/review')?'reviewer':'annotator';document.querySelector('[data-insta360-personal-menu="'+role+'"] a')?.click();};
+window.__demoGo=path=>{document.querySelector('#demo-target').textContent=path;document.querySelector('#demo-navigation').showModal();};
+window.fetch=async function(input,options={}){
+  const u=new URL(String(input),'https://demo.local'),scenario=window.__demoScenario;
+  window.__demoRequests.push({path:u.pathname,params:Object.fromEntries(u.searchParams)});
+  document.querySelector('#request-count').textContent='模拟请求 '+window.__demoRequests.length+' 次';
+  await new Promise((resolve,reject)=>{const timer=setTimeout(resolve,scenario==='slow'&&u.pathname!='/api/current-user/whoami'?1300:75);const stop=()=>{clearTimeout(timer);reject(new DOMException('Aborted','AbortError'));};if(options.signal?.aborted)stop();else options.signal?.addEventListener('abort',stop,{once:true});});
+  if(options.signal?.aborted)throw new DOMException('Aborted','AbortError');
+  const reply=(data,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=> 'application/json'},json:async()=>data});
+  const account=scenario==='account'?8:7;
+  if(u.pathname==='/api/current-user/whoami')return reply({id:account,first_name:account===7?'橙子':'测试账号 B',role:{name:'reviewer'}});
+  if(scenario==='error')return reply({error:'模拟接口错误'},503);
+  const projects=scenario==='empty'||scenario==='account'?[]:demoProjects();
+  const ids=(u.searchParams.get('project_id')||u.searchParams.get('ids')||'').split(',').filter(Boolean),title=(u.searchParams.get('title')||'').toLowerCase();
+  const selected=projects.filter(p=>(!ids.length||ids.includes(String(p.id)))&&(!title||p.title.toLowerCase().includes(title)));
+  const page=Number(u.searchParams.get('page')||1),pageSize=6;
+  const paged=(rows,key)=>reply({count:rows.length,page,page_size:pageSize,role:u.searchParams.get('role'),[key]:rows.slice((page-1)*pageSize,page*pageSize)});
+  if(u.pathname==='/api/projects')return paged(selected.map(p=>({...p,user_repair_count:scenario==='zero'?0:p.user_repair_count,user_rework_count:scenario==='zero'?0:p.user_rework_count})),'results');
+  if(u.pathname==='/api/statistics/project-overview')return paged(selected.map(p=>({project_id:p.id,stats:{label__region:p.total_regions}})),'projects_stats');
+  if(u.pathname==='/api/statistics/overview'){
+    const start=new Date((u.searchParams.get('start_date')||'').slice(0,10)+'T12:00:00'),end=new Date((u.searchParams.get('end_date')||'').slice(0,10)+'T12:00:00');
+    const days=Math.max(1,Math.round((end-start)/86400000)+1),reviewer=u.searchParams.get('role')==='reviewer';
+    const yesterday=start.toDateString()!==new Date().toDateString(),factor=days*(yesterday?.76:1);
+    const rows=selected.map((p,i)=>{const amount=Math.round((i===0?236:190-i%8*21)*factor),passed=Math.round(amount*.96),rejected=amount-passed;
+      let stats=reviewer?{review_total:amount,review_passed:passed,review_rejected:rejected,acceptance_rejected:i%4===0?1:0,total_time_min:Number((amount*.53).toFixed(1)),label__region:amount*3}:{submit_total:amount,update_total:Math.round(amount*.11),review_passed:passed,review_rejected_total:rejected,total_time_min:Number((amount*.76).toFixed(1)),label__region:amount*4};
+      if(scenario==='zero')for(const key of Object.keys(stats))stats[key]=0;
+      if(scenario==='sparse'){if(i%2===0)delete stats.label__region;if(i===0)delete stats.submit_total;if(i%3===0)delete stats.review_passed;}
+      return {id:account,project_id:p.id,project_title:p.title,stats};
+    });
+    // 故意包含其他账号的数据：交付脚本必须再次排除。
+    if(rows.length)rows.push({id:99,project_id:101,project_title:'不应显示的其他账号',stats:{submit_total:999999,review_total:999999,label__region:999999}});
+    return paged(rows,'users_stats');
+  }
+  return reply({error:'测试接口未定义'},404);
+};
+</script>
+<script>
+// ==UserScript==
+// @name         Insta360 我的工作台（标注员 / 审核员）
+// @namespace    https://label.insta360.com/personal-toolbox/
+// @version      1.8.0
+// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360我的工作台.user.js
+// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360我的工作台.user.js
+// @description  个人数据工作台：总览、项目搜索排序、分页合计、CSV 导出与返修返工快捷入口
+// @author       chengzi / Codex
+// @match        *://label.insta360.com/*
+// @run-at       document-idle
+// @grant        none
+// @noframes
+// ==/UserScript==
+
+(function () {
+  'use strict';
+
+  // 数据函数同时供本地 Node 行为测试使用，不依赖站点全局变量或用户名缓存。
+  function id(value) {
+    if (value && typeof value === 'object') value = value.id;
+    return value != null && /^\d+$/.test(String(value)) ? String(value) : '';
+  }
+
+  function identity(who) {
+    if (!who || !id(who.id)) throw new Error('无法确认当前登录账号，请重新登录后刷新');
+    return {
+      id: id(who.id),
+      name: (String(who.first_name || '') + String(who.last_name || '')).trim() || who.username || '当前用户',
+      role: typeof who.role === 'string' ? who.role : ((who.role && who.role.name) || ''),
+    };
+  }
+
+  function selfRows(rows, userId) {
+    if (!id(userId)) throw new Error('无法确认当前登录账号');
+    return rows.filter(function (row) { return row && id(row.id) === id(userId); });
+  }
+
+  function number(value) {
+    if (value == null || value === '' || typeof value === 'boolean') return null;
+    var result = Number(value);
+    return Number.isFinite(result) && result >= 0 ? result : null;
+  }
+
+  function summarizeMetric(rows, key) {
+    var sum = 0, available = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var n = number(rows[i].stats && rows[i].stats[key]);
+      if (n == null) continue;
+      sum += n;
+      available++;
+    }
+    return {value: rows.length && !available ? null : sum, available: available, missing: rows.length - available};
+  }
+
+  function sumMetric(rows, key) {
+    return summarizeMetric(rows, key).value;
+  }
+
+  function accuracySummary(rows) {
+    var passed = 0, rejected = 0, available = 0;
+    rows.forEach(function (row) {
+      var p = number(row.stats && row.stats.review_passed), r = number(row.stats && row.stats.review_rejected_total);
+      if (p == null || r == null) return;
+      passed += p; rejected += r; available++;
+    });
+    return {value: passed + rejected > 0 ? passed / (passed + rejected) * 100 : null, available: available, missing: rows.length - available};
+  }
+
+  function parseProjectIds(value) {
+    var parts = String(value || '').trim().split(/[\s,，;；]+/).filter(Boolean);
+    if (parts.some(function (part) { return !id(part); })) throw new Error('项目 ID 只能填写数字，多个 ID 用逗号或空格分隔');
+    return Array.from(new Set(parts)).sort();
+  }
+
+  function dateString(date) {
+    return [date.getFullYear(), String(date.getMonth() + 1).padStart(2, '0'), String(date.getDate()).padStart(2, '0')].join('-');
+  }
+
+  function validDate(value) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(value || '')) return false;
+    var date = new Date(value + 'T12:00:00');
+    return Number.isFinite(date.getTime()) && dateString(date) === value;
+  }
+
+  function presetRange(preset, now) {
+    now = now || new Date();
+    var from = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 12);
+    var to = new Date(from);
+    if (preset === 'yesterday') { from.setDate(from.getDate() - 1); to = new Date(from); }
+    else if (preset === 'week') from.setDate(from.getDate() - 6);
+    else if (preset === 'month') from.setDate(1);
+    return [dateString(from), dateString(to)];
+  }
+
+  function activeRange(preset, currentRange, now) {
+    return preset ? presetRange(preset, now) : currentRange.slice();
+  }
+
+  function statsParams(userId, role, workspace, start, end) {
+    if (!id(userId)) throw new Error('无法确认当前登录账号');
+    if (!validDate(start) || !validDate(end) || start > end) throw new Error('请检查日期：开始日期不能晚于结束日期');
+    if (role !== 'annotator' && role !== 'reviewer') throw new Error('未知统计角色');
+    var params = {user_id: id(userId), role: role, start_date: start + ' 00:00:00', end_date: end + ' 23:59:59'};
+    if (workspace != null && workspace !== 'all') {
+      if (!id(workspace)) throw new Error('工作区无效');
+      params.workspace_id = id(workspace);
+    }
+    return params;
+  }
+
+  function personalProjects(rows, workspace) {
+    var items = [], unknown = 0;
+    rows.forEach(function (p) {
+      var ws = id(p.workspace);
+      if (workspace && workspace !== 'all' && ws !== String(workspace)) throw new Error('项目工作区与筛选范围不一致，请刷新');
+      if (!id(p.id)) throw new Error('项目数据缺少 ID');
+      var repair = number(p.user_repair_count), rework = number(p.user_rework_count);
+      if (repair == null || rework == null) unknown++;
+      if (!(repair > 0 || rework > 0)) return;
+      items.push({id: id(p.id), workspace: ws || workspace || 'all', name: p.title || ('项目 #' + p.id), repair: repair, rework: rework});
+    });
+    items.sort(function (a, b) { return ((b.repair || 0) + (b.rework || 0)) - ((a.repair || 0) + (a.rework || 0)); });
+    return {items: items, unknown: unknown, scanned: rows.length};
+  }
+
+  function projectRegionTotals(body) {
+    var totals = Object.create(null);
+    var rows = Array.isArray(body) ? body : body && Array.isArray(body.projects_stats) ? body.projects_stats : [];
+    rows.forEach(function (row) {
+      var projectId = id(row && (row.project_id != null ? row.project_id : row.id));
+      if (!projectId) return;
+      var stats = row.stats || {};
+      // 平台“regions数”的真实字段为 label__region；兼容旧版 total_regions。
+      totals[projectId] = number(stats.label__region != null ? stats.label__region : stats.total_regions);
+    });
+    return totals;
+  }
+
+  function sumRegionMetric(rows, totals) {
+    if (!totals) return null;
+    var sum = 0;
+    for (var i = 0; i < rows.length; i++) {
+      var n = number(totals[id(rows[i] && rows[i].project_id)]);
+      if (n == null) return null;
+      sum += n;
+    }
+    return sum;
+  }
+
+  function workUrl(project, mode) {
+    if (!id(project.id) || (!id(project.workspace) && project.workspace !== 'all') || !/^(repair|rework)$/.test(mode)) throw new Error('返修/返工入口无效，请刷新');
+    return '/annotation/workspaces/' + encodeURIComponent(project.workspace) + '/projects/' + id(project.id) + '/data?labeling=1&' + mode + '=1';
+  }
+
+  function flattenPages(pageRows) {
+    var result = [];
+    Array.from(pageRows.keys()).sort(function (a, b) { return a - b; }).forEach(function (page) {
+      result = result.concat(pageRows.get(page) || []);
+    });
+    return result;
+  }
+
+  function pageOrder(totalPages, priorityPage) {
+    var order = [1], priority = Number(priorityPage);
+    if (Number.isInteger(priority) && priority > 1 && priority <= totalPages) order.push(priority);
+    for (var page = 2; page <= totalPages; page++) if (order.indexOf(page) < 0) order.push(page);
+    return order;
+  }
+
+  // 不依赖请求的 page_size：服务器可能限流到较小页。计数未取完、重复页均不能当成成功。
+  // onPage 用于让调用方在每一页返回时先显示部分数据；最终返回仍按页码顺序排列。
+  async function loadPages(fetchPage, rowsKey, rowKey, options) {
+    options = options || {};
+    var requestedConcurrency = Number(options.concurrency);
+    var concurrency = Number.isInteger(requestedConcurrency) ? Math.max(1, Math.min(3, requestedConcurrency)) : 1;
+    var seen = new Set(), pageRows = new Map(), received = 0, expected = null;
+    function rowsFrom(body) {
+      if (!body || !Array.isArray(body[rowsKey])) throw new Error('返回数据格式不支持，请联系脚本维护者');
+      var count = number(body.count);
+      if (count == null || !Number.isInteger(count)) throw new Error('返回数据格式缺少分页总数');
+      if (expected == null) expected = count;
+      if (expected !== count) throw new Error('查询期间数据数量发生变化，请刷新重试');
+      return body[rowsKey];
+    }
+    function accept(page, rows, totalPages) {
+      if (!rows.length && received < expected) throw new Error('读取不完整：未取得所有分页，请刷新重试');
+      rows.forEach(function (row) {
+        var key = rowKey(row);
+        if (!key || seen.has(key)) throw new Error('读取到重复分页或无效记录，请刷新重试');
+        seen.add(key);
+        received++;
+      });
+      if (received > expected) throw new Error('分页数量不一致，请刷新重试');
+      pageRows.set(page, rows);
+      if (typeof options.onPage === 'function') options.onPage(page, rows, {received: received, expected: expected, totalPages: totalPages, receivedPages: pageRows.size});
+    }
+    var priority = Number(options.priorityPage), firstPage = Number.isInteger(priority) && priority > 1 && priority <= 500 ? priority : 1;
+    var firstBody;
+    try { firstBody = await fetchPage(firstPage); }
+    catch (error) {
+      if (firstPage === 1 || !error || (error.status !== 400 && error.status !== 404)) throw error;
+      firstPage = 1; firstBody = await fetchPage(1);
+    }
+    // 旧包已失效、服务端未提供页大小或忽略页码时，从第一页重新建立分页元数据。
+    if (firstPage > 1 && (Array.isArray(firstBody && firstBody[rowsKey]) && !firstBody[rowsKey].length || !number(firstBody && firstBody.page_size) || firstBody.page != null && Number(firstBody.page) !== firstPage)) {
+      firstPage = 1; firstBody = await fetchPage(1);
+    }
+    var firstRows = rowsFrom(firstBody);
+    if (expected === 0 && firstRows.length === 0) { accept(1, firstRows, 1); return []; }
+    var pageSize = number(firstBody.page_size);
+    if (!pageSize || !Number.isInteger(pageSize)) pageSize = firstRows.length;
+    if (!pageSize || !Number.isInteger(pageSize)) throw new Error('读取不完整：未取得有效分页大小，请刷新重试');
+    var totalPages = Math.ceil(expected / pageSize);
+    if (totalPages > 500) throw new Error('分页数量过多，未完整读取，请缩小查询范围');
+    if (firstPage > totalPages) throw new Error('查询期间分页数量发生变化，请刷新重试');
+    accept(firstPage, firstRows, totalPages);
+    if (received === expected) return firstRows;
+    var order = pageOrder(totalPages, options.priorityPage).filter(function (page) { return page !== firstPage; }), cursor = 0, inFlight = new Map();
+    function requestPage(pageNumber) {
+      return Promise.resolve(fetchPage(pageNumber)).then(function (body) { return {page: pageNumber, body: body}; });
+    }
+    function launch() {
+      while (cursor < order.length && inFlight.size < concurrency) {
+        var page = order[cursor++];
+        inFlight.set(page, requestPage(page));
+      }
+    }
+    launch();
+    while (inFlight.size) {
+      var settled = await Promise.race(Array.from(inFlight.values()));
+      inFlight.delete(settled.page);
+      var rows = rowsFrom(settled.body);
+      accept(settled.page, rows, totalPages);
+      launch();
+    }
+    if (received !== expected) throw new Error('读取不完整：未取得所有分页，请刷新重试');
+    return flattenPages(pageRows);
+  }
+
+  function routeContext(path) {
+    var match = path.replace(/\/+$/, '').match(/^\/(annotation|review)(?:\/workspaces\/(all|\d+))?$/);
+    if (match) return {workspace: match[2] || 'all', role: match[1] === 'review' ? 'reviewer' : 'annotator'};
+    match = path.match(/^\/workspaces\/(all|\d+)\/projects\/?$/);
+    return match ? {workspace: match[1], role: 'annotator'} : null;
+  }
+
+  function rowMetric(row, key, totals) {
+    if (key === 'project_title') return String(row.project_title || ('项目 #' + row.project_id));
+    if (key === 'accuracy') return accuracySummary([row]).value;
+    if (key === 'project_regions') return number(totals && totals[id(row.project_id)]);
+    return number(row.stats && row.stats[key === 'regions' ? 'label__region' : key]);
+  }
+
+  function browseRows(rows, query, key, direction, totals) {
+    var needle = String(query || '').trim().toLocaleLowerCase();
+    return rows.filter(function (row) {
+      return !needle || (String(row.project_title || '') + ' #' + row.project_id).toLocaleLowerCase().includes(needle);
+    }).slice().sort(function (a, b) {
+      var x = rowMetric(a, key, totals), y = rowMetric(b, key, totals);
+      if (x == null && y == null) return Number(a.project_id) - Number(b.project_id);
+      if (x == null) return 1;
+      if (y == null) return -1;
+      var order = typeof x === 'string' ? x.localeCompare(y, 'zh-CN', {numeric: true}) : x - y;
+      return order ? order * (direction === 'asc' ? 1 : -1) : Number(a.project_id) - Number(b.project_id);
+    });
+  }
+
+  function csvText(rows) {
+    return '\ufeff' + rows.map(function (row) {
+      return row.map(function (value) {
+        var cell = value == null ? '' : String(value);
+        if (typeof value === 'string' && /^[\s]*[=+@\-\t\r]/.test(cell)) cell = "'" + cell;
+        return '"' + cell.replace(/"/g, '""') + '"';
+      }).join(',');
+    }).join('\r\n');
+  }
+
+  var core = {browseRows: browseRows, rowMetric: rowMetric, csvText: csvText, identity: identity, selfRows: selfRows, sumMetric: sumMetric, summarizeMetric: summarizeMetric, accuracySummary: accuracySummary, parseProjectIds: parseProjectIds, sumRegionMetric: sumRegionMetric, statsParams: statsParams, personalProjects: personalProjects, projectRegionTotals: projectRegionTotals, workUrl: workUrl, pageOrder: pageOrder, loadPages: loadPages, presetRange: presetRange, activeRange: activeRange, routeContext: routeContext};
+  if (typeof module === 'object' && module.exports) module.exports = core;
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  if (window.__INSTA360_PERSONAL_TOOLBOX__) return;
+  window.__INSTA360_PERSONAL_TOOLBOX__ = {version: '1.8.0'};
+
+  var METRICS = {
+    annotator: [
+      ['submit_total', '新标注提交', '条', '新提交的标注，不包含返修和返工'],
+      ['update_total', '返修 / 返工更新', '条', '按平台统计的已更新任务数；与新标注分开核对'],
+      ['review_passed', '标注审核通过', '条', '选定时间内被审核通过的标注'],
+      ['review_rejected_total', '标注被驳回', '次', '选定时间内被审核驳回的事件次数'],
+      ['accuracy', '标注准确率', '%', '审核通过 /（审核通过 + 审核驳回）× 100%；跨项目先合计数量，分母为 0 时显示“—”'],
+      ['total_time_min', '有效耗时', '分钟', '使用平台统计的有效耗时，已扣除挂机'],
+      ['regions', '本人 regions 数', '个', '当前账号在所选日期内的区域数，使用平台个人标注统计'],
+      ['project_regions', '项目 regions 总数', '个', '项目全部成员的累计区域总数，不受个人日期筛选影响，仅作参考'],
+    ],
+    reviewer: [
+      ['review_total', '已审核', '次', '通过与驳回的审核动作次数；同一任务重复审核可多次计数'],
+      ['review_passed', '审核通过', '次', '审核为通过的动作次数'],
+      ['review_rejected', '审核驳回', '次', '审核为驳回的动作次数'],
+      ['acceptance_rejected', '验收驳回', '次', '本人审核通过后被验收驳回的次数'],
+      ['total_time_min', '有效耗时', '分钟', '使用平台统计的有效耗时，已扣除挂机'],
+      ['regions', '本人 regions 数', '个', '当前账号在所选日期内的区域数，使用平台个人审核统计'],
+      ['project_regions', '项目 regions 总数', '个', '项目全部成员的累计区域总数，不受个人日期筛选影响，仅作参考'],
+    ],
+  };
+
+  var state = {
+    quick: '', sortKey: '', sortDirection: 'desc', page: 1, pageSize: 10, pendingMode: 'all',
+    context: null, role: 'annotator', workspace: 'all', range: presetRange('today'), preset: 'today',
+    user: null, stats: null, regions: null, pending: null, statsProgress: null, pendingProgress: null, error: '', statsError: '', regionError: '', pendingError: '',
+    busy: false, statsBusy: false, regionBusy: false, pendingBusy: false, opened: false, filter: '', projectIdsText: '', queryScope: null, queryRange: null, queryWorkspace: null, discarded: 0, updated: '', regionUpdated: '', pendingUpdated: '',
+    fieldSelection: {annotator: defaultFields('annotator'), reviewer: defaultFields('reviewer')},
+  };
+  function defaultFields(role) { return new Set(METRICS[role].filter(function (metric) { return metric[0] !== 'project_regions'; }).map(function (metric) { return metric[0]; })); }
+  var host, root, controller, runNumber = 0, lastPath = '';
+  var countFrames = Object.create(null), countCurrent = Object.create(null);
+  var menuItems = new Map();
+  var drawerBounds = {left: 0, top: 0};
+  var pinnedSidebar = null, sidebarStyle = null, sidebarObserver = null;
+  var sidebarSession = false, sidebarOpenedByScript = false, lastSidebarAttempt = 0;
+  function roleTitle(role) { return role === 'reviewer' ? '我的审核' : '我的标注'; }
+
+  function nativeSidebar() {
+    var menu = document.querySelector('.ls-main-menu');
+    return menu ? (menu.closest('.ls-sidebar') || menu) : document.querySelector('.ls-sidebar_floating');
+  }
+
+  function shouldPinSidebar() { return !!(state.context && state.opened && window.innerWidth > 640); }
+
+  function syncSidebarPin() {
+    if (!shouldPinSidebar()) {
+      if (!sidebarSession) return null;
+      if (sidebarObserver) sidebarObserver.disconnect();
+      if (pinnedSidebar) pinnedSidebar.removeAttribute('data-insta360-personal-sidebar');
+      if (sidebarStyle) sidebarStyle.remove();
+      var restoreClosed = sidebarOpenedByScript, trigger = document.querySelector('.main-menu-trigger');
+      pinnedSidebar = null; sidebarStyle = null; sidebarSession = false; sidebarOpenedByScript = false; lastSidebarAttempt = 0;
+      if (restoreClosed && nativeSidebar() && trigger) trigger.click();
+      return null;
+    }
+    var sidebar = nativeSidebar();
+    if (!sidebarSession) {
+      sidebarSession = true; sidebarOpenedByScript = !sidebar;
+      if (!sidebarObserver && typeof MutationObserver === 'function') {
+        sidebarObserver = new MutationObserver(function () {
+          if (!shouldPinSidebar()) return;
+          var current = nativeSidebar();
+          if (!current || current !== pinnedSidebar || !menuItems.size) { syncMenu(); syncDrawerLayout(); }
+        });
+      }
+      if (sidebarObserver) sidebarObserver.observe(document.body, {childList: true, subtree: true});
+    }
+    if (!sidebar && Date.now() - lastSidebarAttempt >= 500) {
+      var opener = document.querySelector('.main-menu-trigger');
+      if (opener) { lastSidebarAttempt = Date.now(); opener.click(); sidebar = nativeSidebar(); }
+    }
+    if (!sidebar) return null;
+    lastSidebarAttempt = 0;
+    if (pinnedSidebar && pinnedSidebar !== sidebar) pinnedSidebar.removeAttribute('data-insta360-personal-sidebar');
+    pinnedSidebar = sidebar;
+    var bounds = sidebar.getBoundingClientRect();
+    if (!(bounds.width > 0)) return sidebar;
+    var left = Math.max(0, Math.floor(bounds.left)), top = Math.max(0, Math.min(Math.floor(bounds.top), window.innerHeight - 240));
+    var width = Math.min(Math.ceil(bounds.width), window.innerWidth - left - 320);
+    sidebar.setAttribute('data-insta360-personal-sidebar', 'pinned');
+    if (!sidebarStyle || !sidebarStyle.isConnected) {
+      sidebarStyle = document.createElement('style'); sidebarStyle.id = 'insta360-personal-sidebar-style'; document.body.appendChild(sidebarStyle);
+    }
+    var rules = '[data-insta360-personal-sidebar="pinned"]{position:fixed!important;left:' + left + 'px!important;top:' + top + 'px!important;bottom:0!important;width:' + width + 'px!important;height:auto!important;max-height:none!important;display:flex!important;flex-direction:column!important;visibility:visible!important;opacity:1!important;transform:none!important;transition:none!important;pointer-events:auto!important;z-index:1000004!important;box-shadow:none!important;overflow-y:auto;overscroll-behavior:contain}';
+    if (sidebarStyle.textContent !== rules) sidebarStyle.textContent = rules;
+    return sidebar;
+  }
+
+  function syncDrawerLayout() {
+    var pinned = syncSidebarPin();
+    if (!host || !state.opened || !state.context) return;
+    var width = window.innerWidth, height = window.innerHeight;
+    if (width > 640) {
+      if (pinned) {
+        var pinnedBounds = pinned.getBoundingClientRect();
+        if (pinnedBounds.width > 0 && pinnedBounds.right > 0 && pinnedBounds.right <= width - 320) {
+          drawerBounds.left = Math.ceil(pinnedBounds.right); drawerBounds.top = Math.max(0, Math.floor(pinnedBounds.top));
+        }
+      }
+      menuItems.forEach(function (item, center) {
+        if (pinned) return;
+        if (item.role !== state.context.role || !center.isConnected) return;
+        var row = center.closest('li');
+        var menu = center.closest('aside') || center.closest('.ls-main-menu') || center.closest('nav, [role="navigation"]') || (row && row.parentElement) || center;
+        var bounds = menu.getBoundingClientRect();
+        if (!(bounds.width > 0 && bounds.right > 0 && bounds.right <= Math.min(480, width - 320))) return;
+        drawerBounds.left = Math.ceil(bounds.right);
+        drawerBounds.top = Math.max(0, Math.floor(bounds.top));
+      });
+    }
+    // 原生侧栏短暂移除时沿用上次边界；手机上使用完整视口。
+    host.style.left = (width <= 640 ? 0 : Math.min(drawerBounds.left, Math.max(0, width - 320))) + 'px';
+    host.style.top = (width <= 640 ? 0 : Math.min(drawerBounds.top, Math.max(0, height - 240))) + 'px';
+  }
+
+  function createMenuItem(center, role) {
+    var row = document.createElement('li'), link = document.createElement('a');
+    row.setAttribute('data-insta360-personal-menu', role); row.setAttribute('translate', 'no');
+    link.className = 'ls-main-menu__item';
+    link.style.paddingInlineStart = '42px'; link.style.fontSize = '13px';
+    var icon = document.createElement('span'), label = document.createElement('span');
+    icon.className = 'ls-main-menu__item-icon'; icon.setAttribute('aria-hidden', 'true'); icon.textContent = '▦';
+    label.className = 'ls-main-menu__item-label'; label.textContent = roleTitle(role);
+    link.appendChild(icon); link.appendChild(label); row.appendChild(link);
+    link.addEventListener('click', function (event) {
+      // 跨中心及 Ctrl/Cmd 点击沿用普通链接导航，不干预站点的路由。
+      if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+      if (!state.context || state.context.role !== role) return;
+      event.preventDefault(); event.stopPropagation(); state.opened = true; render();
+    });
+    return {row: row, link: link, role: role};
+  }
+
+  function updateMenuState() {
+    var hasMenu = false;
+    menuItems.forEach(function (item, center) {
+      var current = !!(state.context && state.context.role === item.role);
+      var active = current && state.opened;
+      item.link.setAttribute('href', (current ? location.pathname + location.search : center.getAttribute('href').split('#')[0]) + '#insta360-personal');
+      item.link.setAttribute('aria-expanded', String(active));
+      item.link.classList.toggle('ls-main-menu__item_active', active);
+      if (active) item.link.setAttribute('aria-current', 'page'); else item.link.removeAttribute('aria-current');
+      if (current) hasMenu = true;
+    });
+    if (root) { host.setAttribute('data-menu', String(hasMenu)); syncDrawerLayout(); }
+    return hasMenu;
+  }
+
+  function syncMenu() {
+    menuItems.forEach(function (item, center) {
+      if (!center.isConnected || !center.closest('li') || !item.row.isConnected) {
+        item.row.remove(); menuItems.delete(center);
+      }
+    });
+    document.querySelectorAll('a.ls-main-menu__item[href]').forEach(function (center) {
+      var nativeRow = center.closest('li');
+      if (!nativeRow || nativeRow.getAttribute('data-insta360-personal-menu')) return;
+      var url;
+      try { url = new URL(center.getAttribute('href'), 'https://demo.local'); } catch (_) { return; }
+      if (url.origin !== 'https://demo.local' || !/^\/(annotation|review)(?:\/workspaces\/(?:all|\d+))?\/?$/.test(url.pathname)) return;
+      var role = routeContext(url.pathname).role, item = menuItems.get(center);
+      if (!item) { item = createMenuItem(center, role); menuItems.set(center, item); }
+      if (nativeRow.nextElementSibling !== item.row) nativeRow.after(item.row);
+    });
+    // 侧栏在 SPA 重绘时会短暂消失；面板生命周期由路由和用户关闭操作决定。
+    updateMenuState();
+  }
+
+  function focusEntry() {
+    var link;
+    menuItems.forEach(function (item) { if (state.context && item.role === state.context.role) link = item.link; });
+    if (link) link.focus();
+  }
+  // 只在当前页面内存中保存，账号/权限改变即清空；日期不影响待处理列表的缓存键。
+  var cache = new Map(), cacheAccount = '', pendingPageMemory = new Map();
+  function pendingPageKey(accountKey, workspace, scope) {
+    var key = accountKey + ':' + (workspace || 'all');
+    return scope && (scope.title || scope.ids) ? key + ':' + JSON.stringify([scope.title || '', scope.ids || '']) : key;
+  }
+  function getPendingPriorityPage(accountKey, workspace, scope) {
+    var key = pendingPageKey(accountKey, workspace, scope), value = pendingPageMemory.get(key), stored;
+    if (Number.isInteger(value) && value > 1) return value;
+    try {
+      stored = window.sessionStorage && window.sessionStorage.getItem('insta360-personal:last-pending-page:' + key);
+      value = Number(stored);
+      if (Number.isInteger(value) && value > 1) { pendingPageMemory.set(key, value); return value; }
+    } catch (_) {}
+    return null;
+  }
+  function rememberPendingPage(accountKey, workspace, page, scope) {
+    if (!Number.isInteger(page) || page <= 1) return;
+    var key = pendingPageKey(accountKey, workspace, scope);
+    pendingPageMemory.set(key, page);
+    try {
+      if (window.sessionStorage) window.sessionStorage.setItem('insta360-personal:last-pending-page:' + key, String(page));
+    } catch (_) {}
+  }
+  function clearCache() {
+    cache.forEach(function (entry) { if (entry.controller) entry.controller.abort(); });
+    cache.clear(); cacheAccount = '';
+  }
+  function readCached(key, ttl, force, load) {
+    var entry = cache.get(key);
+    if (entry && entry.promise) return entry.promise;
+    if (entry && !force && Date.now() - entry.at < ttl) return Promise.resolve(entry);
+    entry = {controller: new AbortController()};
+    cache.delete(key); cache.set(key, entry);
+    // 限制内存；只淘汰已经完成的查询，不打断本次并行请求。
+    if (cache.size > 20) {
+      for (var pair of cache) {
+        if (!pair[1].promise && pair[0] !== key) { cache.delete(pair[0]); break; }
+      }
+    }
+    entry.promise = Promise.resolve().then(function () { return load(entry.controller.signal); }).then(function (value) {
+      entry.value = value; entry.at = Date.now(); entry.promise = null;
+      return entry;
+    }, function (error) {
+      if (cache.get(key) === entry) cache.delete(key);
+      throw error;
+    });
+    return entry.promise;
+  }
+  function cancelOtherJobs(keys) {
+    cache.forEach(function (entry, key) {
+      if (entry.promise && keys.indexOf(key) < 0) { entry.controller.abort(); cache.delete(key); }
+    });
+  }
+  function $(selector) { return root.querySelector(selector); }
+  var renderedMarkup = new WeakMap();
+  function setMarkup(selector, html) {
+    var node = $(selector);
+    if (renderedMarkup.get(node) === html) return false;
+    var wrap = node.querySelector && node.querySelector('.table-wrap');
+    var scrollTop = wrap ? wrap.scrollTop : 0, scrollLeft = wrap ? wrap.scrollLeft : 0;
+    node.innerHTML = html; renderedMarkup.set(node, html);
+    wrap = node.querySelector && node.querySelector('.table-wrap');
+    if (wrap) { wrap.scrollTop = scrollTop; wrap.scrollLeft = scrollLeft; }
+    return true;
+  }
+  function escape(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+  function display(value, key) { return value == null ? '—' : (key === 'accuracy' ? value.toFixed(2) : key === 'total_time_min' ? value.toFixed(1) : value.toLocaleString('zh-CN')); }
+  function metricMatches(metric) {
+    return state.fieldSelection[state.role].has(metric[0]);
+  }
+  function renderFieldOptions() {
+    var metrics = METRICS[state.role], selected = state.fieldSelection[state.role];
+    setMarkup('#field-options', metrics.map(function (metric) {
+      return '<label class="field-option" title="' + escape(metric[3]) + '"><input type="checkbox" data-field="' + escape(metric[0]) + '"><span>' + escape(metric[1]) + '</span></label>';
+    }).join(''));
+    root.querySelectorAll('#field-options input[data-field]').forEach(function (input) { input.checked = selected.has(input.dataset.field); });
+    $('#field-count').textContent = '已选 ' + selected.size + ' / ' + metrics.length + ' 项';
+  }
+  function selectFields(all) {
+    state.fieldSelection[state.role] = new Set(all ? METRICS[state.role].map(function (metric) { return metric[0]; }) : []);
+    renderFieldOptions(); renderStats();
+  }
+  function sumRegions(rows) {
+    return sumRegionMetric(rows, state.regions);
+  }
+  function progressText(progress) {
+    if (progress && progress.priority) return ' · 已优先读取上次待处理项目，继续查询中';
+    if (!progress || progress.receivedPages >= progress.totalPages) return '';
+    return ' · 已读取 ' + progress.receivedPages + '/' + progress.totalPages + ' 个项目包，继续查询中';
+  }
+  function metricAnimationText(value, key) {
+    var shown = key === 'accuracy' ? Number(value.toFixed(2)) : key === 'total_time_min' ? Number(value.toFixed(1)) : Math.round(value);
+    return display(shown, key);
+  }
+  function animateCounts() {
+    if (!window || typeof window.requestAnimationFrame !== 'function' || !root || typeof root.querySelectorAll !== 'function') return;
+    Object.keys(countFrames).forEach(function (key) {
+      if (typeof window.cancelAnimationFrame === 'function') window.cancelAnimationFrame(countFrames[key]);
+      delete countFrames[key];
+    });
+    root.querySelectorAll('.metric-value[data-count-target]').forEach(function (node) {
+      var key = node.getAttribute('data-count-key'), target = Number(node.getAttribute('data-count-target')), strong = node.querySelector('strong');
+      if (!key || !Number.isFinite(target) || !strong) return;
+      if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) { strong.textContent = display(target, key.split(':').pop()); countCurrent[key] = target; return; }
+      var start = Number.isFinite(countCurrent[key]) ? countCurrent[key] : 0, began = null;
+      if (start === target) { strong.textContent = display(target, key.split(':').pop()); return; }
+      strong.textContent = metricAnimationText(start, key.split(':').pop());
+      function step(now) {
+        if (began == null) began = now;
+        var ratio = Math.min(1, (now - began) / 420), eased = 1 - Math.pow(1 - ratio, 3), value = start + (target - start) * eased;
+        countCurrent[key] = value; strong.textContent = metricAnimationText(value, key.split(':').pop());
+        if (ratio < 1) countFrames[key] = window.requestAnimationFrame(step);
+        else { countCurrent[key] = target; strong.textContent = metricAnimationText(target, key.split(':').pop()); delete countFrames[key]; }
+      }
+      countFrames[key] = window.requestAnimationFrame(step);
+    });
+  }
+  function resetCountAnimations() {
+    Object.keys(countFrames).forEach(function (key) {
+      if (typeof window.cancelAnimationFrame === 'function') window.cancelAnimationFrame(countFrames[key]);
+      delete countFrames[key];
+    });
+    countCurrent = Object.create(null);
+  }
+  function abort() { runNumber++; if (controller) controller.abort(); state.busy = false; state.statsBusy = false; state.regionBusy = false; state.pendingBusy = false; }
+  function clearResults() { state.page = 1; resetCountAnimations(); state.user = null; state.stats = null; state.regions = null; state.pending = null; state.queryScope = null; state.queryRange = null; state.queryWorkspace = null; state.statsProgress = null; state.pendingProgress = null; state.updated = ''; state.regionUpdated = ''; state.pendingUpdated = ''; state.discarded = 0; state.error = ''; state.statsError = ''; state.regionError = ''; state.pendingError = ''; }
+
+  async function request(path, params, signal) {
+    var url = new URL(path, 'https://demo.local');
+    Object.keys(params || {}).forEach(function (key) { if (params[key] != null) url.searchParams.set(key, params[key]); });
+    var timeout = new AbortController(), timedOut = false;
+    var onAbort = function () { timeout.abort(); };
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    signal.addEventListener('abort', onAbort, {once: true});
+    var timer = setTimeout(function () { timedOut = true; timeout.abort(); }, 30000);
+    try {
+      var response = await fetch(url.href, {method: 'GET', credentials: 'include', headers: {Accept: 'application/json'}, signal: timeout.signal, cache: 'no-store'});
+      if (response.status === 401) throw new Error('登录已失效，请重新登录后刷新');
+      if (response.status === 403) throw new Error('当前账号没有查看此项的权限');
+      if (!response.ok) { var httpError = new Error(response.status === 429 ? '查询过于频繁，请稍后刷新' : '查询失败（HTTP ' + response.status + '），请刷新重试'); httpError.status = response.status; throw httpError; }
+      if (!(response.headers.get('content-type') || '').includes('json')) throw new Error('未取得统计数据，请确认仍处于登录状态');
+      var data = await response.json();
+      if (data && data.error) throw new Error('平台未能完成查询，请刷新重试');
+      return data;
+    } catch (error) {
+      if (timedOut) throw new Error('查询超时，请缩小范围或稍后刷新');
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  async function confirmAccount(user, signal) {
+    try {
+      var confirmed = identity(await request('/api/current-user/whoami', {}, signal));
+      if (confirmed.id !== user.id || confirmed.role !== user.role) throw new Error('登录账号已变化，请点击“查询 / 刷新”重新读取');
+    } catch (error) { error.identityFailure = true; throw error; }
+  }
+
+  function updateTime(at) { return new Date(at).toLocaleTimeString('zh-CN', {hour12: false}); }
+
+  async function ensureProjectRegions(force, run) {
+    if (!state.fieldSelection[state.role].has('project_regions')) {
+      cache.forEach(function (entry, key) {
+        if (entry.promise && JSON.parse(key)[0] === 'regions') { entry.controller.abort(); cache.delete(key); }
+      });
+      var wasBusy = state.regionBusy;
+      state.regionBusy = false; state.busy = state.statsBusy || state.pendingBusy; if (wasBusy) render(); return;
+    }
+    if (run !== runNumber || !state.opened || state.statsBusy || state.statsError || !state.user || !state.stats || !state.stats.length) return;
+    var user = state.user, workspace = state.queryWorkspace;
+    var projectIds = Array.from(new Set(state.stats.map(function (row) { return id(row.project_id); }).filter(Boolean))).sort();
+    if (!projectIds.length) return;
+    var key = JSON.stringify(['regions', user.id + ':' + user.role, workspace, projectIds]);
+    state.regionBusy = true; state.busy = true; state.regionError = ''; render();
+    try {
+      var result = await readCached(key, 60000, force === true, async function (jobSignal) {
+        var params = {project_id: projectIds.join(',')};
+        if (workspace !== 'all') params.workspace_id = workspace;
+        var rows = await loadPages(function (page) {
+          return request('/api/statistics/project-overview', Object.assign({}, params, {page: page, page_size: 100}), jobSignal);
+        }, 'projects_stats', function (row) { return id(row && (row.project_id != null ? row.project_id : row.id)); }, {concurrency: 3});
+        await confirmAccount(user, jobSignal);
+        return projectRegionTotals(rows);
+      });
+      if (run !== runNumber) return;
+      state.regions = result.value; state.regionUpdated = updateTime(result.at);
+    } catch (error) {
+      if (run !== runNumber || error.name === 'AbortError') return;
+      if (error.identityFailure) { abort(); clearCache(); clearResults(); state.error = error.message; render(); return; }
+      state.regionError = error.message || '项目参考读取失败';
+    } finally {
+      if (run === runNumber) { state.regionBusy = false; state.busy = state.statsBusy || state.pendingBusy; render(); }
+    }
+  }
+
+  async function readPendingProjects(user, workspace, params, signal, report, previous) {
+    var pages = new Map(), priorityRows = [], progress = null, finished = false, usefulPage = null;
+    var accountKey = user.id + ':' + user.role, priorityPage = getPendingPriorityPage(accountKey, workspace, params);
+    var priorityIds = previous && previous.items ? previous.items.slice(0, 20).map(function (p) { return id(p.id); }).filter(Boolean) : [];
+    if (previous && previous.scanned <= priorityIds.length) priorityIds = [];
+    var priorityController = new AbortController();
+    var cancelPriority = function () { priorityController.abort(); };
+    signal.addEventListener('abort', cancelPriority, {once: true});
+    if (signal.aborted) cancelPriority();
+    function publishProgress() {
+      if (finished || signal.aborted) return;
+      var merged = new Map();
+      priorityRows.forEach(function (row) { merged.set(id(row.id), row); });
+      flattenPages(pages).forEach(function (row) { merged.set(id(row.id), row); });
+      report({value: personalProjects(Array.from(merged.values()), workspace), meta: progress || {priority: true}});
+    }
+    // 仅使用上一次同账号、同范围的项目 ID；显示的是本次接口返回的计数。
+    if (priorityIds.length) {
+      loadPages(function (page) {
+        return request('/api/projects', Object.assign({}, params, {ids: priorityIds.join(','), page: page}), priorityController.signal);
+      }, 'results', function (row) { return id(row.id); }).then(function (rows) {
+        priorityRows = rows; publishProgress();
+      }).catch(function () { /* 优先读取失败时由完整扫描核对，不能中断完整查询。 */ });
+    }
+    try {
+      var rows = await loadPages(function (page) {
+        return request('/api/projects', Object.assign({}, params, {page: page}), signal);
+      }, 'results', function (row) { return id(row.id); }, {
+        concurrency: 3, priorityPage: priorityPage,
+        onPage: function (page, rows, meta) {
+          pages.set(page, rows); progress = meta;
+          if (personalProjects(rows, workspace).items.length) usefulPage = page;
+          publishProgress();
+        },
+      });
+      if (usefulPage != null) rememberPendingPage(accountKey, workspace, usefulPage, params);
+      return personalProjects(rows, workspace);
+    } finally {
+      finished = true; cancelPriority(); signal.removeEventListener('abort', cancelPriority);
+    }
+  }
+
+  async function refresh(force) {
+    abort(); clearResults();
+    if (force === true) cancelOtherJobs([]);
+    if (!state.context || !state.opened) { if (root) render(); return; }
+    state.role = state.context.role;
+    state.range = activeRange(state.preset, state.range);
+    var run = runNumber, role = state.role, workspace = state.workspace, range = state.range.slice(), readRegions = state.fieldSelection[state.role].has('project_regions');
+    state.queryRange = range.slice(); state.queryWorkspace = workspace;
+    controller = new AbortController();
+    var signal = controller.signal;
+    state.busy = true; state.statsBusy = true; state.regionBusy = false; state.pendingBusy = role === 'annotator'; render();
+    try {
+      var user = identity(await request('/api/current-user/whoami', {}, signal));
+      if (run !== runNumber) return;
+      var accountKey = user.id + ':' + user.role;
+      if (cacheAccount !== accountKey) { clearCache(); cacheAccount = accountKey; }
+      state.user = user;
+      if (user.role === 'annotator' && role === 'reviewer') throw new Error('当前账号无法查看审核统计，请返回标注中心');
+      var params = statsParams(user.id, role, workspace, range[0], range[1]);
+      var scope = {title: state.filter.trim(), ids: parseProjectIds(state.projectIdsText)};
+      state.queryScope = scope;
+      render();
+      var projectParams = {include: 'id,title,workspace,user_repair_count,user_rework_count', page_size: 100};
+      if (workspace !== 'all') projectParams.workspaces = workspace;
+      var statsKey = JSON.stringify(['stats', accountKey, role, workspace, range, scope]);
+      var pendingKey = JSON.stringify(['pending', accountKey, workspace, scope]);
+      var scopeKey = JSON.stringify(['scope', accountKey, workspace, scope]);
+      cancelOtherJobs(role === 'annotator' ? [statsKey, pendingKey, scopeKey] : [statsKey, scopeKey]);
+      if (scope.title) projectParams.title = scope.title;
+      if (scope.ids.length) projectParams.ids = scope.ids.join(',');
+      var previousPending = cache.get(pendingKey), pendingJob, pendingParams = Object.assign({}, projectParams);
+      if (role === 'annotator') {
+        pendingJob = publish('pending', pendingKey, 60000, function (jobSignal, report) {
+          return readPendingProjects(user, workspace, pendingParams, jobSignal, report, previousPending && previousPending.value);
+        }, true, function (progress) {
+          state.pending = progress.value; state.pendingProgress = progress.meta; render();
+        });
+      }
+      var selectedIds = scope.ids;
+      if (scope.title) {
+        var scopeResult = await readCached(scopeKey, 30000, force === true, async function (jobSignal) {
+          var lookup = {title: scope.title, include: 'id,title,workspace', page_size: 100};
+          if (workspace !== 'all') lookup.workspaces = workspace;
+          if (scope.ids.length) lookup.ids = scope.ids.join(',');
+          var found = await loadPages(function (page) { return request('/api/projects', Object.assign({}, lookup, {page: page}), jobSignal); }, 'results', function (row) { return id(row.id); }, {concurrency: 3});
+          await confirmAccount(user, jobSignal);
+          return found.filter(function (row) { return String(row.title || '').toLocaleLowerCase().includes(scope.title.toLocaleLowerCase()) && (!scope.ids.length || scope.ids.indexOf(id(row.id)) >= 0); }).map(function (row) { return id(row.id); }).sort();
+        });
+        if (run !== runNumber) return;
+        selectedIds = scopeResult.value;
+        if (!selectedIds.length) {
+          state.stats = []; state.updated = updateTime(scopeResult.at);
+          if (pendingJob) await pendingJob;
+          return;
+        }
+        projectParams.title = scope.title;
+      }
+      if (selectedIds.length) { params.project_id = selectedIds.join(','); projectParams.ids = selectedIds.join(','); }
+      async function publish(kind, key, ttl, load, confirmIdentity, onProgress) {
+        try {
+          var result = await readCached(key, ttl, force === true, async function (jobSignal) {
+            var value = await load(jobSignal, function (progress) {
+              if (run === runNumber && typeof onProgress === 'function') onProgress(progress);
+            });
+            // 每部分独立核对账号并发布，不让慢的项目列表阻塞产量。
+            if (confirmIdentity !== false) await confirmAccount(user, jobSignal);
+            return value;
+          });
+          if (run !== runNumber) return;
+          // 新结果在写入缓存前已核对身份；缓存命中则使用本轮刚确认的身份。
+          if (kind === 'stats') {
+            state.stats = selfRows(result.value, user.id);
+            state.discarded = result.value.length - state.stats.length;
+            state.statsProgress = null;
+            state.updated = updateTime(result.at);
+          } else if (kind === 'pending') { state.pending = result.value; state.pendingProgress = null; state.pendingUpdated = updateTime(result.at); }
+          else { state.regions = result.value; state.regionUpdated = updateTime(result.at); }
+        } catch (error) {
+          if (run !== runNumber || error.name === 'AbortError') return;
+          if (error.identityFailure) {
+            abort(); clearCache(); clearResults(); state.error = error.message; render(); return;
+          }
+          state[kind + 'Error'] = error.message || '读取失败，请刷新';
+        } finally {
+          if (run === runNumber) { state[kind + 'Busy'] = false; state.busy = state.statsBusy || state.regionBusy || state.pendingBusy; render(); }
+        }
+      }
+      var statsPages = new Map();
+      var statsJob = publish('stats', statsKey, 30000, function (jobSignal, report) {
+          return loadPages(async function (page) {
+            var response = await request('/api/statistics/overview', Object.assign({}, params, {page: page, page_size: 100}), jobSignal);
+            if (response.role && response.role !== role) throw new Error('统计角色返回不一致，请刷新');
+            return response;
+          }, 'users_stats', function (row) { return id(row.id) && id(row.project_id) ? id(row.id) + ':' + id(row.project_id) : ''; }, {
+            concurrency: 3,
+            onPage: function (page, rows, meta) {
+              statsPages.set(page, rows);
+              report({rows: flattenPages(statsPages), meta: meta});
+            },
+          });
+        }, true, function (progress) {
+          state.stats = selfRows(progress.rows, user.id);
+          state.discarded = progress.rows.length - state.stats.length;
+          state.statsProgress = progress.meta;
+          render();
+        });
+      var jobs = [statsJob.then(function () { if (run === runNumber && readRegions) return ensureProjectRegions(force, run); })];
+      if (pendingJob) jobs.push(pendingJob);
+      await Promise.all(jobs);
+    } catch (error) {
+      if (run !== runNumber || (error && error.name === 'AbortError')) return;
+      clearCache(); clearResults(); state.error = error.message || '查询失败，请刷新重试';
+    } finally {
+      if (run === runNumber) { state.statsBusy = false; state.pendingBusy = false; state.busy = state.regionBusy; render(); }
+    }
+  }
+
+  function matches(name) { var applied = state.queryScope ? state.queryScope.title : ''; return String(name || '').toLocaleLowerCase().includes(applied.toLocaleLowerCase()); }
+
+  function visibleRows() {
+    if (!state.stats || state.statsError || state.error) return null;
+    return browseRows(state.stats.filter(function (r) { return matches(r.project_title); }), state.quick, state.sortKey || (state.role === 'annotator' ? 'submit_total' : 'review_total'), state.sortDirection, state.regions);
+  }
+
+  function exportStats() {
+    if ($('#export').disabled) return;
+    var rows = visibleRows(), metrics = METRICS[state.role].filter(metricMatches);
+    if (!rows || !rows.length || !state.user) return;
+    var table = [
+      ['统计类型', roleTitle(state.role)],
+      ['账号', state.user.name, 'ID', state.user.id],
+      ['日期', state.queryRange[0], state.queryRange[1]],
+      ['工作区', state.queryWorkspace],
+      ['服务器项目筛选', state.queryScope.title, state.queryScope.ids.join(',')],
+      ['本地搜索', state.quick],
+      ['完整性', '已完成本人查询', '缺失字段留空，真实零保留 0'],
+      ['导出范围', '全部匹配项目', rows.length],
+      ['统计说明', '准确率仅纳入通过和驳回均有值的项目；项目 regions 为全部成员全日期累计参考'],
+      ['项目 ID', '项目名称'].concat(metrics.map(function (m) { return m[1] + '（' + m[2] + '）'; })),
+    ];
+    rows.forEach(function (row) {
+      table.push([row.project_id, row.project_title || ('项目 #' + row.project_id)].concat(metrics.map(function (m) { return rowMetric(row, m[0], state.regions); })));
+    });
+    var blob = new Blob([csvText(table)], {type: 'text/csv;charset=utf-8;'}), url = URL.createObjectURL(blob), link = document.createElement('a');
+    link.href = url; link.download = 'Insta360-' + roleTitle(state.role) + '-' + state.queryRange.join('_') + '.csv';
+    document.body.appendChild(link); link.click(); link.remove(); setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    $('#export-feedback').textContent = '已导出 ' + rows.length + ' 个匹配项目';
+  }
+
+  function renderStats() {
+    var metrics = METRICS[state.role].filter(metricMatches), rows = visibleRows();
+    var hasMissing = false;
+    function card(m) {
+      var summary = rows && m[0] !== 'project_regions' ? (m[0] === 'accuracy' ? accuracySummary(rows) : summarizeMetric(rows, m[0] === 'regions' ? 'label__region' : m[0])) : null;
+      var n = summary ? summary.value : rows ? sumRegions(rows) : null;
+      var coverage = '';
+      if (summary && summary.missing) {
+        hasMissing = true;
+        coverage = '<small class="metric-coverage">' + (m[0] === 'accuracy' ? '通过/驳回齐全 · ' : summary.available ? '已知合计 · ' : '') + summary.available + '/' + rows.length + ' 项目有值</small>';
+      }
+      var target = n == null ? '' : ' data-count-target="' + escape(n) + '"';
+      return '<div class="metric" title="' + escape(m[3]) + '"><span>' + m[1] + '</span><div class="metric-value" data-count-key="' + state.role + ':' + m[0] + '"' + target + '><strong>' + display(n, m[0]) + '</strong><small>' + m[2] + '</small></div>' + coverage + '</div>';
+    }
+    var personalMetrics = metrics.filter(function (m) { return m[0] !== 'project_regions'; });
+    var projectMetrics = metrics.filter(function (m) { return m[0] === 'project_regions'; });
+    var cardsChanged = setMarkup('#metrics', personalMetrics.map(card).join('') || '<p class="empty">请勾选要显示的本人统计字段</p>');
+    $('#project-reference').hidden = !projectMetrics.length;
+    var projectChanged = setMarkup('#project-metrics', projectMetrics.map(card).join(''));
+    if (cardsChanged || projectChanged) animateCounts();
+    var primary = state.role === 'annotator' ? 'submit_total' : 'review_total';
+    var key = state.sortKey || primary;
+    var head = '<thead><tr>' + [['project_title', '项目名称']].concat(metrics).map(function (m) {
+      var active = key === m[0];
+      return '<th scope="col" aria-sort="' + (active ? state.sortDirection === 'asc' ? 'ascending' : 'descending' : 'none') + '"><button type="button" data-sort="' + escape(m[0]) + '" title="点击按' + escape(m[1]) + '排序">' + escape(m[1]) + '<span aria-hidden="true">' + (active ? state.sortDirection === 'asc' ? ' ↑' : ' ↓' : ' ↕') + '</span></button></th>';
+    }).join('') + '</tr></thead>';
+    var count = rows ? rows.length : 0, pages = Math.max(1, Math.ceil(count / state.pageSize));
+    state.page = Math.min(state.page, pages);
+    $('#result-count').textContent = rows ? count + ' / ' + state.stats.length + ' 个项目' + (state.quick ? ' · 搜索结果' : '') : '尚未查询';
+    $('#page-info').textContent = '第 ' + state.page + ' / ' + pages + ' 页';
+    $('#prev-page').disabled = state.page <= 1;
+    $('#next-page').disabled = state.page >= pages;
+    $('#pagination').hidden = !count;
+    $('#export').disabled = !count || state.statsBusy || !!state.statsError || !!state.error || !metrics.length || (metrics.some(function (m) { return m[0] === 'project_regions'; }) && (state.regionBusy || !!state.regionError || !state.regions));
+    if (state.statsError) setMarkup('#stats-data', '<p class="error" role="alert">' + escape(state.statsError) + '</p>');
+    else if (!rows) setMarkup('#stats-data', '<div class="empty"><span class="empty-symbol" aria-hidden="true">▦</span><strong>' + (state.statsBusy ? '正在读取本人工作量…' : '选择日期，开始查看工作数据') + '</strong><span>' + (state.statsBusy ? '分页数据返回后会逐步显示' : '点击上方“查询 / 刷新”读取当前账号数据') + '</span></div>');
+    else if (!rows.length) setMarkup('#stats-data', '<div class="empty"><span class="empty-symbol" aria-hidden="true">⌕</span><strong>' + (state.quick ? '没有找到匹配的项目' : state.statsBusy ? '正在继续查询项目…' : '当前范围暂无个人记录') + '</strong><span>' + (state.quick ? '试试项目名称、ID，或清空搜索' : '可以更改日期或工作区后重新查询') + '</span></div>');
+    else {
+      var pageRows = rows.slice((state.page - 1) * state.pageSize, state.page * state.pageSize);
+      var maximum = Math.max.apply(null, rows.map(function (r) { return rowMetric(r, primary) || 0; }));
+      var body = pageRows.map(function (row) {
+        var share = maximum ? (rowMetric(row, primary) || 0) / maximum * 100 : 0;
+        return '<tr><td><span class="project-name" title="' + escape(row.project_title) + '">' + escape(row.project_title || ('项目 #' + row.project_id)) + '</span><small class="project-id">#' + escape(row.project_id) + '</small><span class="row-meter" aria-hidden="true"><i style="width:' + share + '%"></i></span></td>' + metrics.map(function (m) {
+          var value = rowMetric(row, m[0], state.regions);
+          var content = display(value, m[0]) + (m[0] === 'accuracy' && value != null ? '%' : '');
+          return '<td class="' + (value == null ? 'missing' : m[0] === primary ? 'primary-number' : '') + '">' + (m[0] === 'accuracy' && value != null ? '<span class="accuracy ' + (value >= 95 ? 'good' : value >= 80 ? 'medium' : 'low') + '">' + content + '</span>' : content) + '</td>';
+        }).join('') + '</tr>';
+      }).join('');
+      var totals = '<tfoot><tr><th scope="row">匹配项目合计 <small>' + rows.length + ' 项</small></th>' + metrics.map(function (m) {
+        var total = m[0] === 'accuracy' ? accuracySummary(rows).value : m[0] === 'project_regions' ? sumRegions(rows) : summarizeMetric(rows, m[0] === 'regions' ? 'label__region' : m[0]).value;
+        return '<td>' + display(total, m[0]) + (m[0] === 'accuracy' && total != null ? '%' : '') + '</td>';
+      }).join('') + '</tr></tfoot>';
+      setMarkup('#stats-data', '<div class="table-wrap" tabindex="0" role="region" aria-label="项目产量明细，可横向滚动"><table>' + head + '<tbody>' + body + '</tbody>' + totals + '</table></div>');
+    }
+    $('#stats-note').textContent = state.role === 'annotator'
+      ? '新标注提交与返修 / 返工更新分别统计。通过、驳回按平台统计口径；缺失数据用“—”表示。'
+      : '审核数量按通过 / 驳回的动作次数统计。同一条数据重复审核可能计多次，与平台“数据统计”一致。';
+    if (state.discarded) $('#stats-note').textContent += ' 已排除非本人记录。';
+    $('#stats-note').textContent += ' 本人 regions 数按当前账号及所选日期统计，与任务条数分别计数。';
+    if (hasMissing) $('#stats-note').textContent += ' 存在缺失字段时，卡片仅合计已知数值，并标注有值项目数；全部缺失仍显示“—”，不按 0 计算。';
+    if (state.role === 'annotator') $('#stats-note').textContent += ' 准确率 = 审核通过 /（审核通过 + 审核驳回）× 100%；先合计再计算，只纳入通过、驳回均有值的项目，分母为 0 时显示“—”。';
+    if (projectMetrics.length && state.regionError) $('#stats-note').textContent += ' 项目参考区域总数读取失败：' + state.regionError;
+    else if (projectMetrics.length && !state.regions && !state.regionBusy) $('#stats-note').textContent += ' 项目 regions 总数需勾选后点击“查询 / 刷新”读取。';
+    $('#range-caption').textContent = state.queryRange ? state.queryRange[0] + ' 至 ' + state.queryRange[1] + ' · 全天 · ' + (state.queryWorkspace === 'all' ? '全部可访问项目' : '工作区 #' + state.queryWorkspace) + (rows ? ' · ' + rows.length + ' 个匹配项目' : '') + progressText(state.statsProgress) : '尚未查询，请点击“查询 / 刷新”';
+    if (state.queryScope && (state.queryScope.title || state.queryScope.ids.length)) $('#range-caption').textContent += ' · 服务端项目筛选：' + [state.queryScope.title, state.queryScope.ids.length ? 'ID ' + state.queryScope.ids.join(', ') : ''].filter(Boolean).join('；');
+  }
+
+  function renderPending() {
+    $('#pending-section').hidden = state.role !== 'annotator';
+    if (state.role !== 'annotator') {
+      setMarkup('#pending-data', ''); $('#pending-total').textContent = ''; $('#pending-updated').textContent = ''; return;
+    }
+    $('#pending-updated').textContent = state.pendingUpdated ? '读取于 ' + state.pendingUpdated + ' · 仅点击“查询 / 刷新”时更新' : '';
+    if (state.pendingError) { setMarkup('#pending-data', '<p class="error" role="alert">' + escape(state.pendingError) + '</p>'); $('#pending-total').textContent = ''; return; }
+    if (!state.pending) { setMarkup('#pending-data', '<p class="empty">' + (state.pendingBusy ? '正在读取本人待处理项目…' : '点击“查询 / 刷新”读取待处理数据') + '</p>'); $('#pending-total').textContent = ''; return; }
+    var items = state.pending.items.filter(function (p) { return matches(p.name) && (!state.quick.trim() || (p.name + ' #' + p.id).toLocaleLowerCase().includes(state.quick.trim().toLocaleLowerCase())) && (state.pendingMode === 'all' || p[state.pendingMode] > 0); });
+    var repair = 0, rework = 0;
+    items.forEach(function (p) { repair += p.repair || 0; rework += p.rework || 0; });
+    $('#pending-total').textContent = items.length + ' 个项目 · 返修 ' + repair + ' · 返工 ' + rework + (state.pending.unknown ? '（部分计数未取得）' : '') + progressText(state.pendingProgress);
+    var warning = state.pending.unknown ? '<p class="notice">有 ' + state.pending.unknown + ' 个项目未返回完整个人计数，当前合计仅包含已取得的数据。请刷新或查看原项目卡片。</p>' : '';
+    if (!items.length) {
+      setMarkup('#pending-data', warning + '<p class="empty">' + (state.filter ? '没有匹配的个人待处理项目' : state.pendingBusy ? '已读取部分项目包，正在继续查询…' : state.pending.unknown ? '已取得个人计数的项目中暂无待处理数据' : '当前范围内，本人暂无待返修或待返工数据') + '</p>');
+      return;
+    }
+    setMarkup('#pending-data', warning + '<div class="pending-list">' + items.map(function (p) {
+      return '<article class="pending-row"><div class="pending-project"><strong>' + escape(p.name) + '</strong><small>#' + p.id + '</small></div>' + ['repair', 'rework'].map(function (mode) {
+        var n = p[mode], label = mode === 'repair' ? '返修' : '返工';
+        return '<div class="lane ' + mode + '"><span>待' + label + ' <b>' + display(n) + '</b></span><button type="button" data-work="' + mode + '" data-project="' + p.id + '" ' + (!(n > 0) ? 'disabled' : '') + '>前往' + label + ' <span aria-hidden="true">↗</span></button></div>';
+      }).join('') + '</article>';
+    }).join('') + '</div>');
+  }
+
+  function render() {
+    if (!root) return;
+    $('#panel').hidden = !state.opened;
+    updateMenuState();
+    $('#work-title').textContent = roleTitle(state.role);
+    $('#panel').setAttribute('aria-label', roleTitle(state.role));
+    $('#center-label').textContent = state.role === 'reviewer' ? '审核中心 · 本人审核数据' : '标注中心 · 本人标注数据';
+    $('#stats-title').textContent = state.role === 'reviewer' ? '审核工作总览' : '标注工作总览';
+    $('#nav-pending').hidden = state.role !== 'annotator';
+    $('#clear-quick').hidden = !state.quick;
+    root.querySelectorAll('[data-pending-mode]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.pendingMode === state.pendingMode)); });
+    $('#account').textContent = state.user ? '查询账号：' + state.user.name + ' · ID ' + state.user.id : state.busy ? '正在确认当前账号…' : '仅显示当前登录账号的数据';
+    $('#start').value = state.range[0]; $('#end').value = state.range[1];
+    $('#project-ids').value = state.projectIdsText;
+    renderFieldOptions();
+    $('#query').textContent = state.busy ? '重新查询' : '查询 / 刷新';
+    $('#error').textContent = state.error; $('#error').hidden = !state.error;
+    $('#updated').textContent = state.statsBusy ? '正在查询产量…' : state.updated ? '读取于 ' + state.updated + ' · 手动刷新' : '';
+    var changed = false;
+    if (state.queryRange && state.queryScope) {
+      try { changed = JSON.stringify(state.range) !== JSON.stringify(state.queryRange) || state.workspace !== state.queryWorkspace || !state.queryScope || state.filter.trim() !== state.queryScope.title || parseProjectIds(state.projectIdsText).join(',') !== state.queryScope.ids.join(','); }
+      catch (_) { changed = true; }
+    }
+    $('#query-help').textContent = changed ? '筛选条件已修改，点击“查询 / 刷新”应用；下方仍为上次查询结果。' : '手动查询 · 本地搜索、排序和翻页无需重复请求。';
+    $('#query-help').classList.toggle('changed', changed);
+    $('#query-state').textContent = state.busy ? '正在读取数据' : state.error || state.statsError ? '查询遇到问题' : changed ? '查询条件未应用' : state.updated ? '查询完成' : '等待查询';
+    $('#query-state').setAttribute('data-status', state.busy ? 'busy' : state.error || state.statsError ? 'error' : changed ? 'changed' : 'ready');
+    root.querySelectorAll('[data-preset]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.preset === state.preset)); });
+    renderStats(); renderPending();
+  }
+
+  async function goToWork(projectId, mode, button) {
+    if (!state.context || state.context.role !== 'annotator') return;
+    var project = state.pending && state.pending.items.find(function (p) { return p.id === projectId; });
+    if (!project || !(project[mode] > 0) || !state.user) return;
+    var account = state.user.id, run = runNumber;
+    button.disabled = true;
+    try {
+      var actionController = new AbortController();
+      var who = identity(await request('/api/current-user/whoami', {}, actionController.signal));
+      if (run !== runNumber) return;
+      if (who.id !== account) { abort(); clearCache(); clearResults(); state.error = '登录账号已变化，请重新查询后进入返修'; render(); return; }
+      var cards = document.querySelectorAll('.ls-project-card');
+      for (var i = 0; i < cards.length; i++) {
+        var link = cards[i].closest('a[href]') || cards[i].querySelector('a[href]');
+        var match = link && (link.getAttribute('href') || '').match(/\/projects\/(\d+)(?:\/|$)/);
+        if (!match || match[1] !== project.id) continue;
+        var nativeButton = cards[i].querySelector(mode === 'repair' ? '.ls-project-card__annotation-button_repair' : '.ls-project-card__annotation-button_fix');
+        if (nativeButton && !nativeButton.disabled) { nativeButton.click(); return; }
+      }
+      window.__demoGo(workUrl(project, mode));
+    } catch (error) { state.error = error.message; render(); }
+    finally { if (button.isConnected) button.disabled = false; }
+  }
+
+  function mount() {
+    host = document.createElement('div'); host.id = 'insta360-personal-toolbox'; host.setAttribute('translate', 'no');
+    root = host.attachShadow({mode: 'open'});
+    root.innerHTML = '<style>' + CSS + '</style>' +
+      '<section id="panel" aria-label="我的工作台"><header><div class="heading"><div class="eyebrow">INSTA360 <span> / </span> PERSONAL WORKSPACE</div><div class="title-line"><h1 id="work-title"></h1><span id="query-state" role="status"></span></div><p id="account"></p></div><button id="close" type="button" aria-label="收起工作台">×</button></header>' +
+      '<div class="scroll"><div class="filters"><div class="filter-line"><div id="center-label"></div><label class="scope-label">工作区 <select id="scope" aria-label="统计范围"></select></label></div>' +
+      '<div class="query-row"><div class="presets" role="group" aria-label="日期快捷选择"><button type="button" data-preset="today">今天</button><button type="button" data-preset="yesterday">昨天</button><button type="button" data-preset="week">近 7 天</button><button type="button" data-preset="month">本月</button></div>' +
+      '<div class="dates"><input id="start" type="date" aria-label="开始日期"><span>—</span><input id="end" type="date" aria-label="结束日期"></div><button id="query" class="primary" type="button">查询 / 刷新</button></div>' +
+      '<details class="advanced"><summary>项目范围与显示字段 <span id="field-count"></span></summary><div class="advanced-body"><div class="filter-line project-filters"><label>查询项目名称<input id="search" type="search" placeholder="按名称查询服务器" aria-label="查询项目名称"></label><label>查询项目 ID<input id="project-ids" type="text" aria-label="筛选项目 ID" placeholder="多个 ID 用逗号或空格分隔"></label></div>' +
+      '<div class="field-picker" role="group" aria-label="显示统计字段"><div class="field-toolbar"><span>显示字段</span><button id="field-default" type="button">常用字段</button><button id="field-all" type="button">全选</button><button id="field-none" type="button">清空</button></div><div id="field-options" class="field-options"></div></div></div></details><p id="query-help" class="query-help"></p></div>' +
+      '<p id="error" class="error" role="alert" hidden></p><nav class="view-nav" aria-label="工作台内容"><button data-jump="overview" class="current">工作总览</button><button data-jump="details">项目明细</button><button id="nav-pending" data-jump="pending">返修 / 返工</button></nav>' +
+      '<div class="browse-bar"><div class="quick-search"><span aria-hidden="true">⌕</span><input id="quick-search" type="search" placeholder="搜索当前结果：项目名称 / ID" aria-label="搜索当前结果"><button id="clear-quick" type="button" aria-label="清空当前搜索" hidden>×</button></div><small>即时筛选总览、明细与待处理</small></div>' +
+      '<section id="overview"><div class="section-title"><h2 id="stats-title"></h2><span id="updated" aria-live="polite"></span></div><p id="range-caption" class="caption"></p><div id="metrics" class="metrics"></div></section>' +
+      '<section id="details" class="detail-section"><div class="section-title"><div class="detail-heading"><h2>项目明细</h2><span id="result-count"></span></div><button id="export" type="button" disabled>↓ 导出 CSV</button></div><p id="export-feedback" class="sr-only" role="status"></p><p class="table-hint">点击表头排序 · 名称下方蓝条表示相对产量 · 合计包含全部匹配项目</p><div id="stats-data" aria-live="polite"></div>' +
+      '<div id="pagination" class="pagination" hidden><label>每页 <select id="page-size" aria-label="每页项目数"><option value="10">10 项</option><option value="20">20 项</option><option value="50">50 项</option></select></label><span id="page-info"></span><button id="prev-page" type="button" aria-label="上一页">← 上一页</button><button id="next-page" type="button" aria-label="下一页">下一页 →</button></div></section>' +
+      '<details class="metric-notes"><summary>统计口径与数据说明</summary><p id="stats-note" class="note"></p></details>' +
+      '<section id="project-reference" class="project-reference" aria-label="项目累计参考" hidden><h2>项目参考 · 全部成员累计</h2><p class="note">项目 regions 总数包含全部成员、所有日期的区域，不受上方个人日期筛选影响，不计入本人产量。</p><div id="project-metrics" class="metrics"></div></section>' +
+      '<section id="pending-section" class="pending-section" aria-label="我的返修和返工"><div id="pending" class="section-title"><h2>我的返修 / 返工</h2><span id="pending-total"></span></div><div class="pending-toolbar"><p class="note">当前待处理，包含历史遗留数据 · 不受日期筛选影响</p><div class="pending-tabs" role="group" aria-label="待处理类型"><button data-pending-mode="all" aria-pressed="true">全部</button><button data-pending-mode="repair">仅待返修</button><button data-pending-mode="rework">仅待返工</button></div></div><div id="pending-data" aria-live="polite"></div><p id="pending-updated" class="caption"></p></section>' +
+      '<footer>仅显示当前登录账号 · 缺失值以 — 表示 · v1.8.0</footer></div></section>';
+    document.body.appendChild(host);
+    $('#close').addEventListener('click', function () {
+      if (state.statsBusy) { state.stats = null; state.statsProgress = null; state.updated = ''; }
+      if (state.pendingBusy) { state.pending = null; state.pendingProgress = null; state.pendingUpdated = ''; }
+      if (state.regionBusy) { state.regions = null; state.regionUpdated = ''; }
+      state.opened = false; abort(); cancelOtherJobs([]); render(); focusEntry();
+    });
+    $('#query').addEventListener('click', function () { refresh(true); });
+    root.querySelectorAll('[data-preset]').forEach(function (b) { b.addEventListener('click', function () { state.preset = b.dataset.preset; state.range = presetRange(state.preset); render(); }); });
+    ['start','end'].forEach(function (key, index) { $('#' + key).addEventListener('change', function () { state.range[index] = this.value; state.preset = ''; render(); }); });
+    $('#scope').addEventListener('change', function () { state.workspace = this.value; render(); });
+    $('#search').addEventListener('input', function () { state.filter = this.value; state.page = 1; render(); });
+    $('#project-ids').addEventListener('input', function () { state.projectIdsText = this.value; render(); });
+    $('#field-options').addEventListener('change', function (event) {
+      var input = event.target, key = input && input.dataset && input.dataset.field;
+      if (!METRICS[state.role].some(function (metric) { return metric[0] === key; })) return;
+      if (input.checked) state.fieldSelection[state.role].add(key); else state.fieldSelection[state.role].delete(key);
+      renderFieldOptions(); renderStats();
+    });
+    $('#field-all').addEventListener('click', function () { selectFields(true); });
+    $('#field-default').addEventListener('click', function () { state.fieldSelection[state.role] = defaultFields(state.role); renderFieldOptions(); renderStats(); });
+    $('#field-none').addEventListener('click', function () { selectFields(false); });
+    $('#quick-search').addEventListener('input', function () { state.quick = this.value; state.page = 1; renderStats(); renderPending(); $('#clear-quick').hidden = !state.quick; });
+    $('#clear-quick').addEventListener('click', function () { state.quick = ''; state.page = 1; $('#quick-search').value = ''; render(); $('#quick-search').focus(); });
+    $('#page-size').addEventListener('change', function () { state.pageSize = Number(this.value); state.page = 1; renderStats(); });
+    $('#prev-page').addEventListener('click', function () { state.page--; renderStats(); });
+    $('#next-page').addEventListener('click', function () { state.page++; renderStats(); });
+    $('#export').addEventListener('click', exportStats);
+    root.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' && ['start', 'end', 'search', 'project-ids'].indexOf(event.target.id) >= 0) { event.preventDefault(); refresh(true); }
+      if (event.key === 'Escape' && state.opened) { if (event.target.id === 'quick-search' && state.quick) { event.preventDefault(); $('#clear-quick').click(); } else $('#close').click(); }
+    });
+    ['pointerdown', 'mousedown', 'touchstart'].forEach(function (type) { root.addEventListener(type, function (event) { event.stopPropagation(); }); });
+    root.addEventListener('click', function (event) {
+      event.stopPropagation();
+      var button = event.target.closest('[data-work]');
+      if (button) goToWork(button.dataset.project, button.dataset.work, button);
+      var sort = event.target.closest('[data-sort]');
+      if (sort) {
+        var oldKey = state.sortKey || (state.role === 'annotator' ? 'submit_total' : 'review_total');
+        state.sortDirection = oldKey === sort.dataset.sort && state.sortDirection === 'desc' ? 'asc' : 'desc';
+        state.sortKey = sort.dataset.sort; state.page = 1; renderStats();
+        var next = root.querySelector('[data-sort="' + state.sortKey + '"]'); if (next) next.focus({preventScroll: true});
+      }
+      var mode = event.target.closest('[data-pending-mode]');
+      if (mode) { state.pendingMode = mode.dataset.pendingMode; render(); }
+      var jump = event.target.closest('[data-jump]');
+      if (jump) { root.querySelectorAll('[data-jump]').forEach(function (b) { b.classList.toggle('current', b === jump); }); $('#' + jump.dataset.jump).scrollIntoView({behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start'}); }
+    });
+  }
+
+  var CSS = `
+    :host{all:initial;position:fixed;z-index:1000003;inset:0;display:block;overflow:hidden;pointer-events:none;--ink:#1e293b;--muted:#718096;--line:#e5eaf1;--blue:#2366d1;--soft:#f5f7fa;--red:#c33d4b;--amber:#986315;font:13px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;color:var(--ink)}
+    :host([hidden]),[hidden]{display:none!important}*{box-sizing:border-box}h1,h2,p{margin:0}button,input,select{font:inherit}button{cursor:pointer;border:1px solid #dce3ed;background:white;color:var(--ink);border-radius:7px;padding:7px 12px;transition:background .12s,border-color .12s}button:disabled{cursor:default;opacity:.4}button:hover:not(:disabled){background:#f0f5fc;border-color:#b8cbea}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,.table-wrap:focus-visible{outline:2px solid var(--blue);outline-offset:3px}input,select{min-width:0;border:1px solid #dce3ed;border-radius:7px;padding:7px 10px;background:#fff;color:var(--ink)}input[type=checkbox]{accent-color:var(--blue)}
+    #panel{height:100%;width:100%;min-width:0;background:#f7f9fc;border-left:1px solid var(--line);display:flex;flex-direction:column;pointer-events:auto;overflow:hidden}header{background:#fff;padding:23px 32px 21px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line);flex:none}.eyebrow{font-size:10px;letter-spacing:1.4px;font-weight:700;color:#526178}.eyebrow span{margin:0 7px;color:#bcc7d8}.title-line{display:flex;align-items:center;gap:14px;margin:5px 0}h1{font-size:26px;font-weight:700;letter-spacing:-.7px;line-height:1.4}#account{font-size:12px;color:var(--muted)}#close{font-size:25px;border:0;color:#8793a5;background:transparent;padding:3px 10px}#query-state{display:inline-flex;align-items:center;gap:5px;font-size:10px;color:#527469;background:#eff7f3;border-radius:20px;padding:2px 8px;white-space:nowrap}#query-state:before{content:"";width:5px;height:5px;border-radius:50%;background:#54a489}#query-state[data-status=busy]{background:#eaf1ff;color:#285ec1}#query-state[data-status=busy]:before{background:#4a7adc;animation:pulse 1s infinite}#query-state[data-status=error],#query-state[data-status=changed]{background:#fff1e6;color:#a36329}#query-state[data-status=error]:before,#query-state[data-status=changed]:before{background:#d38c46}@keyframes pulse{50%{opacity:.3}}
+    .scroll{flex:1;min-height:0;overflow:auto;padding:22px 32px 0;scroll-padding-top:20px}.filters{background:white;border:1px solid var(--line);border-radius:11px;padding:15px 18px 10px}.filter-line{display:flex;gap:14px;align-items:center;flex-wrap:wrap}#center-label{font-size:12px;font-weight:600;color:#667790}.scope-label{margin-left:auto;display:flex;gap:8px;align-items:center;color:var(--muted);font-size:11px}.scope-label select{font-size:12px;max-width:240px;padding:5px 8px}.query-row{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-top:14px}.presets{display:flex;border:1px solid var(--line);border-radius:7px;overflow:hidden;flex-shrink:0}.presets button{border:0;border-radius:0;font-size:12px;padding:7px 13px;background:#fff;white-space:nowrap}.presets button[aria-pressed=true]{background:#eaf1fe;color:#215dc3;font-weight:650}.dates{display:flex;align-items:center;gap:8px;color:#9aa5b6}input[type=date]{font-size:12px;width:144px;padding:7px 8px}button.primary{background:var(--blue);border-color:var(--blue);color:white;padding:7px 18px;white-space:nowrap}button.primary:hover{background:#1b55b5}.query-help{font-size:10px;line-height:1.5;color:#8a96a6;margin:7px 0 0}.query-help.changed{color:#a8692c;background:#fff6e8;padding:6px 9px;border-radius:5px}
+    .advanced{margin-top:12px;border-top:1px solid #eef1f5}.advanced summary{padding-top:9px;font-size:11px;color:#6d7b90;cursor:pointer;list-style-position:inside}.advanced summary span{font-size:10px;margin-left:8px;color:#9aa4b2}.advanced-body{padding:12px 0 5px}.project-filters label{display:flex;flex-direction:column;gap:5px;min-width:190px;color:var(--muted);font-size:11px}.project-filters input{width:260px;max-width:100%}.field-picker{margin-top:14px}.field-toolbar{display:flex;align-items:center;gap:7px;margin-bottom:8px;font-size:11px;color:#6a778b}.field-toolbar>span{margin-right:auto}.field-toolbar button{font-size:10px;padding:2px 8px}.field-options{display:flex;flex-wrap:wrap;gap:7px 16px}.field-option{display:flex;align-items:center;gap:5px;font-size:11px;cursor:pointer;color:#5e6e83}.field-option input{margin:0;width:13px;height:13px}
+    .view-nav{display:flex;gap:24px;border-bottom:1px solid #dde5f0;margin:17px 0 16px}.view-nav button{padding:9px 0 10px;border:0;border-radius:0;background:transparent;font-size:13px;font-weight:600;color:#8b97a7;position:relative}.view-nav button.current{color:var(--blue)}.view-nav button.current:after{content:"";position:absolute;bottom:-1px;left:0;right:0;height:2px;background:var(--blue)}.browse-bar{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:22px}.browse-bar>small{font-size:10px;color:#9aa5b6}.quick-search{display:flex;align-items:center;background:#fff;border:1px solid #dfe6ef;border-radius:7px;padding:0 10px;gap:6px;width:335px;max-width:100%}.quick-search>span{font-size:22px;color:#8a9bb4;line-height:1}.quick-search input{border:0;outline:0;flex:1;width:100%;background:transparent;padding:8px 3px;font-size:12px}.quick-search:focus-within{border-color:#8caee9;box-shadow:0 0 0 2px #e7effc}.quick-search button{padding:0 3px;border:0;font-size:17px;color:#8b98aa;background:transparent}.section-title{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:6px}h2{font-size:15px;font-weight:650;letter-spacing:-.2px}.section-title>span{font-size:10px;color:#95a0ae}.caption{font-size:11px;color:#8a96a8;margin-bottom:12px}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:14px 0 24px}.metric{padding:15px 18px;background:white;border:1px solid #e4eaf2;border-radius:9px;min-width:0}.metric:first-child{border-color:#abc7f4;background:#f0f5ff}.metric>span{font-size:11px;color:#7a879b}.metric:first-child>span{color:#5272ab}.metric-value{display:flex;align-items:baseline;gap:5px;margin-top:3px;white-space:nowrap}.metric-value strong{font-size:27px;font-weight:650;letter-spacing:-.6px;font-variant-numeric:tabular-nums;line-height:1.45}.metric:first-child strong{color:#215fc6}.metric-value small{font-size:10px;color:#9ba5b3}.metric .metric-coverage{display:block;font-size:9px;color:#a47942;margin-top:4px}
+    .detail-section{background:#fff;border:1px solid var(--line);border-radius:11px;padding:18px 0 0;overflow:hidden}.detail-section>.section-title,.table-hint{margin-left:18px;margin-right:18px}.detail-heading{display:flex;align-items:center;gap:10px}.detail-heading>span{font-size:10px;color:#8794a6;background:#f1f4f9;border-radius:20px;padding:2px 8px}#export{font-size:11px;padding:5px 11px}.table-hint{font-size:10px;color:#a2acba;margin-top:7px;margin-bottom:13px}.table-wrap{overflow:auto;max-height:510px;overscroll-behavior:contain;scrollbar-width:thin}table{width:100%;border-collapse:separate;border-spacing:0;font-size:12px;white-space:nowrap}thead th{position:sticky;top:0;z-index:2;background:#f6f8fc;border-top:1px solid #e9edf4;border-bottom:1px solid #e6ebf2;padding:0;text-align:right;color:#8490a2;font-size:10px;font-weight:500}thead th button{border:0;border-radius:0;background:transparent;font-size:10px;color:inherit;width:100%;text-align:right;padding:12px 13px;white-space:nowrap}thead th[aria-sort=ascending],thead th[aria-sort=descending]{color:#2565cb;background:#edf3fe}thead th button span{font-size:11px;color:#aebbd0}thead th[aria-sort=ascending] span,thead th[aria-sort=descending] span{color:#2565cb}th:first-child,td:first-child{text-align:left;position:sticky;left:0;min-width:230px;max-width:280px;box-shadow:1px 0 0 #e9edf4}thead th:first-child{z-index:3}thead th:first-child button{text-align:left;padding-left:18px}td{padding:13px;border-bottom:1px solid #edf1f6;text-align:right;background:white;font-variant-numeric:tabular-nums;color:#566579}td:first-child{padding:12px 18px;background:white}tbody tr:hover td{background:#f7faff}.project-name{display:block;font-weight:550;color:#34445c;overflow:hidden;text-overflow:ellipsis;max-width:244px;font-size:11px}.project-id{display:inline-block;font-size:9px;color:#a1adbd;margin:2px 0 0}.row-meter{height:3px;display:block;border-radius:2px;overflow:hidden;background:#eef2f8;width:100%;max-width:130px;margin-top:4px}.row-meter i{display:block;height:100%;background:#9dbcef}.primary-number{font-weight:650;color:#2462c5}.missing{color:#c0c8d3}.accuracy{border-radius:4px;font-size:10px;padding:3px 6px;display:inline-block}.accuracy.good{color:#328064;background:#eaf6f0}.accuracy.medium{color:#a07628;background:#fff6e2}.accuracy.low{color:#bd5263;background:#fceef0}tfoot th,tfoot td{position:sticky;bottom:0;border-top:1px solid #dce6f2;border-bottom:0;background:#f2f6fc;font-weight:650;padding:13px;color:#485d7e;font-size:11px;z-index:1}tfoot th:first-child{z-index:2;padding-left:18px;background:#f2f6fc}tfoot small{font-size:9px;color:#97a4b6;font-weight:400;margin-left:5px}.pagination{display:flex;align-items:center;gap:8px;padding:12px 18px;border-top:1px solid var(--line);font-size:10px;color:#8592a5}.pagination label{display:flex;align-items:center;gap:5px}.pagination select{padding:3px 6px;font-size:10px}.pagination #page-info{margin-left:auto;margin-right:6px}.pagination button{font-size:10px;padding:4px 9px}.metric-notes{margin:11px 0 24px}.metric-notes summary{font-size:10px;color:#8a97aa;cursor:pointer}.metric-notes p{margin:8px 0;background:#fff;border:1px solid var(--line);border-radius:7px;padding:12px 14px;line-height:1.9}.note{font-size:11px;color:#929eb0;line-height:1.8}.empty{padding:36px 18px;display:flex;flex-direction:column;align-items:center;gap:6px;color:#9aa7b9;font-size:11px}.empty strong{font-weight:550;color:#6a7b94;font-size:13px}.empty-symbol{font-size:25px;color:#b8c9e4}.error{color:#b64352;background:#fff0f1;border:1px solid #f2d4d9;border-radius:7px;padding:12px 16px;margin:14px 0;font-size:12px}.notice{color:#9d702a;background:#fff8e8;padding:9px 12px;font-size:11px;border-radius:6px;margin:10px 0}
+    .pending-section{border-top:1px solid #dfe6ef;padding-top:23px;margin-top:8px}.pending-toolbar{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:10px 0 14px;flex-wrap:wrap}.pending-tabs{display:flex;gap:4px}.pending-tabs button{font-size:10px;padding:4px 9px}.pending-tabs button[aria-pressed=true]{background:#eaf1ff;color:#2862c3;border-color:#cbdcf8}.pending-list{display:grid;gap:8px}.pending-row{display:grid;grid-template-columns:minmax(0,1fr) 190px 190px;align-items:center;gap:18px;background:white;border:1px solid var(--line);border-radius:8px;padding:14px 18px}.pending-project{min-width:0}.pending-project strong{font-size:12px;font-weight:550;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.pending-project small{font-size:10px;color:#a1adbd}.lane{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:#96a2b2}.lane b{font-size:14px;font-variant-numeric:tabular-nums;margin-left:3px}.lane.repair b{color:#c38a35}.lane.rework b{color:#c76b7c}.lane button{font-size:10px;padding:4px 8px}.pending-section>.caption{margin-top:10px}.project-reference{border:1px dashed #c9d7eb;border-radius:10px;padding:16px;margin:20px 0}.project-reference .metrics{margin-bottom:0}footer{font-size:9px;color:#aab5c4;text-align:center;padding:24px 0 20px}.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}#overview,#details,#pending{scroll-margin-top:20px}
+    @media(min-width:1500px){.metrics{grid-template-columns:repeat(7,minmax(0,1fr))}.metric{padding:16px}.metric-value strong{font-size:28px}}
+    @media(max-width:1100px){header{padding:20px 24px}.scroll{padding:20px 24px 0}.pending-row{grid-template-columns:minmax(0,1fr) 155px 155px;gap:12px}.metric{padding:12px 14px}.metric-value strong{font-size:24px}.browse-bar>small{display:none}}
+    @media(max-width:760px){header{padding:17px 18px}.scroll{padding:16px 16px 0}.metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.scope-label{margin-left:0}.filters{padding:12px}.query-row{gap:10px}.query-row>.dates{order:2}.query-row>#query{margin-left:auto;order:3}.pending-row{grid-template-columns:minmax(0,1fr);gap:9px}.lane{justify-content:flex-start;gap:20px}.lane>span{min-width:85px}.section-title{flex-wrap:wrap;gap:6px}.project-filters label{width:100%;min-width:0}.project-filters input{width:100%}.eyebrow{font-size:9px}.metrics{gap:7px}.view-nav{gap:20px}.pagination{gap:4px;padding:10px}.pagination button{padding:4px 6px}.detail-section>.section-title,.table-hint{margin-left:12px;margin-right:12px}}
+    @media(max-width:420px){h1{font-size:23px}.title-line{gap:8px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.metric{padding:12px}.metric-value strong{font-size:25px}.metric:last-child:nth-child(odd){grid-column:span 2}.query-row{gap:10px}.presets{width:100%}.presets button{flex:1;padding:6px}.dates{width:100%;justify-content:space-between}input[type=date]{width:calc(50% - 16px)}.query-row>#query{width:100%;margin-left:0;padding:8px}.browse-bar{margin-bottom:17px}.quick-search{width:100%}.scope-label select{max-width:190px}.detail-heading{gap:6px}.detail-heading>span{font-size:9px}#export{font-size:10px;padding:5px 7px}.table-hint{line-height:1.7;font-size:9px}.section-title>span{font-size:9px}#pending-total{width:100%}.view-nav{margin-top:12px;margin-bottom:13px}.view-nav button{font-size:12px}.filter-line{gap:9px}.advanced summary{font-size:10px}.advanced summary span{font-size:9px}}
+    @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+  `;
+
+  function syncRoute() {
+    if (!document.body) return;
+    syncMenu();
+    var path = window.__demoRoute;
+    if (path === lastPath && host && host.isConnected) return;
+    var context = routeContext(path);
+    if (path === lastPath && context && host) {
+      resetCountAnimations();
+      mount(); host.hidden = false;
+      configureScope(context);
+      $('#search').value = state.filter; $('#quick-search').value = state.quick; $('#page-size').value = String(state.pageSize);
+      render();
+      return;
+    }
+    var keepOpened = state.opened && state.context && context && state.context.role === context.role;
+    lastPath = path;
+    abort(); cancelOtherJobs([]); clearResults();
+    state.context = context;
+    if (!context) { clearCache(); if (host) host.hidden = true; updateMenuState(); return; }
+    if (!host || !host.isConnected) mount();
+    host.hidden = false;
+    state.sortKey = ''; state.sortDirection = 'desc'; state.quick = ''; state.pendingMode = 'all'; $('#quick-search').value = '';
+    state.role = context.role; state.workspace = context.workspace; state.filter = ''; state.projectIdsText = ''; $('#search').value = ''; $('#project-ids').value = '';
+    state.opened = !!keepOpened || location.hash === '#insta360-personal';
+    configureScope(context);
+    render();
+  }
+  function configureScope(context) {
+    $('#scope').innerHTML = (context.workspace !== 'all' ? '<option value="' + context.workspace + '">当前工作区 #' + context.workspace + '</option>' : '') + '<option value="all">全部可访问项目</option>';
+    $('#scope').value = state.workspace;
+  }
+  window.addEventListener('popstate', syncRoute);
+  window.addEventListener('ls:locationchange', syncRoute);
+  window.addEventListener('resize', syncDrawerLayout);
+  // 兼容 SPA 的 pushState，以及管理版脚本已包裹 history 的情况，不改写站点路由函数。
+  setInterval(syncRoute, 700);
+  syncRoute();
+})();
+</script>
+<script>queryWorkbench();</script>
+</body></html>
