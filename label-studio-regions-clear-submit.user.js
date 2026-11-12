@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Insta360 Regions 批量清空并提交
 // @namespace    local.insta360.regions-cleaner
-// @version      3.2.4
-// @description  直接清空 Regions，Ctrl+Enter 提交；空轨迹跳过，减少轨迹重复扫描，提交后快速回读验证。
+// @version      3.2.5
+// @description  直接清空 Regions，Ctrl+Enter 提交；提前只读预取，减少轨迹比较与界面刷新开销，保留回读验证。
 // @homepageURL  https://github.com/chengzi-1225/Insta360-chengzi
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-regions-clear-submit.meta.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/label-studio-regions-clear-submit.user.js
@@ -14,7 +14,7 @@
 
 (() => {
   'use strict';
-  const VERSION = '3.2.4';
+  const VERSION = '3.2.5';
   const MAX_TASKS = 10000;
   const clone = value => JSON.parse(JSON.stringify(value));
   const canonical = value => JSON.stringify(normalize(value));
@@ -23,7 +23,36 @@
     if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().filter(k => value[k] !== undefined).map(k => [k, normalize(value[k])]));
     return value;
   }
-  const same = (a, b) => canonical(a) === canonical(b);
+  function same(a, b) {
+    // Compare JSON data directly instead of sorting/copying every frame and
+    // allocating two complete strings. Preserve the existing JSON conventions.
+    if (a === b) return true;
+    if (typeof a === 'number' && !Number.isFinite(a)) a = null;
+    if (typeof b === 'number' && !Number.isFinite(b)) b = null;
+    if (a === b) return true;
+    if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+    if (Array.isArray(a) || Array.isArray(b)) {
+      if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+      for (let i = 0; i < a.length; i++) if (!same(a[i] ?? null, b[i] ?? null)) return false;
+      return true;
+    }
+    const left = Object.keys(a).filter(key => a[key] !== undefined);
+    const right = Object.keys(b).filter(key => b[key] !== undefined);
+    if (left.length !== right.length) return false;
+    for (const key of left) if (!Object.prototype.hasOwnProperty.call(b, key) || !same(a[key], b[key])) return false;
+    return true;
+  }
+  function createRenderQueue(render, options = {}) {
+    const schedule = options.schedule || setTimeout, cancel = options.cancel || clearTimeout;
+    let timer = null;
+    return {
+      request() {
+        if (timer !== null) return;
+        timer = schedule(() => { timer = null; render(); }, 100);
+      },
+      flush() { if (timer !== null) cancel(timer); timer = null; render(); },
+    };
+  }
   const idOf = x => Number(x && typeof x === 'object' ? x.id : x);
   const roots = result => {
     if (!Array.isArray(result)) throw new Error('标注结果不是数组');
@@ -162,7 +191,7 @@
     const pause = options.wait || (ms => new Promise(resolve => setTimeout(resolve, ms)));
     const timeout = options.timeout ?? 45000, quietMs = options.quietMs ?? 1500;
     const start = now(), checkpoint = tracker.readyCheckpoint;
-    let last = checkpoint?.clock === now ? checkpoint.token : null;
+    let last = checkpoint?.clock === now ? checkpoint.result : null;
     let lastMetadata = checkpoint?.clock === now ? checkpoint.metadata : null;
     let stableAt = last ? checkpoint.stableAt : start;
     let previousAnnotation = last ? checkpoint.annotation : null;
@@ -179,10 +208,13 @@
         const metadata = canonical({ revision: tracker.revision, identity: sample.identity });
         if (metadata !== lastMetadata || previousAnnotation !== sample.a) { last = null; stableAt = now(); }
         if (last && now() - stableAt < quietMs) { await pause(150); continue; }
-        const token = canonical({ revision: tracker.revision, identity: sample.identity, result: comparisonResult(sample.result) });
-        if (token !== last || previousAnnotation !== sample.a) { last = token; previousAnnotation = sample.a; stableAt = now(); }
+        const result = comparisonResult(sample.result);
+        if (last === null || !same(result, last) || previousAnnotation !== sample.a) {
+          // Keep an independent snapshot even if a page adapter reuses objects.
+          last = clone(result); previousAnnotation = sample.a; stableAt = now();
+        }
         lastMetadata = metadata;
-        tracker.readyCheckpoint = { token: last, metadata, annotation: sample.a, stableAt, clock: now };
+        tracker.readyCheckpoint = { result: last, metadata, annotation: sample.a, stableAt, clock: now };
         if (now() - stableAt >= quietMs) return sample;
       } else reset();
       await pause(150);
@@ -255,8 +287,9 @@
       const emit = (stage, message) => { outcome.stage = stage; report(outcomes, message); };
       try {
         emit('checking', `任务 ${entry.task}：读取当前编辑器内容`);
-        const current = await adapter.inspect(entry.task, taskRead);
+        const taskSnapshot = taskRead ? await taskRead : undefined;
         if (!shouldStop() && index + 1 < entries.length) prepared = prepare(entries[index + 1].task);
+        const current = await adapter.inspect(entry.task, taskRead ? Promise.resolve(taskSnapshot) : undefined);
         outcome.state = current.state; outcome.source = current.source;
         outcome.regions = roots(current.result).length;
         const action = actionFor(current);
@@ -282,7 +315,7 @@
     }
     return outcomes;
   }
-  if (typeof module === 'object' && module.exports) { module.exports = { cleanResult, roots, parseIds, same, comparisonResult, actionFor, serverHasNoRegions, dispatchSubmitShortcut, resolveSelection, trackNativeRequests, waitForNativeReady, readWhileNativeReady, postSubmitSample, readAfterSubmission, verifySubmittedResult, loadNativeTask, runBatch }; return; }
+  if (typeof module === 'object' && module.exports) { module.exports = { cleanResult, roots, parseIds, same, createRenderQueue, comparisonResult, actionFor, serverHasNoRegions, dispatchSubmitShortcut, resolveSelection, trackNativeRequests, waitForNativeReady, readWhileNativeReady, postSubmitSample, readAfterSubmission, verifySubmittedResult, loadNativeTask, runBatch }; return; }
   if (location.origin !== 'https://label.insta360.com') return;
   const project = Number(location.pathname.match(/\/projects\/(\d+)\/data/)?.[1]);
   if (!project) return;
@@ -486,10 +519,11 @@
       }
       update();
     }
+    const progressRender = createRenderQueue(render);
     async function busy(fn) {
       if (state.busy) return; state.busy = true; state.stopped = false; update();
       try { await fn(); } catch (e) { log(e.message); console.error('[Regions Workflow]', e); }
-      finally { state.busy = false; update(); }
+      finally { state.busy = false; progressRender.flush(); }
     }
     $('close').onclick = () => { frame.style.display = 'none'; };
     $('ids').oninput = update;
@@ -518,7 +552,7 @@
       if (location.href !== route || !same(ids, parseIds($('ids').value))) throw new Error('确认期间页面或任务 ID 发生变化，未开始清空，请重新执行');
       state.taskIds = ids.slice(); state.journal = []; render();
       state.journal = await runBatch(ids.map(task => ({ task })), adapter, (outcomes, message) => {
-        state.journal = outcomes; log(message); render();
+        state.journal = outcomes; log(message); progressRender.request();
         // Keep the live progress lightweight. Save the full journal once this run settles.
       }, () => state.stopped);
       try { sessionStorage.setItem(`insta-regions-workflow-journal:${project}`, JSON.stringify({ project, outcomes: state.journal })); } catch (_) { /* File export remains available. */ }
@@ -526,7 +560,6 @@
       const done = state.journal.filter(o => o.stage === 'done').length;
       const skipped = state.journal.filter(o => o.stage === 'skipped').length;
       if (!failed) log(`本批结束：完成 ${done} 个任务，跳过 ${skipped} 个，未开始 ${ids.length - state.journal.length} 个。${state.stopped ? '已按要求停止后续任务。' : ''}请刷新列表核对提交结果。`);
-      render();
     });
     $('stop').onclick = () => { state.stopped = true; log('已请求停止。当前执行中的任务会完成清空与提交，之后不再进入下一任务。'); };
     $('journal').onclick = () => download({ format: 'insta360-regions-workflow-journal-v3', version: VERSION, project, exportedAt: new Date().toISOString(), outcomes: state.journal }, 'journal');
