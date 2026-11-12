@@ -44,11 +44,13 @@ v3.2.5 将下一任务的只读预取提前到当前编辑器加载期间；完�
 
 
 <!-- personal-workbench:start -->
-## 我的工作台 v1.8.1
+## 我的工作台 v1.8.2
 
-[安装 / 更新](https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/Insta360我的工作台.user.js) · [使用说明](docs/personal-workbench.md) · [测试页面（下载后双击打开）](docs/demos/insta360-workbench.html) · [完整下载包](docs/downloads/Insta360我的工作台-1.8.1.zip)
+[安装 / 更新](https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/Insta360我的工作台.user.js) · [使用说明](docs/personal-workbench.md) · [测试页面（下载后双击打开）](docs/demos/insta360-workbench.html) · [完整下载包](docs/downloads/Insta360我的工作台-1.8.2.zip)
 
-界面进一步精简：单行日期操作、4 项核心指标和项目表格；移除大卡片、重复导航和装饰条。工作区与字段集中到“筛选 / 列”，返修 / 返工和统计说明默认折叠，桌面首屏可直接比较项目。
+筛选改为同排的工作区、可搜索项目下拉、多个项目 ID、查询与重置；显示列独立收起。保留 4 项核心指标和紧凑项目表格，选择条件后点击查询应用，项目按 ID 精确匹配。
 
-保留名称 / ID 搜索、数字排序、分页、全部匹配项目 CSV 导出和本人身份核验。数据逻辑、15 组浏览器交互、3 组精简布局及标注 / 审核路由检查通过，覆盖 320–1920px 宽度。测试页使用模拟数据；真实项目需登录后确认。原安装与自动更新地址保持不变。
+返修 / 返工每批读取 10 个项目，最多两个并发，临时失败自动重试一次。部分失败保留已取得的结果并标记未完整，可单独重试待处理，不重查本人产量。
+
+5 项数据逻辑、15 组浏览器交互、5 组超时恢复、筛选交互、精简布局及标注 / 审核路由检查通过，覆盖 320–1920px 宽度。测试页使用模拟数据；实际平台响应仍需登录后确认。固定安装与自动更新地址保持不变。
 <!-- personal-workbench:end -->

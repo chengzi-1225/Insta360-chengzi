@@ -15,7 +15,7 @@ with sync_playwright() as p:
     expect(page.locator('#query-state')).to_have_text('查询完成', timeout=10000)
     expect(page.locator('#metrics .metric')).to_have_count(4)
     expect(page.locator('.view-nav')).to_have_count(0)
-    assert page.locator('#stats-data tbody tr').first.bounding_box()['y'] < 360
+    assert page.locator('#stats-data tbody tr').first.bounding_box()['y'] < 400
     assert not page.locator('.advanced').evaluate('(e)=>e.open')
     assert not page.locator('#pending-section').evaluate('(e)=>e.open')
     assert page.locator('#stats-data tbody tr').last.bounding_box()['y'] < 800

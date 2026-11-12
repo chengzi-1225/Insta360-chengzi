@@ -19,6 +19,15 @@ def settings(page):
     if not page.locator('.advanced').evaluate('(e)=>e.open'):
         page.locator('.advanced summary').click()
 
+def project_keyword(page,value):
+    if not page.locator('#project-picker').evaluate('(e)=>e.open'):
+        page.locator('#project-picker summary').click()
+    page.locator('#search').fill(value)
+    if value:
+        page.locator('[data-project-keyword]').click()
+    else:
+        page.locator('[data-project-choice=""]').click()
+
 def scenario(page,value,count=None):
     page.locator('#demo-scenario').select_option(value)
     ready(page,count)
@@ -100,28 +109,24 @@ with sync_playwright() as p:
     check('empty and failed queries do not show old totals or enable export')
 
     scenario(page,'normal',8)
-    settings(page)
     page.locator('#project-ids').fill('101,103')
     page.locator('#query').click()
     ready(page,2)
     expect(page.locator('#stats-data')).not_to_contain_text('#102')
-    settings(page)
-    page.locator('#search').fill('不存在的项目')
+    project_keyword(page,'不存在的项目')
     expect(page.locator('#result-count')).to_have_text('2 / 2 个项目')
-    page.locator('#search').fill('')
+    project_keyword(page,'')
     page.locator('#project-ids').fill('bad')
     page.locator('#query').click()
     expect(page.locator('#error')).to_contain_text('项目 ID 只能填写数字')
-    settings(page)
     page.locator('#project-ids').fill('')
-    page.locator('#search').fill('人物')
+    project_keyword(page,'人物')
     ready_caption=page.locator('#result-count').inner_text()
     assert ready_caption=='尚未查询'  # invalid ID query above already cleared results
     page.locator('#query').click()
     ready(page,2)
     assert all('人物' in s for s in page.locator('#stats-data .project-name').all_inner_texts())
-    settings(page)
-    page.locator('#search').fill('')
+    project_keyword(page,'')
     page.locator('#query').click()
     ready(page,8)
     page.locator('#start').fill('2026-11-13')

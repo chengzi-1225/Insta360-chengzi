@@ -7,7 +7,7 @@
 <aside class="ls-sidebar"><div class="brand">INSTA360</div><div class="tag">DATA WORKSPACE</div><div class="menu-label">工作空间</div><nav><ul class="ls-main-menu">
 <li><a class="ls-main-menu__item" href="/annotation/workspaces/109" data-demo-role="annotator"><span class="ls-main-menu__item-icon">▧</span><span class="ls-main-menu__item-label">标注中心</span></a></li>
 <li><a class="ls-main-menu__item" href="/review/workspaces/109" data-demo-role="reviewer"><span class="ls-main-menu__item-icon">☑</span><span class="ls-main-menu__item-label">审核中心</span></a></li>
-</ul></nav><div class="demo-controls"><label for="demo-scenario">测试数据场景</label><select id="demo-scenario"><option value="normal">日常数据 · 8 个项目</option><option value="many">多项目 · 36 个项目</option><option value="sparse">部分字段缺失</option><option value="zero">真实零值</option><option value="empty">暂无数据</option><option value="error">模拟接口失败</option><option value="slow">模拟慢查询</option><option value="account">模拟切换账号</option></select><p>切换场景会重新查询。<br>日期和范围可正常操作。</p><span class="demo-badge">本地测试 · 全部为模拟数据</span><span id="request-count" class="request-count"></span></div></aside>
+</ul></nav><div class="demo-controls"><label for="demo-scenario">测试数据场景</label><select id="demo-scenario"><option value="normal">日常数据 · 8 个项目</option><option value="many">多项目 · 36 个项目</option><option value="sparse">部分字段缺失</option><option value="zero">真实零值</option><option value="empty">暂无数据</option><option value="error">模拟接口失败</option><option value="slow">模拟慢查询</option><option value="pendingTimeout">模拟返修超时（可重试）</option><option value="account">模拟切换账号</option></select><p>切换场景会重新查询。<br>日期和范围可正常操作。</p><span class="demo-badge">本地测试 · 全部为模拟数据</span><span id="request-count" class="request-count"></span></div></aside>
 <main><h1>个人数据工作台</h1><p>查看本人产量、比较项目并处理返修和返工。点击侧栏“我的标注”或“我的审核”打开。</p></main>
 <div class="demo-mobile"><button id="demo-switch-role">切到审核</button><select id="demo-mobile-scenario" aria-label="测试数据场景（窄屏）"></select><button id="demo-reopen">打开工作台</button></div>
 <dialog id="demo-navigation"><h3>已验证原生处理入口</h3><p>真实平台会进入对应项目的处理页面。本测试页在此展示目标路径。</p><p id="demo-target"></p><form method="dialog"><button>返回工作台</button></form></dialog>
@@ -21,7 +21,7 @@ function demoProjects(){return Array.from({length:window.__demoScenario==='many'
 function queryWorkbench(){const root=document.querySelector('#insta360-personal-toolbox')?.shadowRoot;if(root){const panel=root.querySelector('#panel');if(panel.hidden)document.querySelector('[data-insta360-personal-menu="'+(window.__demoRoute.startsWith('/review')?'reviewer':'annotator')+'"] a')?.click();root.querySelector('#query').click();}}
 function switchRole(role){window.__demoRoute=(role==='reviewer'?'/review':'/annotation')+'/workspaces/109';window.dispatchEvent(new PopStateEvent('popstate'));const entry=document.querySelector('[data-insta360-personal-menu="'+role+'"] a');entry?.click();queryWorkbench();document.querySelector('#demo-switch-role').textContent=role==='reviewer'?'切到标注':'切到审核';}
 document.querySelectorAll('[data-demo-role]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();switchRole(a.dataset.demoRole);}));
-function setScenario(value){window.__demoScenario=value;document.querySelector('#demo-scenario').value=value;document.querySelector('#demo-mobile-scenario').value=value;queryWorkbench();}
+function setScenario(value){window.__demoPendingTimeouts=0;window.__demoScenario=value;document.querySelector('#demo-scenario').value=value;document.querySelector('#demo-mobile-scenario').value=value;queryWorkbench();}
 document.querySelector('#demo-scenario').onchange=e=>setScenario(e.target.value);
 document.querySelector('#demo-mobile-scenario').innerHTML=document.querySelector('#demo-scenario').innerHTML;
 document.querySelector('#demo-mobile-scenario').onchange=e=>setScenario(e.target.value);
@@ -37,12 +37,14 @@ window.fetch=async function(input,options={}){
   const reply=(data,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=> 'application/json'},json:async()=>data});
   const account=scenario==='account'?8:7;
   if(u.pathname==='/api/current-user/whoami')return reply({id:account,first_name:account===7?'橙子':'测试账号 B',role:{name:'reviewer'}});
+  if(u.pathname==='/api/workspaces')return reply({count:2,results:[{id:109,title:'sg1-自由宽高比'},{id:110,title:'sg2-测试工作区'}]});
   if(scenario==='error')return reply({error:'模拟接口错误'},503);
-  const projects=scenario==='empty'||scenario==='account'?[]:demoProjects();
+  const projects=scenario==='empty'||scenario==='account'?[]:(u.searchParams.get('workspaces')||u.searchParams.get('workspace_id'))==='110'?[{id:201,title:'sg2 测试项目',workspace:110,user_repair_count:1,user_rework_count:0,total_regions:200}]:demoProjects();
   const ids=(u.searchParams.get('project_id')||u.searchParams.get('ids')||'').split(',').filter(Boolean),title=(u.searchParams.get('title')||'').toLowerCase();
   const selected=projects.filter(p=>(!ids.length||ids.includes(String(p.id)))&&(!title||p.title.toLowerCase().includes(title)));
   const page=Number(u.searchParams.get('page')||1),pageSize=6;
   const paged=(rows,key)=>reply({count:rows.length,page,page_size:pageSize,role:u.searchParams.get('role'),[key]:rows.slice((page-1)*pageSize,page*pageSize)});
+  if(u.pathname==='/api/projects'&&scenario==='pendingTimeout'&&(u.searchParams.get('include')||'').includes('user_repair_count')&&page===2&&(window.__demoPendingTimeouts||0)<2){window.__demoPendingTimeouts=(window.__demoPendingTimeouts||0)+1;throw Object.assign(new Error('查询超时，请选择工作区或项目后重试'),{timedOut:true});}
   if(u.pathname==='/api/projects')return paged(selected.map(p=>({...p,user_repair_count:scenario==='zero'?0:p.user_repair_count,user_rework_count:scenario==='zero'?0:p.user_rework_count})),'results');
   if(u.pathname==='/api/statistics/project-overview')return paged(selected.map(p=>({project_id:p.id,stats:{label__region:p.total_regions}})),'projects_stats');
   if(u.pathname==='/api/statistics/overview'){
@@ -66,7 +68,7 @@ window.fetch=async function(input,options={}){
 // ==UserScript==
 // @name         Insta360 我的工作台（标注员 / 审核员）
 // @namespace    https://label.insta360.com/personal-toolbox/
-// @version      1.8.1
+// @version      1.8.2
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360我的工作台.user.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360我的工作台.user.js
 // @description  个人数据工作台：总览、项目搜索排序、分页合计、CSV 导出与返修返工快捷入口
@@ -276,7 +278,7 @@ window.fetch=async function(input,options={}){
     if (!pageSize || !Number.isInteger(pageSize)) pageSize = firstRows.length;
     if (!pageSize || !Number.isInteger(pageSize)) throw new Error('读取不完整：未取得有效分页大小，请刷新重试');
     var totalPages = Math.ceil(expected / pageSize);
-    if (totalPages > 500) throw new Error('分页数量过多，未完整读取，请缩小查询范围');
+    if (totalPages > (options.maxPages || 500)) throw new Error('分页数量过多，未完整读取，请缩小查询范围');
     if (firstPage > totalPages) throw new Error('查询期间分页数量发生变化，请刷新重试');
     accept(firstPage, firstRows, totalPages);
     if (received === expected) return firstRows;
@@ -370,7 +372,7 @@ window.fetch=async function(input,options={}){
   };
 
   var state = {
-    quick: '', sortKey: '', sortDirection: 'desc', page: 1, pageSize: 10, pendingMode: 'all',
+    selectedProjectId: '', choiceSearch: '', quick: '', sortKey: '', sortDirection: 'desc', page: 1, pageSize: 10, pendingMode: 'all',
     context: null, role: 'annotator', workspace: 'all', range: presetRange('today'), preset: 'today',
     user: null, stats: null, regions: null, pending: null, statsProgress: null, pendingProgress: null, error: '', statsError: '', regionError: '', pendingError: '',
     busy: false, statsBusy: false, regionBusy: false, pendingBusy: false, opened: false, filter: '', projectIdsText: '', queryScope: null, queryRange: null, queryWorkspace: null, discarded: 0, updated: '', regionUpdated: '', pendingUpdated: '',
@@ -523,6 +525,8 @@ window.fetch=async function(input,options={}){
   }
   // 只在当前页面内存中保存，账号/权限改变即清空；日期不影响待处理列表的缓存键。
   var cache = new Map(), cacheAccount = '', pendingPageMemory = new Map();
+  var choiceController = null, choiceVersion = 0, choiceRows = [], choiceWorkspace = null, choiceBusy = false, choiceError = '';
+  var workspaceController = null, workspaceRows = [], workspaceBusy = false;
   function pendingPageKey(accountKey, workspace, scope) {
     var key = accountKey + ':' + (workspace || 'all');
     return scope && (scope.title || scope.ids) ? key + ':' + JSON.stringify([scope.title || '', scope.ids || '']) : key;
@@ -546,6 +550,9 @@ window.fetch=async function(input,options={}){
     } catch (_) {}
   }
   function clearCache() {
+    cancelChoices(); choiceRows = []; choiceWorkspace = null; workspaceRows = [];
+    if (workspaceController) workspaceController.abort(); workspaceBusy = false;
+    if (root && state.context) configureScope(state.context);
     cache.forEach(function (entry) { if (entry.controller) entry.controller.abort(); });
     cache.clear(); cacheAccount = '';
   }
@@ -566,6 +573,7 @@ window.fetch=async function(input,options={}){
       return entry;
     }, function (error) {
       if (cache.get(key) === entry) cache.delete(key);
+      entry.controller.abort();
       throw error;
     });
     return entry.promise;
@@ -575,6 +583,80 @@ window.fetch=async function(input,options={}){
       if (entry.promise && keys.indexOf(key) < 0) { entry.controller.abort(); cache.delete(key); }
     });
   }
+  function currentScope() {
+    var ids = parseProjectIds(state.projectIdsText);
+    if (state.selectedProjectId) {
+      if (ids.length && ids.indexOf(state.selectedProjectId) < 0) throw new Error('所选项目不在填写的项目 ID 中，请调整筛选条件');
+      ids = [state.selectedProjectId];
+    }
+    return {title: state.filter.trim(), ids: ids, selectedId: state.selectedProjectId};
+  }
+  function cancelChoices() {
+    choiceVersion++; if (choiceController) choiceController.abort(); choiceBusy = false;
+  }
+  function renderProjectChoices() {
+    if (!root) return;
+    $('#project-label').textContent = state.filter || '全部项目';
+    $('#project-picker summary').title = state.filter || '项目名称';
+    var needle = state.choiceSearch.trim().toLocaleLowerCase();
+    var rows = choiceWorkspace === state.workspace ? choiceRows : [];
+    var options = rows.filter(function (row) { return !needle || (String(row.title || '') + ' #' + row.id).toLocaleLowerCase().includes(needle); });
+    setMarkup('#project-options', '<button type="button" role="option" data-project-choice="" aria-selected="' + (!state.filter) + '">全部项目' + (!state.filter ? '<span>✓</span>' : '') + '</button>' +
+      options.map(function (row) { return '<button type="button" role="option" data-project-choice="' + id(row.id) + '" aria-selected="' + (id(row.id) === state.selectedProjectId) + '"><span class="choice-name">' + escape(row.title || '项目 #' + row.id) + '</span><small>#' + id(row.id) + '</small>' + (id(row.id) === state.selectedProjectId ? '<span>✓</span>' : '') + '</button>'; }).join('') +
+      (needle ? '<button type="button" data-project-keyword>名称包含：' + escape(state.choiceSearch.trim()) + '</button>' : '') +
+      (choiceBusy ? '<p class="choice-note" role="status">正在读取项目名称…</p>' : choiceError ? '<p class="choice-note" role="alert">' + escape(choiceError) + ' <button type="button" data-retry-choices>重试</button></p>' : !options.length ? '<p class="choice-note">没有匹配项目</p>' : ''));
+  }
+  async function loadProjectChoices(force) {
+    if (!state.opened || !$('#project-picker').open || choiceBusy) return;
+    if (!force && choiceWorkspace === state.workspace) { renderProjectChoices(); return; }
+    cancelChoices(); choiceController = new AbortController();
+    var version = choiceVersion, signal = choiceController.signal, workspace = state.workspace;
+    choiceRows = []; choiceWorkspace = null; choiceBusy = true; choiceError = ''; renderProjectChoices();
+    try {
+      var user = identity(await request('/api/current-user/whoami', {}, signal));
+      if (state.user && (user.id !== state.user.id || user.role !== state.user.role)) { var changed = new Error('登录账号已变化，请重新查询'); changed.identityFailure = true; throw changed; }
+      var rows = await loadPages(function (page) {
+        var params = {include: 'id,title,workspace', page_size: 100, page: page};
+        if (workspace !== 'all') params.workspaces = workspace;
+        return request('/api/projects', params, signal);
+      }, 'results', function (row) { return id(row.id); }, {concurrency: 2});
+      await confirmAccount(user, signal);
+      if (version !== choiceVersion || workspace !== state.workspace) return;
+      choiceRows = rows.filter(function (row) { return workspace === 'all' || id(row.workspace) === workspace; });
+      choiceWorkspace = workspace;
+    } catch (error) {
+      if (version !== choiceVersion || error.name === 'AbortError') return;
+      if (error.identityFailure) { abort(); clearCache(); clearResults(); state.error = error.message; render(); return; }
+      choiceError = error.message || '项目名称读取失败';
+    } finally {
+      if (version === choiceVersion) { choiceBusy = false; renderProjectChoices(); }
+    }
+  }
+  async function loadWorkspaceChoices() {
+    if (!state.opened || workspaceBusy || workspaceRows.length) return;
+    workspaceController = new AbortController();
+    var signal = workspaceController.signal;
+    workspaceBusy = true;
+    try {
+      var user = identity(await request('/api/current-user/whoami', {}, signal));
+      if (state.user && (user.id !== state.user.id || user.role !== state.user.role)) { var changed = new Error('登录账号已变化，请重新查询'); changed.identityFailure = true; throw changed; }
+      var rows = await loadPages(async function (page) {
+        var body = await request('/api/workspaces', {page: page, page_size: 100}, signal);
+        return Array.isArray(body) ? {count: body.length, results: body} : body;
+      }, 'results', function (row) { return id(row.id); });
+      await confirmAccount(user, signal);
+      if (!signal.aborted) { workspaceRows = rows; configureScope(state.context); }
+    } catch (error) {
+      if (error.name === 'AbortError') return;
+      if (error.identityFailure) { abort(); clearCache(); clearResults(); state.error = error.message; render(); }
+      else $('#scope').title = '工作区名称暂未取得，可继续使用当前范围';
+    } finally { if (!signal.aborted) workspaceBusy = false; }
+  }
+  function resetFilters() {
+    cancelChoices(); state.workspace = state.context.workspace; state.filter = ''; state.selectedProjectId = ''; state.projectIdsText = ''; state.choiceSearch = '';
+    $('#search').value = ''; $('#project-picker').open = false; configureScope(state.context); render();
+  }
+
   function $(selector) { return root.querySelector(selector); }
   var renderedMarkup = new WeakMap();
   function setMarkup(selector, html) {
@@ -649,14 +731,31 @@ window.fetch=async function(input,options={}){
   function abort() { runNumber++; if (controller) controller.abort(); state.busy = false; state.statsBusy = false; state.regionBusy = false; state.pendingBusy = false; }
   function clearResults() { state.page = 1; resetCountAnimations(); state.user = null; state.stats = null; state.regions = null; state.pending = null; state.queryScope = null; state.queryRange = null; state.queryWorkspace = null; state.statsProgress = null; state.pendingProgress = null; state.updated = ''; state.regionUpdated = ''; state.pendingUpdated = ''; state.discarded = 0; state.error = ''; state.statsError = ''; state.regionError = ''; state.pendingError = ''; }
 
-  async function request(path, params, signal) {
+  async function request(path, params, signal, options) {
+    options = options || {};
+    for (var attempt = 0; ; attempt++) {
+      try { return await requestOnce(path, params, signal, (options.timeoutMs || 30000) + attempt * 15000); }
+      catch (error) {
+        if (signal.aborted || error.name === 'AbortError' || attempt >= (options.retries || 0) || !(error.timedOut || error instanceof TypeError || [502, 503, 504].indexOf(error.status) >= 0)) throw error;
+        await new Promise(function (resolve, reject) {
+          var timer;
+          function stop() { clearTimeout(timer); signal.removeEventListener('abort', stop); reject(new DOMException('Aborted', 'AbortError')); }
+          if (signal.aborted) { stop(); return; }
+          timer = setTimeout(function () { signal.removeEventListener('abort', stop); resolve(); }, 800);
+          signal.addEventListener('abort', stop, {once: true});
+        });
+      }
+    }
+  }
+
+  async function requestOnce(path, params, signal, timeoutMs) {
     var url = new URL(path, 'https://demo.local');
     Object.keys(params || {}).forEach(function (key) { if (params[key] != null) url.searchParams.set(key, params[key]); });
     var timeout = new AbortController(), timedOut = false;
     var onAbort = function () { timeout.abort(); };
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
     signal.addEventListener('abort', onAbort, {once: true});
-    var timer = setTimeout(function () { timedOut = true; timeout.abort(); }, 30000);
+    var timer = setTimeout(function () { timedOut = true; timeout.abort(); }, timeoutMs);
     try {
       var response = await fetch(url.href, {method: 'GET', credentials: 'include', headers: {Accept: 'application/json'}, signal: timeout.signal, cache: 'no-store'});
       if (response.status === 401) throw new Error('登录已失效，请重新登录后刷新');
@@ -667,7 +766,7 @@ window.fetch=async function(input,options={}){
       if (data && data.error) throw new Error('平台未能完成查询，请刷新重试');
       return data;
     } catch (error) {
-      if (timedOut) throw new Error('查询超时，请缩小范围或稍后刷新');
+      if (timedOut && !signal.aborted) { var timeoutError = new Error('查询超时，请选择工作区或项目后重试'); timeoutError.timedOut = true; throw timeoutError; }
       throw error;
     } finally {
       clearTimeout(timer);
@@ -738,16 +837,16 @@ window.fetch=async function(input,options={}){
     // 仅使用上一次同账号、同范围的项目 ID；显示的是本次接口返回的计数。
     if (priorityIds.length) {
       loadPages(function (page) {
-        return request('/api/projects', Object.assign({}, params, {ids: priorityIds.join(','), page: page}), priorityController.signal);
+        return request('/api/projects', Object.assign({}, params, {ids: priorityIds.join(','), page: page}), priorityController.signal, {retries: 1});
       }, 'results', function (row) { return id(row.id); }).then(function (rows) {
         priorityRows = rows; publishProgress();
       }).catch(function () { /* 优先读取失败时由完整扫描核对，不能中断完整查询。 */ });
     }
     try {
       var rows = await loadPages(function (page) {
-        return request('/api/projects', Object.assign({}, params, {page: page}), signal);
+        return request('/api/projects', Object.assign({}, params, {page: page}), signal, {retries: 1});
       }, 'results', function (row) { return id(row.id); }, {
-        concurrency: 3, priorityPage: priorityPage,
+        concurrency: priorityIds.length ? 1 : 2, maxPages: 5000, priorityPage: priorityPage,
         onPage: function (page, rows, meta) {
           pages.set(page, rows); progress = meta;
           if (personalProjects(rows, workspace).items.length) usefulPage = page;
@@ -758,6 +857,38 @@ window.fetch=async function(input,options={}){
       return personalProjects(rows, workspace);
     } finally {
       finished = true; cancelPriority(); signal.removeEventListener('abort', cancelPriority);
+    }
+  }
+
+  async function refreshPending(force, run, user, workspace, scope) {
+    if (run !== runNumber || state.role !== 'annotator') return;
+    state.pendingBusy = true; state.busy = true; state.pendingError = ''; render();
+    var key = JSON.stringify(['pending', user.id + ':' + user.role, workspace, scope]);
+    var params = {include: 'id,title,workspace,user_repair_count,user_rework_count', page_size: 10};
+    if (workspace !== 'all') params.workspaces = workspace;
+    if (scope.title) params.title = scope.title;
+    if (scope.ids.length) params.ids = scope.ids.join(',');
+    var previous = cache.get(key);
+    try {
+      // 重试也先核对登录身份，避免把旧账号的部分结果留给新账号。
+      await confirmAccount(user, controller.signal);
+      if (run !== runNumber || !state.opened) return;
+      var result = await readCached(key, 60000, force === true, async function (jobSignal) {
+        var value = await readPendingProjects(user, workspace, params, jobSignal, function (progress) {
+          if (run !== runNumber) return;
+          state.pending = progress.value; state.pendingProgress = progress.meta; render();
+        }, previous && previous.value);
+        await confirmAccount(user, jobSignal);
+        return value;
+      });
+      if (run !== runNumber) return;
+      state.pending = result.value; state.pendingProgress = null; state.pendingUpdated = updateTime(result.at);
+    } catch (error) {
+      if (run !== runNumber || error.name === 'AbortError') return;
+      if (error.identityFailure) { abort(); clearCache(); clearResults(); state.error = error.message; render(); return; }
+      state.pendingError = error.message || '待处理列表读取失败'; state.pendingUpdated = '';
+    } finally {
+      if (run === runNumber) { state.pendingBusy = false; state.busy = state.statsBusy || state.regionBusy; render(); }
     }
   }
 
@@ -780,27 +911,16 @@ window.fetch=async function(input,options={}){
       state.user = user;
       if (user.role === 'annotator' && role === 'reviewer') throw new Error('当前账号无法查看审核统计，请返回标注中心');
       var params = statsParams(user.id, role, workspace, range[0], range[1]);
-      var scope = {title: state.filter.trim(), ids: parseProjectIds(state.projectIdsText)};
+      var scope = currentScope();
       state.queryScope = scope;
-      render();
-      var projectParams = {include: 'id,title,workspace,user_repair_count,user_rework_count', page_size: 100};
-      if (workspace !== 'all') projectParams.workspaces = workspace;
+      render(); loadWorkspaceChoices();
       var statsKey = JSON.stringify(['stats', accountKey, role, workspace, range, scope]);
       var pendingKey = JSON.stringify(['pending', accountKey, workspace, scope]);
       var scopeKey = JSON.stringify(['scope', accountKey, workspace, scope]);
       cancelOtherJobs(role === 'annotator' ? [statsKey, pendingKey, scopeKey] : [statsKey, scopeKey]);
-      if (scope.title) projectParams.title = scope.title;
-      if (scope.ids.length) projectParams.ids = scope.ids.join(',');
-      var previousPending = cache.get(pendingKey), pendingJob, pendingParams = Object.assign({}, projectParams);
-      if (role === 'annotator') {
-        pendingJob = publish('pending', pendingKey, 60000, function (jobSignal, report) {
-          return readPendingProjects(user, workspace, pendingParams, jobSignal, report, previousPending && previousPending.value);
-        }, true, function (progress) {
-          state.pending = progress.value; state.pendingProgress = progress.meta; render();
-        });
-      }
+      var pendingJob = role === 'annotator' ? refreshPending(force, run, user, workspace, scope) : null;
       var selectedIds = scope.ids;
-      if (scope.title) {
+      if (scope.title && !scope.selectedId) {
         var scopeResult = await readCached(scopeKey, 30000, force === true, async function (jobSignal) {
           var lookup = {title: scope.title, include: 'id,title,workspace', page_size: 100};
           if (workspace !== 'all') lookup.workspaces = workspace;
@@ -816,9 +936,8 @@ window.fetch=async function(input,options={}){
           if (pendingJob) await pendingJob;
           return;
         }
-        projectParams.title = scope.title;
       }
-      if (selectedIds.length) { params.project_id = selectedIds.join(','); projectParams.ids = selectedIds.join(','); }
+      if (selectedIds.length) params.project_id = selectedIds.join(',');
       async function publish(kind, key, ttl, load, confirmIdentity, onProgress) {
         try {
           var result = await readCached(key, ttl, force === true, async function (jobSignal) {
@@ -836,8 +955,7 @@ window.fetch=async function(input,options={}){
             state.discarded = result.value.length - state.stats.length;
             state.statsProgress = null;
             state.updated = updateTime(result.at);
-          } else if (kind === 'pending') { state.pending = result.value; state.pendingProgress = null; state.pendingUpdated = updateTime(result.at); }
-          else { state.regions = result.value; state.regionUpdated = updateTime(result.at); }
+          } else { state.regions = result.value; state.regionUpdated = updateTime(result.at); }
         } catch (error) {
           if (run !== runNumber || error.name === 'AbortError') return;
           if (error.identityFailure) {
@@ -982,15 +1100,16 @@ window.fetch=async function(input,options={}){
       setMarkup('#pending-data', ''); $('#pending-total').textContent = ''; $('#pending-updated').textContent = ''; return;
     }
     $('#pending-updated').textContent = state.pendingUpdated ? '读取于 ' + state.pendingUpdated + ' · 仅点击“查询 / 刷新”时更新' : '';
-    if (state.pendingError) { setMarkup('#pending-data', '<p class="error" role="alert">' + escape(state.pendingError) + '</p>'); $('#pending-total').textContent = ''; return; }
+    var failure = state.pendingError ? '<p class="error" role="alert">返修 / 返工：' + escape(state.pendingError) + (state.pending ? '。已保留本次读到的部分数据，合计未完整。' : '。本人产量统计不受影响。') + ' <button type="button" data-retry-pending>仅重试待处理</button></p>' : '';
+    if (state.pendingError && !state.pending) { setMarkup('#pending-data', failure); $('#pending-total').textContent = '未完成'; return; }
     if (!state.pending) { setMarkup('#pending-data', '<p class="empty">' + (state.pendingBusy ? '正在读取本人待处理项目…' : '点击“查询 / 刷新”读取待处理数据') + '</p>'); $('#pending-total').textContent = ''; return; }
     var items = state.pending.items.filter(function (p) { return matches(p.name) && (!state.quick.trim() || (p.name + ' #' + p.id).toLocaleLowerCase().includes(state.quick.trim().toLocaleLowerCase())) && (state.pendingMode === 'all' || p[state.pendingMode] > 0); });
     var repair = 0, rework = 0;
     items.forEach(function (p) { repair += p.repair || 0; rework += p.rework || 0; });
-    $('#pending-total').textContent = items.length + ' 个项目 · 返修 ' + repair + ' · 返工 ' + rework + (state.pending.unknown ? '（部分计数未取得）' : '') + progressText(state.pendingProgress);
-    var warning = state.pending.unknown ? '<p class="notice">有 ' + state.pending.unknown + ' 个项目未返回完整个人计数，当前合计仅包含已取得的数据。请刷新或查看原项目卡片。</p>' : '';
+    $('#pending-total').textContent = items.length + ' 个项目 · 返修 ' + repair + ' · 返工 ' + rework + (state.pending.unknown ? '（部分计数未取得）' : '') + (state.pendingError ? ' · 未完整' : progressText(state.pendingProgress));
+    var warning = failure + (state.pending.unknown ? '<p class="notice">有 ' + state.pending.unknown + ' 个项目未返回完整个人计数，当前合计仅包含已取得的数据。请刷新或查看原项目卡片。</p>' : '');
     if (!items.length) {
-      setMarkup('#pending-data', warning + '<p class="empty">' + (state.filter ? '没有匹配的个人待处理项目' : state.pendingBusy ? '已读取部分项目包，正在继续查询…' : state.pending.unknown ? '已取得个人计数的项目中暂无待处理数据' : '当前范围内，本人暂无待返修或待返工数据') + '</p>');
+      setMarkup('#pending-data', warning + '<p class="empty">' + (state.filter ? '没有匹配的个人待处理项目' : state.pendingError ? '查询未完整，尚不能确定是否有待处理数据' : state.pendingBusy ? '已读取部分项目包，正在继续查询…' : state.pending.unknown ? '已取得个人计数的项目中暂无待处理数据' : '当前范围内，本人暂无待返修或待返工数据') + '</p>');
       return;
     }
     setMarkup('#pending-data', warning + '<div class="pending-list">' + items.map(function (p) {
@@ -1014,20 +1133,20 @@ window.fetch=async function(input,options={}){
     $('#account').textContent = state.user ? state.user.name + ' · #' + state.user.id : state.busy ? '正在确认当前账号…' : '仅显示当前登录账号的数据';
     $('#start').value = state.range[0]; $('#end').value = state.range[1];
     $('#project-ids').value = state.projectIdsText;
-    renderFieldOptions();
+    renderFieldOptions(); renderProjectChoices();
     $('#query').textContent = state.busy ? '重新查询' : '查询 / 刷新';
     $('#error').textContent = state.error; $('#error').hidden = !state.error;
     $('#updated').textContent = state.statsBusy ? '读取中…' : state.updated ? '更新于 ' + state.updated : '';
     var changed = false;
     if (state.queryRange && state.queryScope) {
-      try { changed = JSON.stringify(state.range) !== JSON.stringify(state.queryRange) || state.workspace !== state.queryWorkspace || !state.queryScope || state.filter.trim() !== state.queryScope.title || parseProjectIds(state.projectIdsText).join(',') !== state.queryScope.ids.join(','); }
+      try { changed = JSON.stringify(state.range) !== JSON.stringify(state.queryRange) || state.workspace !== state.queryWorkspace || !state.queryScope || state.filter.trim() !== state.queryScope.title || JSON.stringify(currentScope()) !== JSON.stringify(state.queryScope); }
       catch (_) { changed = true; }
     }
     $('#query-help').textContent = changed ? '筛选条件已修改，点击“查询 / 刷新”应用；下方仍为上次查询结果。' : '手动查询 · 本地搜索、排序和翻页无需重复请求。';
     $('#query-help').classList.toggle('changed', changed);
     $('#query-help').hidden = !changed;
-    $('#query-state').textContent = state.busy ? '正在读取数据' : state.error || state.statsError ? '查询遇到问题' : changed ? '查询条件未应用' : state.updated ? '查询完成' : '等待查询';
-    $('#query-state').setAttribute('data-status', state.busy ? 'busy' : state.error || state.statsError ? 'error' : changed ? 'changed' : 'ready');
+    $('#query-state').textContent = state.busy ? '正在读取数据' : state.error || state.statsError ? '查询遇到问题' : changed ? '查询条件未应用' : state.pendingError || state.regionError ? '部分数据未完成' : state.updated ? '查询完成' : '等待查询';
+    $('#query-state').setAttribute('data-status', state.busy ? 'busy' : state.error || state.statsError ? 'error' : changed ? 'changed' : state.pendingError || state.regionError ? 'partial' : 'ready');
     root.querySelectorAll('[data-preset]').forEach(function (b) { b.setAttribute('aria-pressed', String(b.dataset.preset === state.preset)); });
     renderStats(); renderPending();
   }
@@ -1062,9 +1181,12 @@ window.fetch=async function(input,options={}){
     root.innerHTML = '<style>' + CSS + '</style>' +
       '<section id="panel" aria-label="我的工作台"><header><div class="heading"><h1 id="work-title"></h1><span id="account"></span></div><div class="header-actions"><span id="query-state" role="status"></span><button id="close" type="button" aria-label="收起工作台">×</button></div><span id="center-label" class="sr-only"></span></header>' +
       '<div class="scroll"><div class="filters"><div class="query-row"><div class="presets" role="group" aria-label="日期快捷选择"><button type="button" data-preset="today">今天</button><button type="button" data-preset="yesterday">昨天</button><button type="button" data-preset="week">近 7 天</button><button type="button" data-preset="month">本月</button></div>' +
-      '<div class="dates"><input id="start" type="date" aria-label="开始日期"><span>—</span><input id="end" type="date" aria-label="结束日期"></div><button id="query" class="primary" type="button">查询 / 刷新</button>' +
-      '<details class="advanced"><summary>筛选 / 列 <span aria-hidden="true">⌄</span></summary><div class="advanced-body"><div class="settings-heading">筛选与显示列<span id="field-count"></span></div><label class="scope-label">工作区<select id="scope" aria-label="统计范围"></select></label><div class="project-filters"><label>项目名称<input id="search" type="search" placeholder="按名称查询" aria-label="查询项目名称"></label><label>项目 ID<input id="project-ids" type="text" aria-label="筛选项目 ID" placeholder="多个 ID 用逗号或空格分隔"></label></div>' +
-      '<div class="field-picker" role="group" aria-label="显示统计字段"><div class="field-toolbar"><span>显示列</span><button id="field-default" type="button">默认</button><button id="field-all" type="button">全选</button><button id="field-none" type="button">清空</button></div><div id="field-options" class="field-options"></div></div><p class="setting-note">工作区和项目范围在点击查询后应用；显示列立即生效。</p><button id="apply-filters" class="primary" type="button">应用并查询</button></div></details></div><p id="query-help" class="query-help" hidden></p></div>' +
+      '<div class="dates"><input id="start" type="date" aria-label="开始日期"><span>—</span><input id="end" type="date" aria-label="结束日期"></div>' +
+      '<details class="advanced"><summary>列设置 <span aria-hidden="true">⌄</span></summary><div class="advanced-body"><div class="settings-heading">显示统计列<span id="field-count"></span></div>' +
+      '<div class="field-picker" role="group" aria-label="显示统计字段"><div class="field-toolbar"><span>显示列</span><button id="field-default" type="button">默认</button><button id="field-all" type="button">全选</button><button id="field-none" type="button">清空</button></div><div id="field-options" class="field-options"></div></div><p class="setting-note">显示列与导出列立即生效。</p><button id="apply-filters" type="button">完成</button></div></details></div>' +
+      '<div class="scope-row" role="group" aria-label="项目筛选"><select id="scope" aria-label="工作区"></select>' +
+      '<details id="project-picker" class="project-picker"><summary aria-label="选择项目"><span id="project-label">全部项目</span><span aria-hidden="true">⌄</span></summary><div class="project-choice-panel"><input id="search" type="search" placeholder="搜索项目名称 / ID" aria-label="搜索可选项目" autocomplete="off"><div id="project-options" role="listbox" aria-label="项目选项"></div></div></details>' +
+      '<input id="project-ids" type="text" aria-label="筛选项目 ID" placeholder="项目 ID（可多输）"><button id="query" class="primary" type="button">查询 / 刷新</button><button id="reset-filters" type="button">重置</button></div><p id="query-help" class="query-help" hidden></p></div>' +
       '<p id="error" class="error" role="alert" hidden></p><div class="result-meta"><p id="range-caption" class="caption"></p><span id="updated" aria-live="polite"></span></div>' +
       '<section id="overview" aria-label="核心工作指标"><h2 id="stats-title" class="sr-only"></h2><div id="metrics" class="metrics"></div></section>' +
       '<section id="details" class="detail-section" aria-label="项目明细"><div class="table-toolbar"><div class="quick-search"><span aria-hidden="true">⌕</span><input id="quick-search" type="search" placeholder="搜索项目名称 / ID" aria-label="搜索当前结果"><button id="clear-quick" type="button" aria-label="清空当前搜索" hidden>×</button></div><span id="result-count"></span><button id="export" type="button" disabled>导出 CSV</button></div><p id="export-feedback" class="sr-only" role="status"></p><div id="stats-data" aria-live="polite"></div>' +
@@ -1077,14 +1199,18 @@ window.fetch=async function(input,options={}){
       if (state.statsBusy) { state.stats = null; state.statsProgress = null; state.updated = ''; }
       if (state.pendingBusy) { state.pending = null; state.pendingProgress = null; state.pendingUpdated = ''; }
       if (state.regionBusy) { state.regions = null; state.regionUpdated = ''; }
-      state.opened = false; abort(); cancelOtherJobs([]); render(); focusEntry();
+      state.opened = false; cancelChoices(); if (workspaceController) workspaceController.abort(); workspaceBusy = false; abort(); cancelOtherJobs([]); render(); focusEntry();
     });
-    $('#query').addEventListener('click', function () { $('.advanced').open = false; refresh(true); });
-    $('#apply-filters').addEventListener('click', function () { $('#query').click(); });
+    $('#query').addEventListener('click', function () { $('.advanced').open = false; $('#project-picker').open = false; refresh(true); });
+    $('#apply-filters').addEventListener('click', function () { $('.advanced').open = false; });
+    $('#reset-filters').addEventListener('click', resetFilters);
+    $('#project-picker').addEventListener('toggle', function () { if (this.open) { $('.advanced').open = false; renderProjectChoices(); loadProjectChoices(false); $('#search').focus(); } });
     root.querySelectorAll('[data-preset]').forEach(function (b) { b.addEventListener('click', function () { state.preset = b.dataset.preset; state.range = presetRange(state.preset); render(); }); });
     ['start','end'].forEach(function (key, index) { $('#' + key).addEventListener('change', function () { state.range[index] = this.value; state.preset = ''; render(); }); });
-    $('#scope').addEventListener('change', function () { state.workspace = this.value; render(); });
-    $('#search').addEventListener('input', function () { state.filter = this.value; state.page = 1; render(); });
+    $('#scope').addEventListener('focus', loadWorkspaceChoices);
+    $('#scope').addEventListener('pointerdown', loadWorkspaceChoices);
+    $('#scope').addEventListener('change', function () { cancelChoices(); state.workspace = this.value; state.filter = ''; state.selectedProjectId = ''; state.choiceSearch = ''; $('#search').value = ''; $('#project-picker').open = false; render(); });
+    $('#search').addEventListener('input', function () { state.choiceSearch = this.value; renderProjectChoices(); });
     $('#project-ids').addEventListener('input', function () { state.projectIdsText = this.value; render(); });
     $('#field-options').addEventListener('change', function (event) {
       var input = event.target, key = input && input.dataset && input.dataset.field;
@@ -1102,7 +1228,12 @@ window.fetch=async function(input,options={}){
     $('#next-page').addEventListener('click', function () { state.page++; renderStats(); });
     $('#export').addEventListener('click', exportStats);
     root.addEventListener('keydown', function (event) {
-      if (event.key === 'Enter' && ['start', 'end', 'search', 'project-ids'].indexOf(event.target.id) >= 0) { event.preventDefault(); $('#query').click(); }
+      if (event.key === 'Enter' && ['start', 'end', 'project-ids'].indexOf(event.target.id) >= 0) { event.preventDefault(); $('#query').click(); }
+      if ($('#project-picker').open && ['ArrowDown', 'ArrowUp', 'Home', 'End'].indexOf(event.key) >= 0) {
+        var choices = Array.from(root.querySelectorAll('#project-options button[role=option]')), active = choices.indexOf(root.activeElement);
+        if (choices.length) { event.preventDefault(); var next = event.key === 'Home' ? 0 : event.key === 'End' ? choices.length - 1 : active < 0 ? event.key === 'ArrowUp' ? choices.length - 1 : 0 : (active + (event.key === 'ArrowUp' ? -1 : 1) + choices.length) % choices.length; choices[next].focus(); }
+      }
+      if (event.key === 'Escape' && $('#project-picker').open) { event.preventDefault(); $('#project-picker').open = false; $('#project-picker summary').focus(); return; }
       if (event.key === 'Escape' && $('.advanced').open) { event.preventDefault(); $('.advanced').open = false; $('.advanced summary').focus(); return; }
       if (event.key === 'Escape' && state.opened) { if (event.target.id === 'quick-search' && state.quick) { event.preventDefault(); $('#clear-quick').click(); } else $('#close').click(); }
     });
@@ -1110,6 +1241,16 @@ window.fetch=async function(input,options={}){
     root.addEventListener('click', function (event) {
       event.stopPropagation();
       if (!$('.advanced').contains(event.target)) $('.advanced').open = false;
+      if (!$('#project-picker').contains(event.target)) $('#project-picker').open = false;
+      var choice = event.target.closest('[data-project-choice], [data-project-keyword]');
+      if (choice) {
+        state.selectedProjectId = choice.hasAttribute('data-project-choice') ? choice.dataset.projectChoice : '';
+        var project = choiceRows.find(function (row) { return id(row.id) === state.selectedProjectId; });
+        state.filter = project ? String(project.title || '') : choice.hasAttribute('data-project-keyword') ? state.choiceSearch.trim() : '';
+        state.choiceSearch = ''; $('#search').value = ''; state.page = 1; $('#project-picker').open = false; render(); $('#project-picker summary').focus();
+      }
+      if (event.target.closest('[data-retry-choices]')) loadProjectChoices(true);
+      if (event.target.closest('[data-retry-pending]') && !state.pendingBusy && state.user && state.queryScope) refreshPending(true, runNumber, state.user, state.queryWorkspace, state.queryScope);
       var button = event.target.closest('[data-work]');
       if (button) goToWork(button.dataset.project, button.dataset.work, button);
       var sort = event.target.closest('[data-sort]');
@@ -1137,6 +1278,10 @@ window.fetch=async function(input,options={}){
     @media(max-width:760px){header{padding:0 14px;height:58px}.scroll{padding:14px}.heading{gap:9px}h1{font-size:18px}#account{font-size:10px;max-width:115px}.header-actions{gap:11px}.metric{padding:0 12px}.metric-value strong{font-size:24px}.metric-value{gap:3px}.presets button{font-size:10px;padding:5px 8px}.dates input{width:123px}.advanced{margin-left:auto}.table-toolbar{gap:9px;padding:10px}.quick-search{width:230px}#result-count{font-size:9px}.pending-row{grid-template-columns:1fr;gap:8px}.lane{justify-content:flex-start;gap:20px}.lane>span{min-width:80px}}
     @media(max-width:640px){.query-row{row-gap:10px}.presets{order:0;flex:1}.presets button{flex:1}.advanced{order:1}.dates{order:2;flex:1 0 calc(100% - 88px)}.dates input{width:calc(50% - 12px);flex:1;min-width:0}#query{order:3;font-size:11px;padding:7px 10px}.metrics{grid-template-columns:repeat(2,minmax(0,1fr));gap:17px 0;margin-top:17px;padding-bottom:17px;margin-bottom:16px}.metric{padding-left:17px}.metric:nth-child(odd){padding-left:0;border-left:0}.metric-value strong{font-size:25px}.metric>span{font-size:10px}.result-meta{gap:8px;margin-top:12px}.result-meta .caption{font-size:9px}.result-meta>#updated{font-size:9px}.table-toolbar{flex-wrap:wrap;gap:8px}.quick-search{width:100%;flex:auto}#result-count{flex:1}.table-wrap{max-height:500px}th:first-child,td:first-child{min-width:170px;max-width:170px;width:170px}.project-name{max-width:105px}.project-id{font-size:8px;margin-left:5px}td,td:first-child{padding:11px 10px}thead th:first-child button{padding-left:10px}thead th button{padding:9px 10px}#pending-total{font-size:9px}.project-filters{grid-template-columns:1fr}.advanced-body{padding:15px}.field-options{gap:10px}.metric-notes{margin-top:11px}.pending-section{margin-top:15px}}
     @media(max-width:350px){#account{max-width:92px}.header-actions{gap:7px}#query-state{font-size:9px}.heading{gap:7px}h1{font-size:17px}.scroll{padding:12px}.presets button{padding:5px 6px}.advanced>summary{padding:6px 9px}.advanced>summary span{margin-left:3px}.metrics{gap:15px 0}.metric-value strong{font-size:24px}.metric-value small{font-size:9px}#pending-total{max-width:180px}.field-options{grid-template-columns:1fr}.result-meta>#updated{display:none}}
+
+    .filters{position:relative}.query-row{position:static}.scope-row{display:grid;grid-template-columns:minmax(140px,1fr) minmax(180px,1.25fr) minmax(150px,1fr) auto auto;gap:8px;margin-top:10px;align-items:start}.scope-row>select,.scope-row>input,.scope-row>button,.project-picker>summary{height:32px;font-size:11px;border-radius:4px}.scope-row>select,.scope-row>input{width:100%;min-width:0;padding:5px 9px}.scope-row>button{white-space:nowrap;padding:5px 12px}.project-picker{position:relative;min-width:0}.project-picker>summary{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:5px 10px;list-style:none;border:1px solid #dce4ef;background:#fff;cursor:pointer;color:#718096}.project-picker>summary::-webkit-details-marker{display:none}#project-label{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.project-picker[open]>summary{border-color:#82a5e3;box-shadow:0 0 0 2px #eef3fc}.project-choice-panel{position:absolute;top:37px;left:0;width:100%;min-width:260px;max-width:calc(100vw - 28px);padding:7px;background:white;border:1px solid #dce4ef;box-shadow:0 5px 18px #263f611c;border-radius:5px;z-index:20}.project-choice-panel>input{width:100%;min-width:0;padding:6px 8px;font-size:11px}#project-options{margin-top:5px;max-height:min(290px,45vh);overflow:auto;scrollbar-width:thin}#project-options>button{display:flex;align-items:center;gap:8px;width:100%;text-align:left;border:0;border-radius:2px;background:#fff;padding:8px;font-size:11px;color:#53647c}#project-options>button[aria-selected=true],#project-options>button:hover,#project-options>button:focus-visible{background:#edf3fe;color:#356dc6}.choice-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}#project-options small{margin-left:auto;font-size:9px;color:#a2aec0}.choice-note{font-size:11px;line-height:1.6;color:#9aa7b9;padding:10px 8px}.query-row>.advanced{margin-left:auto}.advanced-body{width:370px}#query-state[data-status=partial]{color:#ad854c}#query-state[data-status=partial]:before{background:#c69b5b}.error [data-retry-pending]{font-size:11px;margin-left:6px;padding:3px 8px}.query-row .dates{flex:0 0 auto}.query-row .dates input{width:134px;min-width:104px}.scope-row #query{order:initial}
+    @media(max-width:900px){.scope-row{grid-template-columns:minmax(120px,1fr) minmax(150px,1fr) minmax(120px,1fr) auto}.scope-row #reset-filters{grid-column:4}.scope-row #query{grid-column:4;grid-row:1}.scope-row #reset-filters{display:none}}
+    @media(max-width:640px){.query-row{gap:8px}.query-row .presets{flex:1;order:0}.query-row>.advanced{order:1}.query-row .dates{order:2;flex:1 0 100%;width:100%}.query-row .dates input{flex:1 1 100px;width:calc(50% - 12px);min-width:85px}.scope-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px}.scope-row>select,.scope-row>.project-picker{grid-row:1}.scope-row>#project-ids{grid-column:1;grid-row:2}.scope-row #query{grid-column:2;grid-row:2;justify-self:stretch}.scope-row #reset-filters{display:none}.project-choice-panel{min-width:0;width:calc(200% + 8px);left:auto;right:0}.advanced-body{width:min(370px,calc(100vw - 28px))}.metrics{margin-top:14px}.scope-row .project-picker>summary{padding:5px 8px}}
     @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important;animation:none!important}}
   `;
 
@@ -1150,25 +1295,28 @@ window.fetch=async function(input,options={}){
       resetCountAnimations();
       mount(); host.hidden = false;
       configureScope(context);
-      $('#search').value = state.filter; $('#quick-search').value = state.quick; $('#page-size').value = String(state.pageSize);
+      $('#search').value = ''; $('#quick-search').value = state.quick; $('#page-size').value = String(state.pageSize);
       render();
       return;
     }
     var keepOpened = state.opened && state.context && context && state.context.role === context.role;
     lastPath = path;
-    abort(); cancelOtherJobs([]); clearResults();
+    abort(); cancelChoices(); cancelOtherJobs([]); clearResults();
     state.context = context;
     if (!context) { clearCache(); if (host) host.hidden = true; updateMenuState(); return; }
     if (!host || !host.isConnected) mount();
     host.hidden = false;
     state.sortKey = ''; state.sortDirection = 'desc'; state.quick = ''; state.pendingMode = 'all'; $('#quick-search').value = '';
-    state.role = context.role; state.workspace = context.workspace; state.filter = ''; state.projectIdsText = ''; $('#search').value = ''; $('#project-ids').value = '';
+    state.role = context.role; state.workspace = context.workspace; state.filter = ''; state.selectedProjectId = ''; state.projectIdsText = ''; state.choiceSearch = ''; $('#search').value = ''; $('#project-ids').value = '';
     state.opened = !!keepOpened || location.hash === '#insta360-personal';
     configureScope(context);
     render();
   }
   function configureScope(context) {
-    $('#scope').innerHTML = (context.workspace !== 'all' ? '<option value="' + context.workspace + '">当前工作区 #' + context.workspace + '</option>' : '') + '<option value="all">全部可访问项目</option>';
+    var names = new Map(workspaceRows.map(function (row) { return [id(row.id), String(row.title || row.name || '工作区 #' + row.id)]; }));
+    if (context.workspace !== 'all' && !names.has(context.workspace)) names.set(context.workspace, '当前工作区 #' + context.workspace);
+    if (state.workspace !== 'all' && !names.has(state.workspace)) names.set(state.workspace, '工作区 #' + state.workspace);
+    $('#scope').innerHTML = '<option value="all">全部工作区</option>' + Array.from(names, function (pair) { return '<option value="' + pair[0] + '">' + escape(pair[1]) + '</option>'; }).join('');
     $('#scope').value = state.workspace;
   }
   window.addEventListener('popstate', syncRoute);

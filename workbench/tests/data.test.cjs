@@ -33,3 +33,14 @@ test('existing identity, date boundaries and incomplete pagination safeguards re
   assert.equal(core.accuracySummary(rows.slice(0,3)).value,80);
   await assert.rejects(core.loadPages(async()=>({count:3,results:[{id:1},{id:2}]}),'results',r=>String(r.id)),/重复/);
 });
+
+test('smaller pending batches can still cover the original project-count limit', async () => {
+  let calls=0;
+  const rows=await core.loadPages(async page=>{
+    calls++;
+    return {count:501,page_size:1,page,results:[{id:page}]};
+  },'results',r=>String(r.id),{concurrency:2,maxPages:5000});
+  assert.equal(rows.length,501);
+  assert.equal(calls,501);
+  assert.equal(rows.at(-1).id,501);
+});

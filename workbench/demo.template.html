@@ -7,7 +7,7 @@
 <aside class="ls-sidebar"><div class="brand">INSTA360</div><div class="tag">DATA WORKSPACE</div><div class="menu-label">工作空间</div><nav><ul class="ls-main-menu">
 <li><a class="ls-main-menu__item" href="/annotation/workspaces/109" data-demo-role="annotator"><span class="ls-main-menu__item-icon">▧</span><span class="ls-main-menu__item-label">标注中心</span></a></li>
 <li><a class="ls-main-menu__item" href="/review/workspaces/109" data-demo-role="reviewer"><span class="ls-main-menu__item-icon">☑</span><span class="ls-main-menu__item-label">审核中心</span></a></li>
-</ul></nav><div class="demo-controls"><label for="demo-scenario">测试数据场景</label><select id="demo-scenario"><option value="normal">日常数据 · 8 个项目</option><option value="many">多项目 · 36 个项目</option><option value="sparse">部分字段缺失</option><option value="zero">真实零值</option><option value="empty">暂无数据</option><option value="error">模拟接口失败</option><option value="slow">模拟慢查询</option><option value="account">模拟切换账号</option></select><p>切换场景会重新查询。<br>日期和范围可正常操作。</p><span class="demo-badge">本地测试 · 全部为模拟数据</span><span id="request-count" class="request-count"></span></div></aside>
+</ul></nav><div class="demo-controls"><label for="demo-scenario">测试数据场景</label><select id="demo-scenario"><option value="normal">日常数据 · 8 个项目</option><option value="many">多项目 · 36 个项目</option><option value="sparse">部分字段缺失</option><option value="zero">真实零值</option><option value="empty">暂无数据</option><option value="error">模拟接口失败</option><option value="slow">模拟慢查询</option><option value="pendingTimeout">模拟返修超时（可重试）</option><option value="account">模拟切换账号</option></select><p>切换场景会重新查询。<br>日期和范围可正常操作。</p><span class="demo-badge">本地测试 · 全部为模拟数据</span><span id="request-count" class="request-count"></span></div></aside>
 <main><h1>个人数据工作台</h1><p>查看本人产量、比较项目并处理返修和返工。点击侧栏“我的标注”或“我的审核”打开。</p></main>
 <div class="demo-mobile"><button id="demo-switch-role">切到审核</button><select id="demo-mobile-scenario" aria-label="测试数据场景（窄屏）"></select><button id="demo-reopen">打开工作台</button></div>
 <dialog id="demo-navigation"><h3>已验证原生处理入口</h3><p>真实平台会进入对应项目的处理页面。本测试页在此展示目标路径。</p><p id="demo-target"></p><form method="dialog"><button>返回工作台</button></form></dialog>
@@ -21,7 +21,7 @@ function demoProjects(){return Array.from({length:window.__demoScenario==='many'
 function queryWorkbench(){const root=document.querySelector('#insta360-personal-toolbox')?.shadowRoot;if(root){const panel=root.querySelector('#panel');if(panel.hidden)document.querySelector('[data-insta360-personal-menu="'+(window.__demoRoute.startsWith('/review')?'reviewer':'annotator')+'"] a')?.click();root.querySelector('#query').click();}}
 function switchRole(role){window.__demoRoute=(role==='reviewer'?'/review':'/annotation')+'/workspaces/109';window.dispatchEvent(new PopStateEvent('popstate'));const entry=document.querySelector('[data-insta360-personal-menu="'+role+'"] a');entry?.click();queryWorkbench();document.querySelector('#demo-switch-role').textContent=role==='reviewer'?'切到标注':'切到审核';}
 document.querySelectorAll('[data-demo-role]').forEach(a=>a.addEventListener('click',e=>{e.preventDefault();switchRole(a.dataset.demoRole);}));
-function setScenario(value){window.__demoScenario=value;document.querySelector('#demo-scenario').value=value;document.querySelector('#demo-mobile-scenario').value=value;queryWorkbench();}
+function setScenario(value){window.__demoPendingTimeouts=0;window.__demoScenario=value;document.querySelector('#demo-scenario').value=value;document.querySelector('#demo-mobile-scenario').value=value;queryWorkbench();}
 document.querySelector('#demo-scenario').onchange=e=>setScenario(e.target.value);
 document.querySelector('#demo-mobile-scenario').innerHTML=document.querySelector('#demo-scenario').innerHTML;
 document.querySelector('#demo-mobile-scenario').onchange=e=>setScenario(e.target.value);
@@ -37,12 +37,14 @@ window.fetch=async function(input,options={}){
   const reply=(data,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=> 'application/json'},json:async()=>data});
   const account=scenario==='account'?8:7;
   if(u.pathname==='/api/current-user/whoami')return reply({id:account,first_name:account===7?'橙子':'测试账号 B',role:{name:'reviewer'}});
+  if(u.pathname==='/api/workspaces')return reply({count:2,results:[{id:109,title:'sg1-自由宽高比'},{id:110,title:'sg2-测试工作区'}]});
   if(scenario==='error')return reply({error:'模拟接口错误'},503);
-  const projects=scenario==='empty'||scenario==='account'?[]:demoProjects();
+  const projects=scenario==='empty'||scenario==='account'?[]:(u.searchParams.get('workspaces')||u.searchParams.get('workspace_id'))==='110'?[{id:201,title:'sg2 测试项目',workspace:110,user_repair_count:1,user_rework_count:0,total_regions:200}]:demoProjects();
   const ids=(u.searchParams.get('project_id')||u.searchParams.get('ids')||'').split(',').filter(Boolean),title=(u.searchParams.get('title')||'').toLowerCase();
   const selected=projects.filter(p=>(!ids.length||ids.includes(String(p.id)))&&(!title||p.title.toLowerCase().includes(title)));
   const page=Number(u.searchParams.get('page')||1),pageSize=6;
   const paged=(rows,key)=>reply({count:rows.length,page,page_size:pageSize,role:u.searchParams.get('role'),[key]:rows.slice((page-1)*pageSize,page*pageSize)});
+  if(u.pathname==='/api/projects'&&scenario==='pendingTimeout'&&(u.searchParams.get('include')||'').includes('user_repair_count')&&page===2&&(window.__demoPendingTimeouts||0)<2){window.__demoPendingTimeouts=(window.__demoPendingTimeouts||0)+1;throw Object.assign(new Error('查询超时，请选择工作区或项目后重试'),{timedOut:true});}
   if(u.pathname==='/api/projects')return paged(selected.map(p=>({...p,user_repair_count:scenario==='zero'?0:p.user_repair_count,user_rework_count:scenario==='zero'?0:p.user_rework_count})),'results');
   if(u.pathname==='/api/statistics/project-overview')return paged(selected.map(p=>({project_id:p.id,stats:{label__region:p.total_regions}})),'projects_stats');
   if(u.pathname==='/api/statistics/overview'){

@@ -4,7 +4,6 @@ ROOT=Path(__file__).resolve().parents[1]
 source=(ROOT.parent/'Insta360我的工作台.user.js').read_text()
 html=(ROOT/'demo.template.html').read_text().replace('/*__WORKBENCH_SCRIPT__*/',source.replace('</script','<\\/script'))
 errors=[]
-(ROOT/'preview').mkdir(exist_ok=True)
 with sync_playwright() as p:
     b=p.chromium.launch(channel='chrome',headless=True)
     page=b.new_page(viewport={'width':1440,'height':980})
