@@ -37,7 +37,7 @@ window.fetch=async function(input,options={}){
   const reply=(data,status=200)=>({ok:status>=200&&status<300,status,headers:{get:()=> 'application/json'},json:async()=>data});
   const account=scenario==='account'?8:7;
   if(u.pathname==='/api/current-user/whoami')return reply({id:account,first_name:account===7?'橙子':'测试账号 B',role:{name:'reviewer'}});
-  if(u.pathname==='/api/workspaces')return reply({count:2,results:[{id:109,title:'sg1-自由宽高比'},{id:110,title:'sg2-测试工作区'}]});
+  if(u.pathname==='/api/workspaces')return reply({count:70,results:Array.from({length:70},(_,i)=>({id:109+i,title:i===0?'sg1-自由宽高比':i===1?'sg2-测试工作区':'全景视频标注工作区-'+(i+1)+'-长名称演示'}))});
   if(scenario==='error')return reply({error:'模拟接口错误'},503);
   const projects=scenario==='empty'||scenario==='account'?[]:(u.searchParams.get('workspaces')||u.searchParams.get('workspace_id'))==='110'?[{id:201,title:'sg2 测试项目',workspace:110,user_repair_count:1,user_rework_count:0,total_regions:200}]:demoProjects();
   const ids=(u.searchParams.get('project_id')||u.searchParams.get('ids')||'').split(',').filter(Boolean),title=(u.searchParams.get('title')||'').toLowerCase();

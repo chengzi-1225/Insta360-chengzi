@@ -43,6 +43,7 @@ with sync_playwright() as p:
     page.locator('#clear-quick').click()
     for width in [1920, 1440, 1024, 768, 640, 390, 320]:
         page.set_viewport_size({'width': width, 'height': 900 if width > 640 else 844})
+        page.evaluate('new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))')
         page.locator('#panel .scroll').evaluate('(e)=>e.scrollTop=0')
         data = page.evaluate('''()=>{
           const r=document.querySelector('#insta360-personal-toolbox').shadowRoot;
