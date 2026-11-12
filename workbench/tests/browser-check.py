@@ -15,6 +15,10 @@ def ready(page,count=None):
     expect(page.locator('#query-state')).to_have_text('查询完成',timeout=15000)
     if count is not None: expect(page.locator('#result-count')).to_have_text(f'{count} / {count} 个项目')
 
+def settings(page):
+    if not page.locator('.advanced').evaluate('(e)=>e.open'):
+        page.locator('.advanced summary').click()
+
 def scenario(page,value,count=None):
     page.locator('#demo-scenario').select_option(value)
     ready(page,count)
@@ -96,17 +100,19 @@ with sync_playwright() as p:
     check('empty and failed queries do not show old totals or enable export')
 
     scenario(page,'normal',8)
-    page.locator('.advanced summary').click()
+    settings(page)
     page.locator('#project-ids').fill('101,103')
     page.locator('#query').click()
     ready(page,2)
     expect(page.locator('#stats-data')).not_to_contain_text('#102')
+    settings(page)
     page.locator('#search').fill('不存在的项目')
     expect(page.locator('#result-count')).to_have_text('2 / 2 个项目')
     page.locator('#search').fill('')
     page.locator('#project-ids').fill('bad')
     page.locator('#query').click()
     expect(page.locator('#error')).to_contain_text('项目 ID 只能填写数字')
+    settings(page)
     page.locator('#project-ids').fill('')
     page.locator('#search').fill('人物')
     ready_caption=page.locator('#result-count').inner_text()
@@ -114,6 +120,7 @@ with sync_playwright() as p:
     page.locator('#query').click()
     ready(page,2)
     assert all('人物' in s for s in page.locator('#stats-data .project-name').all_inner_texts())
+    settings(page)
     page.locator('#search').fill('')
     page.locator('#query').click()
     ready(page,8)
@@ -128,11 +135,13 @@ with sync_playwright() as p:
     assert requests['start_date'].endswith('00:00:00') and requests['end_date'].endswith('23:59:59')
     check('server project ID/name scopes and calendar boundaries validate correctly')
 
+    settings(page)
     page.locator('#field-all').click()
     expect(page.locator('#project-reference')).to_be_visible()
     page.locator('#query').click()
     ready(page,8)
     expect(page.locator('#project-metrics')).to_contain_text('877,680',timeout=10000)
+    settings(page)
     page.locator('#field-none').click()
     expect(page.locator('#export')).to_be_disabled()
     page.locator('#field-default').click()
@@ -140,6 +149,7 @@ with sync_playwright() as p:
     page.locator('.advanced summary').click()
     check('column selection, full-member regions reference and default restore work')
 
+    page.locator('#pending-section > summary').click()
     page.locator('[data-pending-mode="repair"]').click()
     assert page.locator('.pending-row').count()==3
     page.locator('[data-work="repair"]').first.click()
@@ -177,10 +187,11 @@ with sync_playwright() as p:
     expect(page.locator('#panel')).to_be_visible()
     page.locator('#panel .scroll').evaluate('(e)=>e.scrollTop=0')
     page.screenshot(path=str(OUT/'desktop.png'),full_page=True)
-    page.locator('[data-jump="details"]').click()
-    page.wait_for_timeout(500)
+    if page.locator('#pending-section').evaluate('(e)=>e.open'):
+        page.locator('#pending-section > summary').click()
+    page.locator('#panel .scroll').evaluate('(e)=>e.scrollTop=0')
     page.screenshot(path=str(OUT/'project-comparison.png'),full_page=True)
-    check('close/reopen and section shortcuts work')
+    check('close/reopen works; secondary content stays folded when requested')
 
     for width in [1024,768,640,390,320]:
         page.set_viewport_size({'width':width,'height':844})
