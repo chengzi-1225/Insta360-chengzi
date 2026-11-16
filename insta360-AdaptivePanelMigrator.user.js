@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         自适应面板移植器
 // @namespace    http://tampermonkey.net/
-// @version      3.1.0
+// @version      3.1.1
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-AdaptivePanelMigrator.user.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-AdaptivePanelMigrator.user.js
-// @description  将标签、问答和复合规则面板移入同一编辑器的 Relations，支持侧栏换行、动态分支和恢复原位
+// @description  将标签、问答和复合规则面板移入 Relations，短选项并排、长文字换行，支持动态分支和恢复原位
 // @author       chengzi
 // @match        https://label.insta360.com/*
 // @run-at       document-idle
@@ -157,25 +157,28 @@
     styleElement.textContent = `
       .ipm-scroll { overflow-y:auto !important; min-height:0; }
       .ipm-target { display:block !important; min-width:0; box-sizing:border-box; }
-      .ipm-host { display:flex; flex-direction:column; gap:8px; min-width:0; padding:8px; box-sizing:border-box; }
-      .ipm-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:6px; font:12px/1.5 system-ui,-apple-system,"PingFang SC",sans-serif; }
+      .ipm-host { display:flex; flex-direction:column; gap:4px; min-width:0; padding:4px; box-sizing:border-box; }
+      .ipm-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:4px; font:12px/1.5 system-ui,-apple-system,"PingFang SC",sans-serif; }
       .ipm-count { flex:1 1 80px; color:#637083; }
-      .ipm-button { padding:3px 8px; border:1px solid #ced6e0; border-radius:5px; color:#324258; background:#fff; cursor:pointer; font:inherit; }
+      .ipm-button { padding:2px 6px; border:1px solid #ced6e0; border-radius:5px; color:#324258; background:#fff; cursor:pointer; font:inherit; }
       .ipm-button:hover { background:#edf5ff; border-color:#8cb7ef; }
       .ipm-button:focus-visible { outline:2px solid #4081d6; outline-offset:2px; }
       .ipm-button:disabled { opacity:.45; cursor:default; }
-      .ipm-list { display:flex; flex-direction:column; gap:8px; min-width:0; }
-      .ipm-panel { flex:0 0 auto !important; width:100% !important; max-width:100% !important; min-width:0 !important; height:auto !important; box-sizing:border-box !important; margin:0 !important; }
-      .ipm-panel :is(h3,h4,h5,legend) { margin:0 0 8px !important; font-size:13px !important; line-height:1.5 !important; overflow-wrap:anywhere; }
-      .ipm-panel :is(div,section,fieldset) { min-width:0 !important; max-width:100%; box-sizing:border-box; }
-      .ipm-panel :is(.lsf-choices,.ant-checkbox-group,.ant-radio-group) { display:flex !important; flex-direction:column !important; flex:1 1 100% !important; width:100% !important; min-width:0 !important; gap:5px; }
+      .ipm-list { display:flex; flex-direction:column; gap:4px; min-width:0; }
+      .ipm-panel { flex:0 0 auto !important; width:100% !important; max-width:100% !important; min-width:0 !important; min-height:0 !important; height:auto !important; box-sizing:border-box !important; margin:0 !important; padding:6px 8px !important; }
+      .ipm-panel :is(h3,h4,h5,legend,[role="heading"]) { margin:4px 0 3px !important; font-size:13px !important; line-height:1.45 !important; overflow-wrap:anywhere; }
+      .ipm-panel > :is(h3,h4,h5,legend,[role="heading"]):first-child { margin-top:0 !important; }
+      .ipm-panel :is(div,section,fieldset,p) { min-width:0 !important; min-height:0 !important; max-width:100%; margin-block:0 !important; box-sizing:border-box; }
+      .ipm-panel :is(.lsf-choices,.lsf-choices__list,.ant-checkbox-group,.ant-radio-group) { display:flex !important; flex-direction:row !important; flex-wrap:wrap !important; align-items:flex-start; align-content:flex-start; justify-content:flex-start !important; flex:1 1 100% !important; width:100% !important; min-width:0 !important; gap:2px 10px !important; }
       .ipm-panel :is([style*="display: flex"],[style*="display:flex"]) { flex-wrap:wrap !important; }
       .ipm-panel :is([style*="display: grid"],[style*="display:grid"]) { grid-template-columns:minmax(0,1fr) !important; }
-      .ipm-panel :is(label,.lsf-choice) { display:flex !important; align-items:flex-start; flex:1 1 100%; width:100%; min-width:0; max-width:100%; margin-left:0 !important; white-space:normal !important; overflow-wrap:anywhere; }
+      .ipm-panel :is(label,.lsf-choice) { display:inline-flex !important; align-items:center; flex:0 1 auto !important; width:auto !important; min-width:0; max-width:100%; min-height:24px; margin:0 !important; line-height:1.45 !important; vertical-align:top; white-space:normal !important; overflow-wrap:anywhere; }
       .ipm-panel :is(label,.lsf-choice) > :not(input):not(.ant-checkbox):not(.ant-radio):not(.lsf-hint) { min-width:0; white-space:normal !important; }
       .ipm-panel :is(input[type="checkbox"],input[type="radio"],.ant-checkbox,.ant-radio) { flex-shrink:0; }
       .ipm-panel .lsf-labels { flex-wrap:wrap !important; }
+      .ipm-panel .lsf-label { margin:2px !important; }
       .ipm-panel .lsf-label__text { white-space:normal; overflow-wrap:anywhere; }
+      .ipm-panel hr { margin:5px 0 !important; }
     `;
     (document.head || document.documentElement).appendChild(styleElement);
   }
@@ -410,9 +413,9 @@
   }
 
   const api = {
-    version: '3.1.0', config: CONFIG, scan: findAllPanels, move: moveAllPanels,
+    version: '3.1.1', config: CONFIG, scan: findAllPanels, move: moveAllPanels,
     restore: restoreAll, destroy, isExcluded: isExcludedElement,
-    status: () => ({ version: '3.1.0', enabled, moved: records.size, scans, moves, pending: timer !== null, lastError }),
+    status: () => ({ version: '3.1.1', enabled, moved: records.size, scans, moves, pending: timer !== null, lastError }),
   };
   window.__instaPanelMover = api;
   window.__debugPanelMover = api;
