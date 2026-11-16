@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         自适应面板移植器
 // @namespace    http://tampermonkey.net/
-// @version      3.0.0
+// @version      3.1.0
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-AdaptivePanelMigrator.user.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-AdaptivePanelMigrator.user.js
-// @description  将 Labels / Choices 完整卡片移入同一编辑器的 Relations，支持恢复、任务切换和媒体保护
+// @description  将标签、问答和复合规则面板移入同一编辑器的 Relations，支持侧栏换行、动态分支和恢复原位
 // @author       chengzi
 // @match        https://label.insta360.com/*
 // @run-at       document-idle
@@ -19,8 +19,9 @@
 
   const CONFIG = {
     relationsSelector: '.lsf-relations__section-content',
+    relationsFallbackSelector: '.lsf-relations__section-tab',
     sourceSelector: '.lsf-main-view__annotation',
-    anchorSelector: '.lsf-choices, .lsf-labels',
+    anchorSelector: '.lsf-choices, .lsf-labels, .ant-checkbox-group, .ant-radio-group, input[type="checkbox"], input[type="radio"]',
     maxDepth: 10,
     debounceMs: 100,
     debug: false,
@@ -32,6 +33,9 @@
     '.lsf-timeline', '.lsf-object', '.lsf-video-segmentation', '.lsf-seeker',
     '.lsf-minimap', '.lsf-timeline-controls', '.lsf-image',
   ].join(',');
+  const BOUNDARY = '.lsf-editor, .lsf-main-view, .lsf-main-content, .lsf-sidepanels, .lsf-tabs__contents';
+  const HEADINGS = 'h3, h4, h5, legend, [role="heading"]';
+  const QUESTION_INPUTS = 'input[type="checkbox"], input[type="radio"]';
   const records = new Map();
   const guards = new Map();
   const mounts = new Map();
@@ -61,32 +65,63 @@
   function hiddenAtSource(anchor, source) {
     for (let el = anchor; el; el = el.parentElement) {
       const style = getComputedStyle(el);
-      if (el.hidden || el.getAttribute('aria-hidden') === 'true' || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)) return true;
+      if (el.hidden || el.hasAttribute('inert') || el.getAttribute('aria-hidden') === 'true' || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)) return true;
       if (el === source) break;
     }
     return false;
   }
 
+  function findCompositePanels(source, anchors) {
+    // 从真实控件向上找，避免逐个测量工作区内的所有 div。
+    const candidates = new Set(), surfaces = new WeakMap();
+    const surface = el => {
+      if (!surfaces.has(el)) surfaces.set(el, hasCardSurface(el));
+      return surfaces.get(el);
+    };
+    for (const anchor of anchors) {
+      for (let el = anchor, depth = 0; el && el !== source && depth < CONFIG.maxDepth; el = el.parentElement, depth++) {
+        if (el.matches(BOUNDARY) || isExcludedElement(el)) break;
+        if (surface(el)) candidates.add(el);
+      }
+    }
+    const panels = Array.from(candidates).filter(el => {
+      if (el.querySelectorAll(QUESTION_INPUTS).length < 2) return false;
+      // 只统计这张卡片自己的标题；另一张有底色/边框的独立子卡片不算。
+      // 因此能识别蓝色多题面板，也不会把包住多张卡片的工作区一起搬走。
+      const ownHeadings = Array.from(el.querySelectorAll(HEADINGS)).filter(heading => {
+        for (let p = heading.parentElement; p && p !== el; p = p.parentElement) if (surface(p)) return false;
+        return true;
+      });
+      return ownHeadings.length >= 2;
+    });
+    return panels.filter(el => !panels.some(parent => parent !== el && parent.contains(el)));
+  }
+
   function findCard(anchor, source) {
     if (isExcludedElement(anchor)) return null;
     let fallback = null;
-    for (let el = anchor.parentElement, depth = 0; el && el !== source && depth < CONFIG.maxDepth; el = el.parentElement, depth++) {
+    for (let el = anchor, depth = 0; el && el !== source && depth < CONFIG.maxDepth; el = el.parentElement, depth++) {
       // 一旦遇到画布/媒体边界，不再向上找到包含整个工作区的容器。
       if (isExcludedElement(el)) break;
-      if (el.matches('.lsf-editor, .lsf-main-view, .lsf-main-content, .lsf-sidepanels')) break;
+      if (el.matches(BOUNDARY)) break;
       if (!hasCardSurface(el)) continue;
-      fallback ||= el;
       // 保留完整的标题、所有标签和第三方脚本附加按钮。
-      const headings = el.querySelectorAll('h3, h4, h5, legend');
+      const headings = el.querySelectorAll(HEADINGS);
       if (headings.length === 1) return el;
       if (headings.length > 1) break;
+      fallback ||= el;
     }
     return fallback;
   }
 
   function editorFor(el) { return el.closest('.lsf-editor'); }
   function targetFor(editor) {
-    return Array.from(editor.querySelectorAll(CONFIG.relationsSelector)).find(el => editorFor(el) === editor) || null;
+    // 空 Relations 在新版原生界面中没有 section-content，使用其专属页签容器。
+    for (const selector of [CONFIG.relationsSelector, CONFIG.relationsFallbackSelector]) {
+      const target = Array.from(editor.querySelectorAll(selector)).find(el => editorFor(el) === editor);
+      if (target) return target;
+    }
+    return null;
   }
 
   function findAllPanels() {
@@ -94,8 +129,12 @@
     for (const source of document.querySelectorAll(CONFIG.sourceSelector)) {
       const editor = editorFor(source);
       if (!editor) continue;
-      for (const anchor of source.querySelectorAll(CONFIG.anchorSelector)) {
-        if (anchor.closest('[data-ipm-panel]') || hiddenAtSource(anchor, source)) continue;
+      const anchors = Array.from(source.querySelectorAll(CONFIG.anchorSelector)).filter(anchor =>
+        editorFor(anchor) === editor && !anchor.closest('[data-ipm-panel], [data-moved="true"]') && !hiddenAtSource(anchor, source));
+      const compositePanels = findCompositePanels(source, anchors);
+      result.push(...compositePanels);
+      for (const anchor of anchors) {
+        if (compositePanels.some(panel => panel.contains(anchor))) continue;
         const panel = findCard(anchor, source);
         if (!panel || panel.closest('[data-moved="true"]') || records.has(panel)) continue;
         if (result.some(el => el === panel || el.contains(panel))) continue;
@@ -126,9 +165,17 @@
       .ipm-button:focus-visible { outline:2px solid #4081d6; outline-offset:2px; }
       .ipm-button:disabled { opacity:.45; cursor:default; }
       .ipm-list { display:flex; flex-direction:column; gap:8px; min-width:0; }
-      .ipm-panel { flex:0 0 auto !important; width:100% !important; max-width:100% !important; min-width:0 !important; box-sizing:border-box !important; margin:0 !important; }
+      .ipm-panel { flex:0 0 auto !important; width:100% !important; max-width:100% !important; min-width:0 !important; height:auto !important; box-sizing:border-box !important; margin:0 !important; }
       .ipm-panel :is(h3,h4,h5,legend) { margin:0 0 8px !important; font-size:13px !important; line-height:1.5 !important; overflow-wrap:anywhere; }
-      .ipm-panel .lsf-choices { min-width:0; max-width:100%; }
+      .ipm-panel :is(div,section,fieldset) { min-width:0 !important; max-width:100%; box-sizing:border-box; }
+      .ipm-panel :is(.lsf-choices,.ant-checkbox-group,.ant-radio-group) { display:flex !important; flex-direction:column !important; flex:1 1 100% !important; width:100% !important; min-width:0 !important; gap:5px; }
+      .ipm-panel :is([style*="display: flex"],[style*="display:flex"]) { flex-wrap:wrap !important; }
+      .ipm-panel :is([style*="display: grid"],[style*="display:grid"]) { grid-template-columns:minmax(0,1fr) !important; }
+      .ipm-panel :is(label,.lsf-choice) { display:flex !important; align-items:flex-start; flex:1 1 100%; width:100%; min-width:0; max-width:100%; margin-left:0 !important; white-space:normal !important; overflow-wrap:anywhere; }
+      .ipm-panel :is(label,.lsf-choice) > :not(input):not(.ant-checkbox):not(.ant-radio):not(.lsf-hint) { min-width:0; white-space:normal !important; }
+      .ipm-panel :is(input[type="checkbox"],input[type="radio"],.ant-checkbox,.ant-radio) { flex-shrink:0; }
+      .ipm-panel .lsf-labels { flex-wrap:wrap !important; }
+      .ipm-panel .lsf-label__text { white-space:normal; overflow-wrap:anywhere; }
     `;
     (document.head || document.documentElement).appendChild(styleElement);
   }
@@ -239,7 +286,10 @@
   }
 
   function observe() {
-    if (!destroyed && observer && document.body) observer.observe(document.body, { childList: true, subtree: true });
+    if (!destroyed && observer && document.body) observer.observe(document.body, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ['hidden', 'inert', 'aria-hidden', 'style', 'class'],
+    });
   }
 
   function mutate(fn) {
@@ -325,8 +375,13 @@
   }
 
   function relevant(mutation) {
+    if (mutation.type === 'attributes') {
+      const el = mutation.target;
+      return el instanceof Element && !!el.closest(CONFIG.sourceSelector) && !el.closest('[data-ipm-panel]') &&
+        (el.matches(CONFIG.anchorSelector) || !!el.querySelector(CONFIG.anchorSelector));
+    }
     const nodes = [...mutation.addedNodes, ...mutation.removedNodes];
-    const selector = `${CONFIG.sourceSelector}, ${CONFIG.relationsSelector}, ${CONFIG.anchorSelector}, .ipm-host`;
+    const selector = `${CONFIG.sourceSelector}, ${CONFIG.relationsSelector}, ${CONFIG.relationsFallbackSelector}, ${CONFIG.anchorSelector}, .ipm-host`;
     for (const node of nodes) {
       if (node instanceof Element && (node.matches(selector) || node.querySelector(selector))) return true;
       for (const r of records.values()) {
@@ -355,9 +410,9 @@
   }
 
   const api = {
-    version: '3.0.0', config: CONFIG, scan: findAllPanels, move: moveAllPanels,
+    version: '3.1.0', config: CONFIG, scan: findAllPanels, move: moveAllPanels,
     restore: restoreAll, destroy, isExcluded: isExcludedElement,
-    status: () => ({ version: '3.0.0', enabled, moved: records.size, scans, moves, pending: timer !== null, lastError }),
+    status: () => ({ version: '3.1.0', enabled, moved: records.size, scans, moves, pending: timer !== null, lastError }),
   };
   window.__instaPanelMover = api;
   window.__debugPanelMover = api;
