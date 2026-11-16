@@ -1,8 +1,10 @@
 // ==UserScript==
 // @name         Insta360 预览条帧范围
 // @namespace    insta360.frame-range
-// @version      1.0.0
+// @version      1.0.1
 // @description  在视频原生预览条上方限定帧范围、放大缩小与横向平移；预览条自动适应面板宽度
+// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/Insta360-TimelineFrameRange-1.0.0.user.js
+// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/Insta360-TimelineFrameRange-1.0.0.user.js
 // @match        https://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
