@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         insta360-IDswitching
 // @namespace    local.ls.toolkit
-// @version      3.18.1
-// @description  精简分组工具栏、预设全选与拖动框选；保留原生删框撤回、选中显隐、标签同步及自定义快捷键。
+// @version      3.18.2
+// @description  精简分组工具栏、预设全选与拖动框选；优化下一张单击切换，减少重复渲染和转圈等待；保留原生删框撤回、选中显隐、标签同步及自定义快捷键。
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
 // @match        *://label.insta360.com/*
@@ -1194,13 +1194,21 @@
 
     function clearOutline() { getAll().forEach(i => { i.style.outline = ''; i.style.outlineOffset = ''; }); }
 
+    let lastNavigationAt = -Infinity;
     function activate(item, dir) {
       if (navigationBusy()) return;
+      const now = performance.now();
+      // 页面切换是异步的；切换尚未完成时重复点击只会排队更多渲染和请求。
+      if (now - lastNavigationAt < 160) return;
+      lastNavigationAt = now;
       clearOutline();
       item.style.outline = '2px solid #409eff';
       item.style.outlineOffset = '2px';
       item.scrollIntoView({ block: 'nearest' });
-      ['mousedown', 'mouseup', 'click'].forEach(et => item.dispatchEvent(new MouseEvent(et, { bubbles: true, cancelable: true })));
+      // React/Label Studio 的列表项由 click 处理选择；额外派发 mousedown 和
+      // mouseup 会触发重复的状态计算，切换下一张时尤其容易出现转圈。
+      if (typeof item.click === 'function') item.click();
+      else item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     }
 
     function navigate(direction) {
