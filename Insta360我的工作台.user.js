@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         Insta360 我的工作台（标注员 / 审核员）
 // @namespace    https://label.insta360.com/personal-toolbox/
-// @version      1.8.3
+// @version      1.8.4
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360我的工作台.user.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360我的工作台.user.js
 // @description  个人数据工作台：总览、项目搜索排序、分页合计、CSV 导出与返修返工快捷入口
-// @author       chengzi / Codex
+// @author       chengzi
 // @match        *://label.insta360.com/*
 // @run-at       document-idle
 // @grant        none
@@ -244,6 +244,95 @@
     return match ? {workspace: match[1], role: 'annotator'} : null;
   }
 
+  // 两套接口的权限和口径不同；项目汇总不能冒充个人新提交或返修更新。
+  async function loadPersonalStats(fetchJson, params, options) {
+    options = options || {};
+    var userId = id(params.user_id), pages = new Map();
+    if (!userId) throw new Error('无法确认当前登录账号');
+    function checkAbort() {
+      if (options.signal && options.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+    }
+    function report(rows, source, meta) {
+      checkAbort();
+      if (options.onProgress) options.onProgress({rows: rows, source: source, meta: meta});
+    }
+    if (!options.preferProject) try {
+      var overview = await loadPages(async function (page) {
+        checkAbort();
+        var body = await fetchJson('/api/statistics/overview', Object.assign({}, params, {page: page, page_size: 100}));
+        if (body && body.role && body.role !== params.role) throw new Error('统计角色返回不一致，请刷新');
+        if (!body || !Array.isArray(body.users_stats) || number(body.count) == null) {
+          var unsupported = new Error('个人汇总接口格式不支持'); unsupported.statsUnavailable = true; throw unsupported;
+        }
+        return body;
+      }, 'users_stats', function (row) { return id(row.id) && id(row.project_id) ? id(row.id) + ':' + id(row.project_id) : ''; }, {
+        concurrency: 3,
+        onPage: function (page, rows, meta) {
+          pages.set(page, rows); report(selfRows(flattenPages(pages), userId), 'overview', meta);
+        },
+      });
+      var ownRows = selfRows(overview, userId);
+      if (ownRows.length && ownRows.some(function (row) {
+        return Object.keys(row.stats || {}).some(function (key) { return number(row.stats[key]) > 0; });
+      })) return {rows: ownRows, source: 'overview'};
+    } catch (error) {
+      checkAbort();
+      if (!error.statsUnavailable && [403, 404, 405].indexOf(error.status) < 0) throw error;
+    }
+    report([], 'project', {received: 0, expected: null});
+    var lookup = {include: 'id,title,workspace', page_size: 20};
+    if (params.workspace_id) lookup.workspaces = params.workspace_id;
+    if (params.project_id) lookup.ids = params.project_id;
+    if (options.title) lookup.title = options.title;
+    var projects = await loadPages(function (page) {
+      checkAbort();
+      return fetchJson('/api/projects', Object.assign({}, lookup, {page: page}));
+    }, 'results', function (row) { return id(row.id); }, {concurrency: 2, maxPages: 5000});
+    var selectedIds = params.project_id ? parseProjectIds(params.project_id) : [];
+    projects = projects.filter(function (project) {
+      if (params.workspace_id && !id(project.workspace)) throw new Error('项目数据缺少工作区，无法确认筛选范围');
+      return (!params.workspace_id || id(project.workspace) === id(params.workspace_id)) &&
+        (!selectedIds.length || selectedIds.indexOf(id(project.id)) >= 0) &&
+        (!options.title || String(project.title || '').toLocaleLowerCase().includes(options.title.toLocaleLowerCase()));
+    });
+    var results = new Map(), cursor = 0, completed = 0, failed = false;
+    var dateParams = {start_date: params.start_date.slice(0, 10), end_date: params.end_date.slice(0, 10)};
+    async function worker() {
+      try {
+        while (!failed && cursor < projects.length) {
+          checkAbort();
+          var index = cursor++, project = projects[index];
+          var body = await fetchJson('/api/projects/' + id(project.id) + (params.role === 'reviewer' ? '/review-stats' : '/stats'), dateParams);
+          checkAbort();
+          if (!body || !Array.isArray(body.users_stats)) throw new Error('项目 #' + project.id + ' 统计格式不支持');
+          var users = selfRows(body.users_stats, userId), rows = [];
+          if (users.length > 1) throw new Error('项目统计包含重复人员，请刷新重试');
+          if (users.length) {
+            var raw = params.role === 'reviewer' ? users[0] : users[0].stats;
+            if (!raw || typeof raw !== 'object') throw new Error('项目统计缺少本人字段');
+            var stats = params.role === 'reviewer' ? {
+              review_total: number(raw.total_reviews), review_passed: number(raw.review_accepted),
+              review_rejected: number(raw.review_rejected), review_skipped: number(raw.review_skipped),
+            } : {annotation_total: number(raw.total_annotations)};
+            stats.label__region = number(raw.total_regions);
+            var seconds = number(raw.total_time);
+            stats.project_time_min = seconds == null ? null : seconds / 60;
+            rows.push({id: userId, project_id: id(project.id), project_title: project.title || ('项目 #' + project.id), stats: stats});
+          }
+          results.set(index, rows); completed++;
+          if (!failed) report(flattenPages(results), 'project', {received: completed, expected: projects.length});
+        }
+      } catch (error) { failed = true; throw error; }
+    }
+    await Promise.all(Array.from({length: Math.min(3, projects.length)}, worker));
+    checkAbort();
+    var projectRows = flattenPages(results);
+    if (ownRows && ownRows.length && projectRows.length && projectRows.every(function (row) {
+      return Object.keys(row.stats).every(function (key) { return row.stats[key] === 0; });
+    })) return {rows: ownRows, source: 'overview'};
+    return {rows: projectRows, source: 'project'};
+  }
+
   function rowMetric(row, key, totals) {
     if (key === 'project_title') return String(row.project_title || ('项目 #' + row.project_id));
     if (key === 'accuracy') return accuracySummary([row]).value;
@@ -275,11 +364,11 @@
     }).join('\r\n');
   }
 
-  var core = {browseRows: browseRows, rowMetric: rowMetric, csvText: csvText, identity: identity, selfRows: selfRows, sumMetric: sumMetric, summarizeMetric: summarizeMetric, accuracySummary: accuracySummary, parseProjectIds: parseProjectIds, sumRegionMetric: sumRegionMetric, statsParams: statsParams, personalProjects: personalProjects, projectRegionTotals: projectRegionTotals, workUrl: workUrl, pageOrder: pageOrder, loadPages: loadPages, presetRange: presetRange, activeRange: activeRange, routeContext: routeContext};
+  var core = {loadPersonalStats: loadPersonalStats, browseRows: browseRows, rowMetric: rowMetric, csvText: csvText, identity: identity, selfRows: selfRows, sumMetric: sumMetric, summarizeMetric: summarizeMetric, accuracySummary: accuracySummary, parseProjectIds: parseProjectIds, sumRegionMetric: sumRegionMetric, statsParams: statsParams, personalProjects: personalProjects, projectRegionTotals: projectRegionTotals, workUrl: workUrl, pageOrder: pageOrder, loadPages: loadPages, presetRange: presetRange, activeRange: activeRange, routeContext: routeContext};
   if (typeof module === 'object' && module.exports) module.exports = core;
   if (typeof window === 'undefined' || typeof document === 'undefined') return;
   if (window.__INSTA360_PERSONAL_TOOLBOX__) return;
-  window.__INSTA360_PERSONAL_TOOLBOX__ = {version: '1.8.1'};
+  window.__INSTA360_PERSONAL_TOOLBOX__ = {version: '1.8.4'};
 
   var SHORT_LABELS = {submit_total:'新提交',update_total:'更新',review_passed:'通过',review_rejected_total:'驳回',accuracy:'准确率',total_time_min:'耗时（分钟）',regions:'本人 regions',project_regions:'项目 regions',review_total:'已审核',review_rejected:'驳回',acceptance_rejected:'验收驳回'};
   var METRICS = {
@@ -304,14 +393,40 @@
     ],
   };
 
+  var PROJECT_METRICS = {
+    annotator: [
+      ['annotation_total', '标注总数', '条', '项目统计中的本人标注总数，不等同于新提交或返修更新'],
+      ['regions', '本人 regions 数', '个', '所选日期内项目统计中的本人区域数'],
+      ['project_time_min', '项目统计耗时', '分钟', '项目统计 total_time（秒）换算为分钟，使用项目统计口径'],
+      ['project_regions', '项目 regions 总数', '个', '项目全部成员、全部日期累计参考'],
+    ],
+    reviewer: [
+      ['review_total', '已审核', '次', '项目统计中本人的审核总数'],
+      ['review_passed', '审核通过', '次', '项目统计中本人的通过数量'],
+      ['review_rejected', '审核驳回', '次', '项目统计中本人的驳回数量'],
+      ['review_skipped', '审核跳过', '次', '项目统计中本人的跳过数量'],
+      ['regions', '本人 regions 数', '个', '所选日期内项目统计中的本人区域数'],
+      ['project_time_min', '项目统计耗时', '分钟', '项目统计 total_time（秒）换算为分钟'],
+      ['project_regions', '项目 regions 总数', '个', '项目全部成员、全部日期累计参考'],
+    ],
+  };
+  function metricsForRole(role) { return state && state.statsSource === 'project' ? PROJECT_METRICS[role] : METRICS[role]; }
+  function setStatsSource(source) {
+    if (state.statsSource === source) return;
+    var reference = state.fieldSelection[state.role].has('project_regions');
+    state.statsSource = source;
+    state.fieldSelection[state.role] = new Set(metricsForRole(state.role).filter(function (m) { return reference || m[0] !== 'project_regions'; }).map(function (m) { return m[0]; }));
+    if (!metricsForRole(state.role).some(function (m) { return m[0] === state.sortKey; }) && state.sortKey !== 'project_title') state.sortKey = '';
+  }
+
   var state = {
     selectedProjectId: '', choiceSearch: '', quick: '', sortKey: '', sortDirection: 'desc', page: 1, pageSize: 10, pendingMode: 'all',
     context: null, role: 'annotator', workspace: 'all', range: presetRange('today'), preset: 'today',
-    user: null, stats: null, regions: null, pending: null, statsProgress: null, pendingProgress: null, error: '', statsError: '', regionError: '', pendingError: '',
+    user: null, stats: null, statsSource: 'overview', regions: null, pending: null, statsProgress: null, pendingProgress: null, error: '', statsError: '', regionError: '', pendingError: '',
     busy: false, statsBusy: false, regionBusy: false, pendingBusy: false, opened: false, filter: '', projectIdsText: '', queryScope: null, queryRange: null, queryWorkspace: null, discarded: 0, updated: '', regionUpdated: '', pendingUpdated: '',
     fieldSelection: {annotator: defaultFields('annotator'), reviewer: defaultFields('reviewer')},
   };
-  function defaultFields(role) { return new Set(METRICS[role].filter(function (metric) { return metric[0] !== 'project_regions'; }).map(function (metric) { return metric[0]; })); }
+  function defaultFields(role) { return new Set(metricsForRole(role).filter(function (metric) { return metric[0] !== 'project_regions'; }).map(function (metric) { return metric[0]; })); }
   var host, root, controller, runNumber = 0, lastPath = '';
   var countFrames = Object.create(null), countCurrent = Object.create(null);
   var menuItems = new Map();
@@ -457,7 +572,7 @@
     if (link) link.focus();
   }
   // 只在当前页面内存中保存，账号/权限改变即清空；日期不影响待处理列表的缓存键。
-  var cache = new Map(), cacheAccount = '', pendingPageMemory = new Map();
+  var cache = new Map(), cacheAccount = '', pendingPageMemory = new Map(), projectSourceHints = new Map();
   var choiceController = null, choiceVersion = 0, choiceRows = [], choiceWorkspace = null, choiceBusy = false, choiceError = '';
   var workspaceController = null, workspaceRows = [], workspaceBusy = false, workspaceSearch = '', workspaceError = '';
   function pendingPageKey(accountKey, workspace, scope) {
@@ -487,7 +602,7 @@
     if (workspaceController) workspaceController.abort(); workspaceBusy = false;
     if (root && state.context) configureScope(state.context);
     cache.forEach(function (entry) { if (entry.controller) entry.controller.abort(); });
-    cache.clear(); cacheAccount = '';
+    cache.clear(); cacheAccount = ''; projectSourceHints.clear();
   }
   function readCached(key, ttl, force, load) {
     var entry = cache.get(key);
@@ -624,12 +739,12 @@
     return true;
   }
   function escape(value) { return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
-  function display(value, key) { return value == null ? '—' : (key === 'accuracy' ? value.toFixed(2) : key === 'total_time_min' ? value.toFixed(1) : value.toLocaleString('zh-CN')); }
+  function display(value, key) { return value == null ? '—' : (key === 'accuracy' ? value.toFixed(2) : (key === 'total_time_min' || key === 'project_time_min') ? value.toFixed(1) : value.toLocaleString('zh-CN')); }
   function metricMatches(metric) {
     return state.fieldSelection[state.role].has(metric[0]);
   }
   function renderFieldOptions() {
-    var metrics = METRICS[state.role], selected = state.fieldSelection[state.role];
+    var metrics = metricsForRole(state.role), selected = state.fieldSelection[state.role];
     setMarkup('#field-options', metrics.map(function (metric) {
       return '<label class="field-option" title="' + escape(metric[3]) + '"><input type="checkbox" data-field="' + escape(metric[0]) + '"><span>' + escape(metric[1]) + '</span></label>';
     }).join(''));
@@ -637,7 +752,7 @@
     $('#field-count').textContent = '已选 ' + selected.size + ' / ' + metrics.length + ' 项';
   }
   function selectFields(all) {
-    state.fieldSelection[state.role] = new Set(all ? METRICS[state.role].map(function (metric) { return metric[0]; }) : []);
+    state.fieldSelection[state.role] = new Set(all ? metricsForRole(state.role).map(function (metric) { return metric[0]; }) : []);
     renderFieldOptions(); renderStats();
   }
   function sumRegions(rows) {
@@ -645,6 +760,7 @@
   }
   function progressText(progress) {
     if (progress && progress.priority) return ' · 已优先读取上次待处理项目，继续查询中';
+    if (progress && progress.receivedPages == null) return progress.expected == null ? ' · 正在回查项目统计' : ' · 已核对 ' + progress.received + '/' + progress.expected + ' 个项目';
     if (!progress || progress.receivedPages >= progress.totalPages) return '';
     return ' · 已读取 ' + progress.receivedPages + '/' + progress.totalPages + ' 个项目包，继续查询中';
   }
@@ -683,7 +799,7 @@
     countCurrent = Object.create(null);
   }
   function abort() { runNumber++; if (controller) controller.abort(); state.busy = false; state.statsBusy = false; state.regionBusy = false; state.pendingBusy = false; }
-  function clearResults() { state.page = 1; resetCountAnimations(); state.user = null; state.stats = null; state.regions = null; state.pending = null; state.queryScope = null; state.queryRange = null; state.queryWorkspace = null; state.statsProgress = null; state.pendingProgress = null; state.updated = ''; state.regionUpdated = ''; state.pendingUpdated = ''; state.discarded = 0; state.error = ''; state.statsError = ''; state.regionError = ''; state.pendingError = ''; }
+  function clearResults() { state.page = 1; resetCountAnimations(); state.user = null; state.stats = null; setStatsSource('overview'); state.regions = null; state.pending = null; state.queryScope = null; state.queryRange = null; state.queryWorkspace = null; state.statsProgress = null; state.pendingProgress = null; state.updated = ''; state.regionUpdated = ''; state.pendingUpdated = ''; state.discarded = 0; state.error = ''; state.statsError = ''; state.regionError = ''; state.pendingError = ''; }
 
   async function request(path, params, signal, options) {
     options = options || {};
@@ -712,8 +828,8 @@
     var timer = setTimeout(function () { timedOut = true; timeout.abort(); }, timeoutMs);
     try {
       var response = await fetch(url.href, {method: 'GET', credentials: 'include', headers: {Accept: 'application/json'}, signal: timeout.signal, cache: 'no-store'});
-      if (response.status === 401) throw new Error('登录已失效，请重新登录后刷新');
-      if (response.status === 403) throw new Error('当前账号没有查看此项的权限');
+      if (response.status === 401) throw Object.assign(new Error('登录已失效，请重新登录后刷新'), {status: 401});
+      if (response.status === 403) throw Object.assign(new Error('当前账号没有查看此项的权限'), {status: 403});
       if (!response.ok) { var httpError = new Error(response.status === 429 ? '查询过于频繁，请稍后刷新' : '查询失败（HTTP ' + response.status + '），请刷新重试'); httpError.status = response.status; throw httpError; }
       if (!(response.headers.get('content-type') || '').includes('json')) throw new Error('未取得统计数据，请确认仍处于登录状态');
       var data = await response.json();
@@ -856,7 +972,7 @@
     state.queryRange = range.slice(); state.queryWorkspace = workspace;
     controller = new AbortController();
     var signal = controller.signal;
-    state.busy = true; state.statsBusy = true; state.regionBusy = false; state.pendingBusy = role === 'annotator'; render();
+    state.busy = true; state.statsBusy = true; state.regionBusy = false; state.pendingBusy = false; render();
     try {
       var user = identity(await request('/api/current-user/whoami', {}, signal));
       if (run !== runNumber) return;
@@ -872,7 +988,7 @@
       var pendingKey = JSON.stringify(['pending', accountKey, workspace, scope]);
       var scopeKey = JSON.stringify(['scope', accountKey, workspace, scope]);
       cancelOtherJobs(role === 'annotator' ? [statsKey, pendingKey, scopeKey] : [statsKey, scopeKey]);
-      var pendingJob = role === 'annotator' ? refreshPending(force, run, user, workspace, scope) : null;
+      var pendingJob = role === 'annotator' && $('#pending-section').open ? refreshPending(force, run, user, workspace, scope) : null;
       var selectedIds = scope.ids;
       if (scope.title && !scope.selectedId) {
         var scopeResult = await readCached(scopeKey, 30000, force === true, async function (jobSignal) {
@@ -905,8 +1021,10 @@
           if (run !== runNumber) return;
           // 新结果在写入缓存前已核对身份；缓存命中则使用本轮刚确认的身份。
           if (kind === 'stats') {
-            state.stats = selfRows(result.value, user.id);
-            state.discarded = result.value.length - state.stats.length;
+            setStatsSource(result.value.source);
+            if (result.value.source === 'project') projectSourceHints.set(role, Date.now());
+            state.stats = selfRows(result.value.rows, user.id);
+            state.discarded = result.value.rows.length - state.stats.length;
             state.statsProgress = null;
             state.updated = updateTime(result.at);
           } else { state.regions = result.value; state.regionUpdated = updateTime(result.at); }
@@ -920,20 +1038,13 @@
           if (run === runNumber) { state[kind + 'Busy'] = false; state.busy = state.statsBusy || state.regionBusy || state.pendingBusy; render(); }
         }
       }
-      var statsPages = new Map();
       var statsJob = publish('stats', statsKey, 30000, function (jobSignal, report) {
-          return loadPages(async function (page) {
-            var response = await request('/api/statistics/overview', Object.assign({}, params, {page: page, page_size: 100}), jobSignal);
-            if (response.role && response.role !== role) throw new Error('统计角色返回不一致，请刷新');
-            return response;
-          }, 'users_stats', function (row) { return id(row.id) && id(row.project_id) ? id(row.id) + ':' + id(row.project_id) : ''; }, {
-            concurrency: 3,
-            onPage: function (page, rows, meta) {
-              statsPages.set(page, rows);
-              report({rows: flattenPages(statsPages), meta: meta});
-            },
+          return loadPersonalStats(function (path, query) { return request(path, query, jobSignal); }, params, {
+            title: scope.title, signal: jobSignal, onProgress: report,
+            preferProject: Date.now() - (projectSourceHints.get(role) || 0) < 60000,
           });
         }, true, function (progress) {
+          setStatsSource(progress.source);
           state.stats = selfRows(progress.rows, user.id);
           state.discarded = progress.rows.length - state.stats.length;
           state.statsProgress = progress.meta;
@@ -946,7 +1057,7 @@
       if (run !== runNumber || (error && error.name === 'AbortError')) return;
       clearCache(); clearResults(); state.error = error.message || '查询失败，请刷新重试';
     } finally {
-      if (run === runNumber) { state.statsBusy = false; state.pendingBusy = false; state.busy = state.regionBusy; render(); }
+      if (run === runNumber) { state.statsBusy = false; state.busy = state.regionBusy || state.pendingBusy; render(); }
     }
   }
 
@@ -954,12 +1065,12 @@
 
   function visibleRows() {
     if (!state.stats || state.statsError || state.error) return null;
-    return browseRows(state.stats.filter(function (r) { return matches(r.project_title); }), state.quick, state.sortKey || (state.role === 'annotator' ? 'submit_total' : 'review_total'), state.sortDirection, state.regions);
+    return browseRows(state.stats.filter(function (r) { return matches(r.project_title); }), state.quick, state.sortKey || (state.role === 'annotator' ? state.statsSource === 'project' ? 'annotation_total' : 'submit_total' : 'review_total'), state.sortDirection, state.regions);
   }
 
   function exportStats() {
     if ($('#export').disabled) return;
-    var rows = visibleRows(), metrics = METRICS[state.role].filter(metricMatches);
+    var rows = visibleRows(), metrics = metricsForRole(state.role).filter(metricMatches);
     if (!rows || !rows.length || !state.user) return;
     var table = [
       ['统计类型', roleTitle(state.role)],
@@ -969,6 +1080,7 @@
       ['服务器项目筛选', state.queryScope.title, state.queryScope.ids.join(',')],
       ['本地搜索', state.quick],
       ['完整性', '已完成本人查询', '缺失字段留空，真实零保留 0'],
+      ['数据来源', state.statsSource === 'project' ? '项目统计（本人记录）' : '个人汇总统计'],
       ['导出范围', '全部匹配项目', rows.length],
       ['统计说明', '准确率仅纳入通过和驳回均有值的项目；项目 regions 为全部成员全日期累计参考'],
       ['项目 ID', '项目名称'].concat(metrics.map(function (m) { return m[1] + '（' + m[2] + '）'; })),
@@ -983,7 +1095,7 @@
   }
 
   function renderStats() {
-    var metrics = METRICS[state.role].filter(metricMatches), rows = visibleRows();
+    var metrics = metricsForRole(state.role).filter(metricMatches), rows = visibleRows();
     var hasMissing = false;
     function card(m) {
       var summary = rows && m[0] !== 'project_regions' ? (m[0] === 'accuracy' ? accuracySummary(rows) : summarizeMetric(rows, m[0] === 'regions' ? 'label__region' : m[0])) : null;
@@ -996,14 +1108,14 @@
       var target = n == null ? '' : ' data-count-target="' + escape(n) + '"';
       return '<div class="metric" title="' + escape(m[3]) + '"><span>' + (m[0] === 'update_total' ? m[1] : SHORT_LABELS[m[0]] || m[1]) + '</span><div class="metric-value" data-count-key="' + state.role + ':' + m[0] + '"' + target + '><strong>' + display(n, m[0]) + '</strong><small>' + m[2] + '</small></div>' + coverage + '</div>';
     }
-    var overviewKeys = state.role === 'annotator' ? ['submit_total', 'update_total', 'accuracy', 'regions'] : ['review_total', 'review_passed', 'review_rejected', 'regions'];
-    var personalMetrics = overviewKeys.map(function (key) { return METRICS[state.role].find(function (m) { return m[0] === key; }); });
+    var overviewKeys = state.role === 'annotator' ? state.statsSource === 'project' ? ['annotation_total', 'regions', 'project_time_min'] : ['submit_total', 'update_total', 'accuracy', 'regions'] : ['review_total', 'review_passed', 'review_rejected', 'regions'];
+    var personalMetrics = overviewKeys.map(function (key) { return metricsForRole(state.role).find(function (m) { return m[0] === key; }); });
     var projectMetrics = metrics.filter(function (m) { return m[0] === 'project_regions'; });
     var cardsChanged = setMarkup('#metrics', personalMetrics.map(card).join('') || '<p class="empty">请勾选要显示的本人统计字段</p>');
     $('#project-reference').hidden = !projectMetrics.length;
     var projectChanged = setMarkup('#project-metrics', projectMetrics.map(card).join(''));
     // 总览直接显示精确数值，搜索和翻页时不播放数字动画。
-    var primary = state.role === 'annotator' ? 'submit_total' : 'review_total';
+    var primary = state.role === 'annotator' ? state.statsSource === 'project' ? 'annotation_total' : 'submit_total' : 'review_total';
     var key = state.sortKey || primary;
     var head = '<thead><tr>' + [['project_title', '项目名称']].concat(metrics).map(function (m) {
       var active = key === m[0];
@@ -1019,7 +1131,7 @@
     $('#export').disabled = !count || state.statsBusy || !!state.statsError || !!state.error || !metrics.length || (metrics.some(function (m) { return m[0] === 'project_regions'; }) && (state.regionBusy || !!state.regionError || !state.regions));
     if (state.statsError) setMarkup('#stats-data', '<p class="error" role="alert">' + escape(state.statsError) + '</p>');
     else if (!rows) setMarkup('#stats-data', state.statsBusy ? '<div class="loading-data" role="status"><div class="loading-label"><span class="loading-dot"></span>正在读取本人工作量…<small>已返回的项目会逐步显示</small></div><div class="skeleton-rows" aria-hidden="true">' + Array.from({length:3}, function () { return '<div><i></i><i></i><i></i><i></i></div>'; }).join('') + '</div></div>' : '<div class="empty"><strong>选择日期，开始查看工作数据</strong><span>点击上方“查询 / 刷新”读取当前账号数据</span></div>');
-    else if (!rows.length) setMarkup('#stats-data', '<div class="empty"><span class="empty-symbol" aria-hidden="true">⌕</span><strong>' + (state.quick ? '没有找到匹配的项目' : state.statsBusy ? '正在继续查询项目…' : '当前范围暂无个人记录') + '</strong><span>' + (state.quick ? '试试项目名称、ID，或清空搜索' : '可以更改日期或工作区后重新查询') + '</span></div>');
+    else if (!rows.length) setMarkup('#stats-data', '<div class="empty"><span class="empty-symbol" aria-hidden="true">⌕</span><strong>' + (state.quick ? '没有找到匹配的项目' : state.statsBusy ? '正在继续查询项目…' : '当前范围暂无本人记录') + '</strong><span>' + (state.quick ? '试试项目名称、ID，或清空搜索' : '可以更改日期或工作区后重新查询') + '</span></div>');
     else {
       var pageRows = rows.slice((state.page - 1) * state.pageSize, state.page * state.pageSize);
       var body = pageRows.map(function (row) {
@@ -1038,13 +1150,15 @@
     $('#stats-note').textContent = state.role === 'annotator'
       ? '新标注提交与返修 / 返工更新分别统计。通过、驳回按平台统计口径；缺失数据用“—”表示。'
       : '审核数量按通过 / 驳回的动作次数统计。同一条数据重复审核可能计多次，与平台“数据统计”一致。';
+    if (state.statsSource === 'project') $('#stats-note').textContent = '已使用与数据统计看板相同的项目统计，按当前账号 ID 读取本人记录。标注总数不能拆分为新提交和返修更新；耗时使用项目统计口径。管理员查看其他人员的数据，请使用数据统计看板。';
     if (state.discarded) $('#stats-note').textContent += ' 已排除非本人记录。';
     $('#stats-note').textContent += ' 本人 regions 数按当前账号及所选日期统计，与任务条数分别计数。';
     if (hasMissing) $('#stats-note').textContent += ' 存在缺失字段时，卡片仅合计已知数值，并标注有值项目数；全部缺失仍显示“—”，不按 0 计算。';
-    if (state.role === 'annotator') $('#stats-note').textContent += ' 准确率 = 审核通过 /（审核通过 + 审核驳回）× 100%；先合计再计算，只纳入通过、驳回均有值的项目，分母为 0 时显示“—”。';
+    if (state.role === 'annotator' && state.statsSource !== 'project') $('#stats-note').textContent += ' 准确率 = 审核通过 /（审核通过 + 审核驳回）× 100%；先合计再计算，只纳入通过、驳回均有值的项目，分母为 0 时显示“—”。';
     if (projectMetrics.length && state.regionError) $('#stats-note').textContent += ' 项目参考区域总数读取失败：' + state.regionError;
     else if (projectMetrics.length && !state.regions && !state.regionBusy) $('#stats-note').textContent += ' 项目 regions 总数需勾选后点击“查询 / 刷新”读取。';
     $('#range-caption').textContent = state.queryRange ? state.queryRange[0] + (state.queryRange[0] === state.queryRange[1] ? '' : ' — ' + state.queryRange[1]) + ' · ' + (state.queryWorkspace === 'all' ? '全部可访问项目' : '工作区 #' + state.queryWorkspace) + progressText(state.statsProgress) : '尚未查询，请点击“查询 / 刷新”';
+    if (state.statsSource === 'project' && state.queryRange) $('#range-caption').textContent += ' · 项目统计（本人）';
     if (state.queryScope && (state.queryScope.title || state.queryScope.ids.length)) $('#range-caption').textContent += ' · 服务端项目筛选：' + [state.queryScope.title, state.queryScope.ids.length ? 'ID ' + state.queryScope.ids.join(', ') : ''].filter(Boolean).join('；');
   }
 
@@ -1053,10 +1167,10 @@
     if (state.role !== 'annotator') {
       setMarkup('#pending-data', ''); $('#pending-total').textContent = ''; $('#pending-updated').textContent = ''; return;
     }
-    $('#pending-updated').textContent = state.pendingUpdated ? '读取于 ' + state.pendingUpdated + ' · 仅点击“查询 / 刷新”时更新' : '';
+    $('#pending-updated').textContent = state.pendingUpdated ? '读取于 ' + state.pendingUpdated + ' · 展开时读取，点击“查询 / 刷新”更新' : '';
     var failure = state.pendingError ? '<p class="error" role="alert">返修 / 返工：' + escape(state.pendingError) + (state.pending ? '。已保留本次读到的部分数据，合计未完整。' : '。本人产量统计不受影响。') + ' <button type="button" data-retry-pending>仅重试待处理</button></p>' : '';
     if (state.pendingError && !state.pending) { setMarkup('#pending-data', failure); $('#pending-total').textContent = '未完成'; return; }
-    if (!state.pending) { setMarkup('#pending-data', '<p class="empty">' + (state.pendingBusy ? '正在读取本人待处理项目…' : '点击“查询 / 刷新”读取待处理数据') + '</p>'); $('#pending-total').textContent = ''; return; }
+    if (!state.pending) { setMarkup('#pending-data', '<p class="empty">' + (state.pendingBusy ? '正在读取本人待处理项目…' : '查询产量后，展开此处读取待处理数据') + '</p>'); $('#pending-total').textContent = state.pendingBusy ? '读取中…' : '展开后查询'; return; }
     var items = state.pending.items.filter(function (p) { return matches(p.name) && (!state.quick.trim() || (p.name + ' #' + p.id).toLocaleLowerCase().includes(state.quick.trim().toLocaleLowerCase())) && (state.pendingMode === 'all' || p[state.pendingMode] > 0); });
     var repair = 0, rework = 0;
     items.forEach(function (p) { repair += p.repair || 0; rework += p.rework || 0; });
@@ -1160,6 +1274,9 @@
     $('#reset-filters').addEventListener('click', resetFilters);
     $('#project-picker').addEventListener('toggle', function () { if (this.open) { $('.advanced').open = false; renderProjectChoices(); loadProjectChoices(false); $('#search').focus(); } });
     $('#workspace-picker').addEventListener('toggle', function () { if (this.open) { $('.advanced').open = false; renderWorkspaceChoices(); loadWorkspaceChoices(); $('#workspace-search').focus(); } });
+    $('#pending-section').addEventListener('toggle', function () {
+      if (this.open && state.opened && state.user && state.queryScope && !state.pending && !state.pendingBusy && !state.pendingError) refreshPending(false, runNumber, state.user, state.queryWorkspace, state.queryScope);
+    });
     root.querySelectorAll('[data-preset]').forEach(function (b) { b.addEventListener('click', function () { state.preset = b.dataset.preset; state.range = presetRange(state.preset); render(); }); });
     ['start','end'].forEach(function (key, index) { $('#' + key).addEventListener('change', function () { state.range[index] = this.value; state.preset = ''; render(); }); });
     $('#workspace-search').addEventListener('input', function () { workspaceSearch = this.value; renderWorkspaceChoices(); });
@@ -1167,7 +1284,7 @@
     $('#project-ids').addEventListener('input', function () { state.projectIdsText = this.value; render(); });
     $('#field-options').addEventListener('change', function (event) {
       var input = event.target, key = input && input.dataset && input.dataset.field;
-      if (!METRICS[state.role].some(function (metric) { return metric[0] === key; })) return;
+      if (!metricsForRole(state.role).some(function (metric) { return metric[0] === key; })) return;
       if (input.checked) state.fieldSelection[state.role].add(key); else state.fieldSelection[state.role].delete(key);
       renderFieldOptions(); renderStats();
     });
