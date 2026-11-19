@@ -2,8 +2,8 @@
 // @name         Insta360 我的工作台（标注员 / 审核员）
 // @namespace    https://label.insta360.com/personal-toolbox/
 // @version      1.8.4
-// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360我的工作台.user.js
-// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360我的工作台.user.js
+// @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360MyWorkbench.user.js
+// @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/Insta360MyWorkbench.user.js
 // @description  个人数据工作台：总览、项目搜索排序、分页合计、CSV 导出与返修返工快捷入口
 // @author       chengzi
 // @match        *://label.insta360.com/*
