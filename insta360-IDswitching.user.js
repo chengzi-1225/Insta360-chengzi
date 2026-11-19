@@ -2,8 +2,8 @@
 // @name         insta360-IDswitching
 // @namespace    local.ls.toolkit
 // @author       chengzi
-// @version      3.18.1
-// @description  精简分组工具栏、预设全选与拖动框选；保留原生删框撤回、选中显隐、标签同步及自定义快捷键。
+// @version      3.18.2
+// @description  空格播放暂停视频，数值更新与任务更新独立改绑；保留预设框选、原生删框撤回、选中显隐与标签同步。
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
 // @match        *://label.insta360.com/*
@@ -48,6 +48,91 @@
     } catch (e) {}
     return null;
   }
+
+  // 播放和两类更新共用目标识别，避免名称相同的按钮互相兜底。
+  const pageTargets = (() => {
+    const BUTTONS = 'button,[role="button"],input[type="button"],input[type="submit"]';
+    const VALUE_PANEL = '.lil-gui,.dg.main,[data-panel="camera"],[data-qa="camera-controls"],[aria-label="相机参数"],[aria-label="数值调整"]';
+    const MEDIA_PANEL = '.lsf-video,.lsf-video-canvas,.lsf-player,.video-player,[data-video-player]';
+    const TASK_BUTTON = '[data-testid="update-annotation"],[data-qa="update-annotation"],[data-testid="update-task"],[data-qa="update-task"]';
+    let lastMediaPanel = null;
+    const normalize = value => String(value || '').replace(/\s+/g, ' ').trim();
+    function visible(node) {
+      if (!node?.isConnected || node.closest('dialog,.ant-modal,.lsf-panel-tabs__ghost-tab,[inert]')) return false;
+      for (let parent = node; parent; parent = parent.parentElement) {
+        const style = getComputedStyle(parent);
+        if (parent.hidden || parent.getAttribute('aria-hidden') === 'true' || style.display === 'none' ||
+            ['hidden', 'collapse'].includes(style.visibility)) return false;
+      }
+      return !!node.getClientRects().length;
+    }
+    function name(node) {
+      const direct = node.getAttribute('aria-label');
+      const labelled = (node.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean)
+        .map(id => document.getElementById(id)?.textContent || '').join(' ');
+      if (direct || labelled) return normalize(direct || labelled);
+      if (node.tagName === 'INPUT') return normalize(node.value);
+      const copy = node.cloneNode(true);
+      copy.querySelectorAll('svg,sup,.lsf-hint,.lsf-label__hotkey').forEach(child => child.remove());
+      return normalize(copy.textContent) || normalize(node.getAttribute('title'));
+    }
+    const disabled = node => !!(node.disabled || node.matches(':disabled') ||
+      node.closest('[aria-disabled="true"],.controller.disabled,.lil-gui .disabled'));
+    function updateKind(node) {
+      const label = name(node);
+      if (/submit|draft|提交|草稿/i.test(label)) return '';
+      if (node.matches(TASK_BUTTON)) return 'task';
+      if (/^(?:更新(?:数值|参数)|(?:应用|保存)(?:数值|参数)|(?:update|apply|save) (?:values?|parameters?))$/i.test(label)) return 'values';
+      if (/^(?:更新(?:任务|标注)|(?:update|save) (?:task|annotation))$/i.test(label)) return 'task';
+      if (!/^(?:更新|update)$/i.test(label)) return '';
+      return node.closest(VALUE_PANEL) ? 'values' : 'task';
+    }
+    function updateButtons(kind) {
+      const matches = Array.from(document.querySelectorAll(BUTTONS)).filter(node =>
+        !node.closest('#__shortcuts_dialog') && visible(node) && updateKind(node) === kind);
+      const precise = kind === 'task' ? matches.filter(node => node.matches(TASK_BUTTON)) : [];
+      return precise.length ? precise : matches;
+    }
+    function update(kind, quiet = false) {
+      const matches = updateButtons(kind), label = kind === 'values' ? '更新数值' : '更新任务';
+      if (matches.length !== 1 || disabled(matches[0])) {
+        if (!quiet) showToast(!matches.length ? `未找到“${label}”按钮，请展开对应面板` :
+          matches.length > 1 ? `找到多个“${label}”按钮，请用页面按钮分组单独绑定` : `“${label}”当前不可用`);
+        return false;
+      }
+      matches[0].click(); return true;
+    }
+    function playbackTarget() {
+      const native = Array.from(document.querySelectorAll(BUTTONS)).filter(node => visible(node) &&
+        (node.matches('[data-testid="playback-button:play"],[data-testid="playback-button:pause"]') ||
+          /^(?:play|pause|play\s*[/／]\s*pause|播放|暂停|播放\s*[/／]\s*暂停)$/i.test(name(node))));
+      // 优先原生按钮，让视频帧、标注时间轴及播放状态一起更新；按钮禁用时不能绕过。
+      const candidates = native.length ? native : Array.from(document.querySelectorAll('video')).filter(visible);
+      const focusedPanel = document.activeElement?.closest?.(MEDIA_PANEL);
+      const panel = focusedPanel || (lastMediaPanel?.isConnected ? lastMediaPanel : null);
+      const scoped = panel ? candidates.filter(node => panel.contains(node)) : [];
+      const matches = scoped.length ? scoped : candidates;
+      return { matches, native: !!native.length };
+    }
+    function playPause(target = playbackTarget()) {
+      const { matches, native } = target;
+      if (matches.length !== 1 || native && disabled(matches[0])) {
+        showToast(matches.length > 1 ? '页面有多个播放器，请先点击要播放的视频' : '播放器当前不可用'); return false;
+      }
+      const node = matches[0];
+      try {
+        if (native) node.click();
+        else if (node.paused) Promise.resolve(node.play()).catch(() => showToast('视频暂时无法播放，请检查是否已加载'));
+        else node.pause();
+        return true;
+      } catch (error) { showToast('视频暂时无法播放，请检查是否已加载'); return false; }
+    }
+    document.addEventListener('pointerdown', event => {
+      const panel = event.target?.closest?.(MEDIA_PANEL);
+      if (panel) lastMediaPanel = panel;
+    }, true);
+    return { update, updateKind, updateButtons, playbackTarget, playPause, disabled };
+  })();
 
   // BEGIN SHARED EDITOR HISTORY
   // Shared inline runtime; both userscripts remain independently installable.
@@ -1616,22 +1701,7 @@
     }
 
     function fireUpdate() {
-      const nd = document.querySelector('#lil-gui-name-11');
-      if (nd) { const b = nd.closest('button'); if (b && !b.disabled) { b.click(); return; } }
-      for (const s of ['[data-testid="update-annotation"]', '[data-qa="update-annotation"]',
-        'button[aria-label*="Update" i]', 'button[aria-label*="更新" i]']) {
-        const b = document.querySelector(s);
-        if (b && !b.disabled && b.getClientRects().length > 0) { b.click(); return; }
-      }
-      for (const b of document.querySelectorAll('button')) {
-        if (b.disabled) continue;
-        const a = (b.getAttribute('aria-label') || '').toLowerCase();
-        const t = (b.textContent || '').toLowerCase();
-        if (!a.includes('update') && !t.includes('更新') && !t.includes('update')) continue;
-        if (a.includes('draft') || t.includes('草稿') || t.includes('draft')) continue;
-        if (a.includes('submit') || t.includes('提交')) continue;
-        b.click(); return;
-      }
+      return pageTargets.update('task');
     }
 
     document.addEventListener('click', function(e) {
@@ -1665,6 +1735,8 @@
       next,
       prev,
       update: fireUpdate,
+      updateTask: fireUpdate,
+      updateValues: () => pageTargets.update('values'),
       count: () => getAvail().length,
       mountButton: mountModeButton,
       refreshButton: updateModeButton,
@@ -2151,23 +2223,7 @@
     }
 
     function fireUpdateButtonLocal() {
-      const nd = document.querySelector('#lil-gui-name-11');
-      if (nd) { const b = nd.closest('button'); if (b && !b.disabled) { b.click(); return true; } }
-      for (const s of ['[data-testid="update-annotation"]', '[data-qa="update-annotation"]',
-        'button[aria-label*="Update" i]', 'button[aria-label*="更新" i]']) {
-        const b = document.querySelector(s);
-        if (b && !b.disabled && b.getClientRects().length > 0) { b.click(); return true; }
-      }
-      for (const b of document.querySelectorAll('button')) {
-        if (b.disabled) continue;
-        const a = (b.getAttribute('aria-label') || '').toLowerCase();
-        const t = (b.textContent || '').toLowerCase();
-        if (!a.includes('update') && !t.includes('更新') && !t.includes('update')) continue;
-        if (a.includes('draft') || t.includes('草稿') || t.includes('draft')) continue;
-        if (a.includes('submit') || t.includes('提交')) continue;
-        b.click(); return true;
-      }
-      return false;
+      return pageTargets.update('values', true);
     }
 
     /* ---- 判断 choice 是否勾选 ---- */
@@ -2952,7 +3008,9 @@
       { id: 'previous', label: '上一个 ID', key: 'A', navigation: true, run: () => window.__OUTLINER.prev() },
       { id: 'next', label: '下一个 ID', key: 'D', navigation: true, run: () => window.__OUTLINER.next() },
       { id: 'mode', label: '切换 ID 模式', key: 'S', run: () => window.__OUTLINER.toggle() },
-      { id: 'update', label: '更新 / 保存', key: 'Space', run: () => window.__OUTLINER.update() },
+      { id: 'playPause', label: '播放 / 暂停', key: 'Space', group: 'media', description: '控制当前视频', playback: true },
+      { id: 'updateValues', label: '更新数值', key: '', group: 'media', description: '应用相机参数', run: () => window.__OUTLINER.updateValues() },
+      { id: 'updateTask', label: '更新任务', key: '', group: 'media', description: '更新当前任务', run: () => window.__OUTLINER.updateTask() },
       { id: 'deleteSelected', label: '删除选中框', key: 'Shift+Delete', run: () => window.__REGION_DELETE.run() },
       ...[
         ['angleUp', '仰拍', 'Q'], ['angleLevel', '平拍', ''], ['angleDown', '俯拍', ''],
@@ -2967,7 +3025,7 @@
       'Home', 'End', 'PageUp', 'PageDown', 'Insert', 'Minus', 'Equal', 'BracketLeft', 'BracketRight',
       'Backslash', 'Semicolon', 'Quote', 'Comma', 'Period', 'Slash', 'Backquote', 'Delete', 'Backspace'];
     let overrides = {}, draft = null, dialog = null, errorNode = null, timer = null;
-    let previousFocus = null;
+    let previousFocus = null, legacySettings = false;
     const nativeHintDisplay = new WeakMap();
     const pageActions = new Map();
     let scanStatus = null, pageRows = null, searchInput = null;
@@ -3031,18 +3089,19 @@
       copy.querySelectorAll('svg, .lsf-hint, .lsf-label__hotkey, sup').forEach(el => el.remove());
       return normalizeText(copy.textContent) || normalizeText(node.getAttribute('title'));
     }
-    function groupName(node) {
+    function groupName(node, kind) {
       const choice = node.closest('.lsf-choice'), input = choice?.querySelector('input');
       if (input) return normalizeText(choiceName(choice, input));
-      const group = node.closest('.lsf-choices, .lsf-labels, [role="toolbar"], section, fieldset, .ipm-panel');
-      if (!group) return '';
-      return normalizeText(group.getAttribute('aria-label') || group.querySelector('h2,h3,h4,h5,legend,.lsf-header')?.textContent);
+      const group = node.closest('.lil-gui.root, .dg.main, .lsf-choices, .lsf-labels, [role="toolbar"], section, fieldset, .ipm-panel');
+      const label = group ? normalizeText(group.getAttribute('aria-label') || group.querySelector('h2,h3,h4,h5,legend,.lsf-header')?.textContent) : '';
+      const update = kind === 'button' ? pageTargets.updateKind(node) : '';
+      return normalizeText([update === 'values' ? '数值调整' : update === 'task' ? '任务操作' : '', label].filter(Boolean).join(' · '));
     }
     function describe(node, kind) {
       const label = normalizeText(nodeName(node, kind));
       if (!label) return null;
       // 语义描述不使用 DOM 序号或缓存节点，重新渲染后仍按名称和分组查找。
-      return { kind, label, group: groupName(node) };
+      return { kind, label, group: groupName(node, kind) };
     }
     const descriptorKey = value => JSON.stringify([value.kind, value.label, value.group]);
     function validDescriptor(value) {
@@ -3069,7 +3128,7 @@
       return result;
     }
     function disabled(node) {
-      return node.disabled || node.matches(':disabled') || !!node.closest('[aria-disabled="true"]');
+      return pageTargets.disabled(node);
     }
     function ensurePageAction(descriptor) {
       const id = pageId(descriptor);
@@ -3122,15 +3181,21 @@
     function load() {
       try {
         const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
-        if (!saved || saved.version !== 1 || !saved.bindings || Array.isArray(saved.bindings)) return;
+        if (!saved || ![1, 2].includes(saved.version) || !saved.bindings ||
+            typeof saved.bindings !== 'object' || Array.isArray(saved.bindings)) return;
+        legacySettings = saved.version === 1;
         const descriptors = Array.isArray(saved.pageActions) ? saved.pageActions.slice(0, 300) : [];
-        const valid = descriptors.filter(validDescriptor);
+        // 旧版同名“更新”可能指向任意面板，拆分后由用户重新绑定。
+        const valid = descriptors.filter(value => validDescriptor(value) && !(legacySettings &&
+          value.kind === 'button' && /^(?:更新(?:数值|参数|任务|标注)?|(?:应用|保存)(?:数值|参数)|(?:update|save|apply)(?: (?:values?|parameters?|task|annotation))?)$/i.test(value.label)));
         const candidate = {};
         for (const descriptor of valid) ensurePageAction(descriptor);
         for (const action of allActions()) {
           if (!Object.prototype.hasOwnProperty.call(saved.bindings, action.id)) continue;
           const value = canonical(saved.bindings[action.id]);
           if (value === null) return;
+          // 释放旧版占用的空格；其它导航、标签和页面按钮绑定保持不变。
+          if (legacySettings && (value === 'Space' || action.group === 'media')) continue;
           candidate[action.id] = value;
         }
         if (!conflict({ ...defaults, ...candidate })) overrides = candidate;
@@ -3160,7 +3225,8 @@
         }
         if (!found.length) continue;
         nativeKeys.set(action.id, new Set(found));
-        if (defaults[action.id] !== found[0]) { defaults[action.id] = found[0]; changed = true; }
+        const preferred = found.find(key => !ACTIONS.some(other => !other.choice && other.key === key)) || '';
+        if (defaults[action.id] !== preferred) { defaults[action.id] = preferred; changed = true; }
       }
       if (changed && window.__OUTLINER) window.__OUTLINER.refreshButton();
     }
@@ -3207,7 +3273,7 @@
       if (!button) {
         button = document.createElement('button');
         button.id = BUTTON_ID; button.type = 'button'; button.textContent = '快捷键设置';
-        button.title = '自定义导航、删框、标签快捷键，自动发现页面按钮';
+        button.title = '设置播放、数值更新、任务更新、导航及标签快捷键，自动发现页面按钮';
         button.style.cssText = 'height:24px;padding:0 10px;margin-left:6px;border:1px solid rgba(130,140,160,.45);background:transparent;color:#8a90a0;border-radius:4px;cursor:pointer;white-space:nowrap;font:12px/1 system-ui,-apple-system,"PingFang SC",sans-serif;';
         button.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); openSettings(); });
       }
@@ -3218,7 +3284,8 @@
       if (!dialog || !draft) return;
       for (const input of dialog.querySelectorAll('[data-shortcut-id]')) input.value = draft[input.dataset.shortcutId] || '';
       for (const hint of dialog.querySelectorAll('[data-default-id]')) {
-        hint.textContent = `默认：${defaults[hint.dataset.defaultId] || '未绑定'}`;
+        const action = ACTIONS.find(action => action.id === hint.dataset.defaultId);
+        hint.textContent = `${action?.description ? action.description + ' · ' : ''}默认：${defaults[hint.dataset.defaultId] || '未绑定'}`;
       }
       errorNode.textContent = '';
     }
@@ -3281,9 +3348,10 @@
       const candidate = {};
       for (const action of allActions()) if (draft[action.id] !== defaults[action.id]) candidate[action.id] = draft[action.id];
       const pageDescriptors = Array.from(pageActions.values()).filter(action => candidate[action.id]).map(action => action.page);
-      try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: 1, bindings: candidate, pageActions: pageDescriptors })); }
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ version: 2, bindings: candidate, pageActions: pageDescriptors })); }
       catch (e) { errorNode.textContent = '浏览器未能保存设置，请检查此站点的存储权限。原快捷键仍然有效。'; return; }
       overrides = candidate;
+      legacySettings = false;
       updateChoiceHints();
       window.__OUTLINER.refreshButton();
       window.__REGION_DELETE?.refresh();
@@ -3319,6 +3387,7 @@
           padding:20px 24px;background:#f5f8fc;border-top:1px solid #e8eef5;border-bottom:1px solid #e8eef5}
         #${DIALOG_ID} .shortcut-core-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
         #${DIALOG_ID} .shortcut-section{min-width:0;padding:16px;border:1px solid #e0e8f2;border-radius:9px;background:#fff}
+        #${DIALOG_ID} .shortcut-media-section{grid-column:1/-1}
         #${DIALOG_ID} .shortcut-section-heading{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px}
         #${DIALOG_ID} h3{font-size:13px;font-weight:650;margin:0;color:#3d5573}
         #${DIALOG_ID} .shortcut-section-count{font-size:10px;white-space:nowrap;color:#7e92ac;background:#f0f4f9;padding:2px 6px;border-radius:4px}
@@ -3381,7 +3450,7 @@
       const intro = document.createElement('div');
       const title = document.createElement('h2'); title.id = '__shortcuts_title'; title.textContent = '快捷键设置';
       const help = document.createElement('p'); help.id = '__shortcuts_help';
-      help.textContent = '点击按键框，按下新的快捷键。修改后点击保存。';
+      help.textContent = '默认空格播放 / 暂停；两个更新默认未绑定，可在下方分别录制后保存。';
       intro.append(title, help);
       const close = document.createElement('button'); close.type = 'button'; close.className = 'shortcut-close';
       close.textContent = '×'; close.setAttribute('aria-label', '关闭快捷键设置'); close.addEventListener('click', closeSettings);
@@ -3394,10 +3463,11 @@
       const body = document.createElement('div'); body.className = 'shortcut-body';
       const core = document.createElement('div'); core.className = 'shortcut-core-grid';
       for (const [id, text, actions] of [
-        ['navigation', '导航与操作', ACTIONS.filter(action => !action.choice)],
+        ['media', '播放与更新', ACTIONS.filter(action => action.group === 'media')],
+        ['navigation', '导航与操作', ACTIONS.filter(action => !action.choice && action.group !== 'media')],
         ['choices', '标签选择', ACTIONS.filter(action => action.choice)],
       ]) {
-        const section = document.createElement('section'); section.className = 'shortcut-section';
+        const section = document.createElement('section'); section.className = `shortcut-section${id === 'media' ? ' shortcut-media-section' : ''}`;
         const heading = document.createElement('div'); heading.className = 'shortcut-section-heading';
         const name = document.createElement('h3'); name.id = `__shortcuts_${id}_title`; name.textContent = text;
         section.setAttribute('aria-labelledby', name.id);
@@ -3444,6 +3514,9 @@
       discoverChoices();
       if (!dialog || !dialog.isConnected) buildDialog();
       if (dialog.open) return;
+      dialog.querySelector('#__shortcuts_help').textContent = legacySettings ?
+        '旧版“更新 / 保存”已拆分，请分别设置两个更新快捷键；空格用于播放 / 暂停。' :
+        '默认空格播放 / 暂停；两个更新默认未绑定，可在下方分别录制后保存。';
       previousFocus = document.activeElement;
       dialog.querySelector('.shortcut-page-section').open = false;
       draft = bindings(); searchInput.value = ''; scanPage(); refreshFields(); dialog.showModal();
@@ -3478,10 +3551,14 @@
       // 改绑后也拦截旧删框键，避免浏览器的 Shift+Delete 剪切再次触发平台删除。
       const oldDelete = chord === 'Shift+Delete' && config.deleteSelected !== chord;
       if (!action && !oldNative && !oldDelete) return;
+      const playback = action?.playback ? pageTargets.playbackTarget() : null;
+      // 图片任务没有播放器时，空格继续交由页面处理。
+      if (action?.playback && !playback.matches.length) return;
       event.preventDefault(); event.stopImmediatePropagation();
       if (!action || event.repeat && !action.navigation) return;
       if (window.__CLEAR_TAGS && window.__CLEAR_TAGS.isRunning()) return;
-      if (action.page) clickPage(action);
+      if (action.playback) pageTargets.playPause(playback);
+      else if (action.page) clickPage(action);
       else if (action.choice) clickChoice(action.choice);
       else action.run();
     }, true);
@@ -3498,7 +3575,7 @@
 
     load();
     window.__LS_SHORTCUTS = {
-      version: '3.18.1', open: openSettings, scan: scanPage,
+      version: '3.18.2', open: openSettings, scan: scanPage,
       hint: id => bindings()[id] || '',
       state: () => ({ bindings: bindings(), defaults: { ...defaults }, overrides: { ...overrides },
         pageActions: Array.from(pageActions.values(), ({ id, label, page, matches, available }) => ({ id, label, group: page.group, matches, available })) }),
@@ -3507,5 +3584,5 @@
     else start();
   })();
 
-  console.log('[LabelStudio 工具集] v3.18.1 已加载');
+  console.log('[LabelStudio 工具集] v3.18.2 已加载');
 })();
