@@ -1,4 +1,4 @@
-# 审核裁剪框修改保护 v1.0.0
+# 审核裁剪框修改保护 v1.1.0
 
 [安装 / 更新脚本](https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/ls-review-crop-guard.user.js)。
 
@@ -8,11 +8,7 @@
 2. 在篡改猴中选择“添加新脚本”，替换默认内容，保存。
 3. 刷新项目 10482 的审核页。左下角应出现“审核修改保护：已启用”。看到这个提示后再开始移动框。
 
-脚本默认仅保护 `label.insta360.com` 的项目 **10482** 的审核中心。需要给其他已确认相同问题的项目启用时，修改脚本开头的数组，例如：
-
-```js
-const PROJECT_IDS = new Set(['10482', '10473']);
-```
+脚本保护 `label.insta360.com` 下所有项目的审核中心，只在 `/review/workspaces/.../projects/...` 页面生效。标注中心 `/annotation/` 和其他网站不会启用。
 
 ## 使用与验收
 

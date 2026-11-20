@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Insta360 审核裁剪框修改保护（10482）
+// @name         Insta360 审核裁剪框修改保护（项目通用）
 // @namespace    insta360-ls-review-crop-guard
-// @version      1.0.0
+// @version      1.1.0
 // @description  防止切换裁剪预览时清空尚未提交的修改历史，保留原生审核提交逻辑。
 // @match        https://label.insta360.com/*
 // @run-at       document-start
@@ -16,9 +16,6 @@
 (() => {
   'use strict';
 
-  // 默认仅在已核对的项目 10482 的审核中心生效。
-  // 其他项目需先核对是否为同一问题，再把项目 ID 加进数组。
-  const PROJECT_IDS = new Set(['10482']);
   const KEY = '__LS_REVIEW_CROP_GUARD__';
   const BADGE_ID = 'ls-review-crop-guard-status';
   window[KEY]?.destroy?.();
@@ -32,8 +29,8 @@
   let badge = null;
 
   function inScope() {
-    const match = location.pathname.match(/^\/review\/workspaces\/\d+\/projects\/(\d+)(?:\/|$)/);
-    return location.hostname === 'label.insta360.com' && !!match && PROJECT_IDS.has(match[1]);
+    return location.hostname === 'label.insta360.com'
+      && /^\/review\/workspaces\/\d+\/projects\/\d+(?:\/|$)/.test(location.pathname);
   }
 
   function showStatus(text, error = false) {
@@ -134,7 +131,7 @@
   }
 
   const api = {
-    version: '1.0.0',
+    version: '1.1.0',
     destroy() {
       dead = true;
       if (timer !== null) clearInterval(timer);
