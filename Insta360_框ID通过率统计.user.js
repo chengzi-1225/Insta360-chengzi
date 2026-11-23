@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 框ID通过率统计
 // @namespace    local.insta360.region-pass-rate
-// @version      1.1.0
+// @version      1.2.0
 // @description  读取项目包历史审核记录，按时间和标注员统计通过率并导出Excel明细。
 // @match        https://label.insta360.com/*
 // @homepageURL  https://github.com/chengzi-1225/Insta360-chengzi
@@ -319,6 +319,39 @@ function parseProjectIds(input) {
   const values = text(input).split(/[,，;；\s]+/).filter(Boolean);
   if (!values.length || values.some(value => !POSITIVE_ID.test(value))) throw new Error('项目 ID 必须是正整数，可用空格、换行或逗号分隔');
   return [...new Set(values)];
+}
+
+function cardLink(card) {
+  const outer = typeof card?.closest === 'function' ? card.closest('a[href]') : null;
+  const inner = typeof card?.querySelector === 'function' ? card.querySelector('a[href]') : null;
+  const href = outer?.getAttribute?.('href') || inner?.getAttribute?.('href') || card?.getAttribute?.('href') || '';
+  return text(href);
+}
+
+function cardTitle(card) {
+  for (const selector of ['.ls-project-card__title-text', '.ls-project-card__title', '[data-project-title]']) {
+    const node = typeof card?.querySelector === 'function' ? card.querySelector(selector) : null;
+    const value = text(node?.textContent || node?.getAttribute?.('data-project-title'));
+    if (value) return value.replace(/\s+/g, ' ');
+  }
+  return '';
+}
+
+function extractCurrentProjectCards(root = globalThis.document, currentURL = '') {
+  const source = root && typeof root.querySelectorAll === 'function' ? root : null;
+  const found = new Map();
+  const cards = source ? [...source.querySelectorAll('.ls-project-card')] : [];
+  for (const card of cards) {
+    const href = cardLink(card);
+    const match = /\/projects\/([1-9]\d*)(?:\/|$)/.exec(href);
+    if (!match || found.has(match[1])) continue;
+    found.set(match[1], { project_id: match[1], project_name: cardTitle(card) });
+  }
+  if (!found.size && currentURL) {
+    const match = /\/projects\/([1-9]\d*)(?:\/|$)/.exec(String(currentURL));
+    if (match) found.set(match[1], { project_id: match[1], project_name: '' });
+  }
+  return [...found.values()];
 }
 
 function classifyHistoryStatus(record) {
@@ -718,7 +751,7 @@ function workbookBytes(sheets) {
   return bytes;
 }
 
-return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, parseProjectIds, classifyHistoryStatus, filterHistoryRows, aggregateHistory, fetchHistoryPaged, collectProjectHistory, workbookBytes};
+return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, parseProjectIds, extractCurrentProjectCards, classifyHistoryStatus, filterHistoryRows, aggregateHistory, fetchHistoryPaged, collectProjectHistory, workbookBytes};
 })();
 (function () {
   'use strict';
@@ -756,10 +789,10 @@ return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, parseProjectI
     <div id="backdrop" hidden><section id="panel" role="dialog" aria-modal="true" aria-labelledby="title">
       <header><div><h1 id="title">所选项目历史统计</h1><p>每次历史审核记录分别统计 · 支持按日期筛选 · 通过率 = 通过 ÷（通过 + 驳回）</p></div><button id="close" type="button" aria-label="收起统计面板">×</button></header>
       <main>
-        <label for="projectIds">1. 输入项目 ID</label>
-        <textarea id="projectIds" spellcheck="false" placeholder="支持多个项目 ID，用空格、换行或逗号分隔，例如：10475, 10464"></textarea>
-        <div class="toolbar"><button id="loadProjects" type="button">读取项目列表</button><button id="selectAll" type="button">全选项目</button><button id="clearAll" type="button">清除选择</button><span id="selectedCount" class="hint">已选 0 个项目</span></div>
-        <div class="projectbar"><strong>项目列表</strong><span id="projectHint" class="hint">先读取项目列表</span></div>
+        <label for="projectIds">1. 选择项目包</label>
+        <textarea id="projectIds" spellcheck="false" placeholder="留空将读取当前页面显示的项目卡片；也可手动输入多个项目 ID，用空格、换行或逗号分隔"></textarea>
+        <div class="toolbar"><button id="loadProjects" type="button">读取当前页面项目</button><button id="selectAll" type="button">全选项目</button><button id="clearAll" type="button">清除选择</button><span id="selectedCount" class="hint">已选 0 个项目</span></div>
+        <div class="projectbar"><strong>项目列表</strong><span id="projectHint" class="hint">留空后读取当前页面项目包</span></div>
         <div id="projects" aria-live="polite"></div>
         <div class="toolbar"><label class="date">开始日期 <input id="startDate" type="date"></label><label class="date">结束日期 <input id="endDate" type="date"></label><button id="start" class="primary" type="button">统计选中项目</button><button id="cancel" type="button" disabled>停止</button></div>
         <div id="status" role="status" aria-live="polite">先登录标注平台，输入项目 ID 后读取项目列表。</div><progress id="progress" max="1" value="0" hidden></progress>
@@ -824,14 +857,24 @@ return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, parseProjectI
   $('loadProjects').addEventListener('click', async () => {
     if (controller) return;
     invalidate();
-    let ids;
-    try { ids = Core.parseProjectIds($('projectIds').value); } catch (error) { $('status').textContent = error.message; return; }
-    busy(true); $('status').textContent = `正在读取 ${ids.length} 个项目…`;
+    const input = $('projectIds').value.trim();
+    busy(true); $('status').textContent = input ? '正在读取项目…' : '正在读取当前页面项目…';
     try {
-      const rows = await Core.fetchHistoryPaged(`${location.origin}/api/projects/?ids=${ids.join(',')}&page_size=100`, { requestJSON, origin: location.origin, kind: '项目' });
-      const map = new Map(rows.map(row => [String(row.id), { project_id: String(row.id), project_name: String(row.title ?? row.name ?? '') }]));
-      projectRows = ids.map(id => map.get(id) || { project_id: id, project_name: '' }); renderProjects();
-      $('status').textContent = `已读取 ${projectRows.length} 个项目，请勾选后统计。`;
+      if (!input) {
+        projectRows = Core.extractCurrentProjectCards(document, location.href);
+        if (!projectRows.length) throw new Error('当前页面未找到项目包，请输入项目 ID。');
+        $('projectIds').value = projectRows.map(project => project.project_id).join(',');
+        $('projectIds').dispatchEvent(new Event('input', { bubbles: true }));
+        renderProjects();
+        $('status').textContent = `已读取当前页面 ${projectRows.length} 个项目，请勾选后统计。`;
+      } else {
+        const ids = Core.parseProjectIds(input);
+        $('status').textContent = `正在读取 ${ids.length} 个项目…`;
+        const rows = await Core.fetchHistoryPaged(`${location.origin}/api/projects/?ids=${ids.join(',')}&page_size=100`, { requestJSON, origin: location.origin, kind: '项目' });
+        const map = new Map(rows.map(row => [String(row.id), { project_id: String(row.id), project_name: String(row.title ?? row.name ?? '') }]));
+        projectRows = ids.map(id => map.get(id) || { project_id: id, project_name: '' }); renderProjects();
+        $('status').textContent = `已读取 ${projectRows.length} 个项目，请勾选后统计。`;
+      }
     } catch (error) { projectRows = []; renderProjects(); $('status').textContent = `项目读取失败：${error.message}`; }
     finally { busy(false); }
   });
