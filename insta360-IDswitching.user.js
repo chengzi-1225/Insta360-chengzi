@@ -2,8 +2,8 @@
 // @name         insta360-IDswitching
 // @namespace    local.ls.toolkit
 // @author       chengzi
-// @version      3.18.2
-// @description  空格播放暂停视频，数值更新与任务更新独立改绑；保留预设框选、原生删框撤回、选中显隐与标签同步。
+// @version      3.18.3
+// @description  空格播放暂停视频，数值更新与任务更新独立改绑；保留预设框选、原生删框撤回、选中显隐与可开关的标签同步。
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
 // @match        *://label.insta360.com/*
@@ -2580,9 +2580,56 @@
       { key: 'compositions', labels: COMPOSITIONS },
     ];
     const CFG = { settleMs: 100, pollMs: 50, waitMs: 1800 };
+    const STORAGE_KEY = 'ls_toolkit_angle_inherit_enabled_v1';
     let timer = null, generation = 0, current = null, transitionSource = null, writing = false;
     let result = 'idle';
     let historyPaused = false;
+    let enabled = false;
+
+    try { enabled = localStorage.getItem(STORAGE_KEY) === 'true'; } catch (e) {}
+
+    function setEnabled(value) {
+      enabled = !!value;
+      generation++;
+      transitionSource = null;
+      current = enabled ? selected() : null;
+      if (current) current = { ...current, panels: {}, cancelled: new Set(), before: null };
+      result = enabled ? 'enabled' : 'off';
+      try { localStorage.setItem(STORAGE_KEY, String(enabled)); } catch (e) {}
+      mountToggle();
+      schedule();
+      showToast(enabled ? '标签同步已开启' : '标签同步已关闭', 1500);
+      return enabled;
+    }
+
+    function mountToggle() {
+      const toolbar = document.getElementById('__selected_visibility_toolbar');
+      if (!toolbar) return;
+      let button = document.getElementById('__angle_inherit_btn');
+      if (!button) {
+        button = document.createElement('button');
+        button.id = '__angle_inherit_btn';
+        button.type = 'button';
+        button.setAttribute('aria-label', '标签同步开关');
+        button.style.cssText = 'height:24px;max-width:100%;padding:0 9px;border:1px solid #c9d9ee;border-radius:4px;cursor:pointer;font:inherit;white-space:nowrap';
+        button.addEventListener('mousedown', event => event.preventDefault());
+        button.addEventListener('click', event => {
+          event.preventDefault(); event.stopPropagation(); setEnabled(!enabled);
+        });
+      }
+      const anchor = document.getElementById('__selected_visibility_btn');
+      if (anchor && anchor.parentElement === toolbar) anchor.insertAdjacentElement('afterend', button);
+      else if (button.parentElement !== toolbar) toolbar.appendChild(button);
+      const text = `标签同步：${enabled ? '开' : '关'}`;
+      const title = enabled ? '自动把上一个连续 ID 的拍摄角度和人物构图同步到当前 ID' : '已关闭标签自动同步';
+      if (button.textContent !== text) button.textContent = text;
+      if (button.title !== title) button.title = title;
+      if (button.getAttribute('aria-pressed') !== String(enabled)) {
+        button.setAttribute('aria-pressed', String(enabled));
+        button.style.background = enabled ? '#edf5ff' : '#fff';
+        button.style.color = enabled ? '#287bd6' : '#64748b';
+      }
+    }
 
     function pauseForHistory() {
       generation++;
@@ -2834,7 +2881,15 @@
 
     function sync() {
       timer = null;
+      mountToggle();
       const next = selected();
+      if (!enabled) {
+        generation++;
+        transitionSource = null;
+        current = null;
+        result = 'off';
+        return;
+      }
       if (clearing() || historyPaused || editing.drawing()) {
         generation++;
         current = next && { ...next, panels: {}, before: null, cancelled: new Set() };
@@ -2866,6 +2921,7 @@
 
     function start() {
       if (!document.body) return;
+      mountToggle();
       new MutationObserver(schedule).observe(document.body, {
         childList: true, subtree: true, characterData: true,
         attributes: true, attributeFilter: ['class', 'checked', 'disabled'],
@@ -2894,19 +2950,21 @@
     }
 
     window.__ANGLE_INHERIT = {
-      version: '3.16.0',
+      version: '3.16.1',
+      enabled: () => enabled,
+      setEnabled,
       pauseForHistory,
       config: CFG,
       state() {
         const target = selected(), source = sourceFor(target);
-        return { result, currentId: target && target.id, sourceId: source && source.id,
+        return { enabled, result, currentId: target && target.id, sourceId: source && source.id,
           sourceAngles: source ? source.angles.slice() : [],
           sourceCompositions: source ? source.compositions.slice() : [], clearing: clearing() };
       },
     };
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
     else start();
-    console.log('[标签同步] v3.16.0 已加载：相邻 ID 连续切换时覆盖同步角度、构图');
+    console.log('[标签同步] v3.16.1 已加载：默认关闭，可手动开启相邻 ID 标签同步');
   })();
 
   // 原生删除：固定本次选择，整组放进一条编辑历史，不依赖列表序号或显隐缓存。
@@ -3575,7 +3633,7 @@
 
     load();
     window.__LS_SHORTCUTS = {
-      version: '3.18.2', open: openSettings, scan: scanPage,
+      version: '3.18.3', open: openSettings, scan: scanPage,
       hint: id => bindings()[id] || '',
       state: () => ({ bindings: bindings(), defaults: { ...defaults }, overrides: { ...overrides },
         pageActions: Array.from(pageActions.values(), ({ id, label, page, matches, available }) => ({ id, label, group: page.group, matches, available })) }),
@@ -3584,5 +3642,5 @@
     else start();
   })();
 
-  console.log('[LabelStudio 工具集] v3.18.2 已加载');
+  console.log('[LabelStudio 工具集] v3.18.3 已加载');
 })();
