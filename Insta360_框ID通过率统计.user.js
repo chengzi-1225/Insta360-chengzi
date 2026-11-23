@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 框ID通过率统计
 // @namespace    local.insta360.region-pass-rate
-// @version      1.3.0
+// @version      1.3.1
 // @description  读取项目包历史审核记录，按时间和标注员统计通过率并导出Excel明细。
 // @match        https://label.insta360.com/*
 // @homepageURL  https://github.com/chengzi-1225/Insta360-chengzi
@@ -392,17 +392,71 @@ function filterHistoryRows(rows, { start = '', end = '' } = {}) {
   });
 }
 
-function displayName(value) {
+function userId(value) {
+  const raw = value && typeof value === 'object'
+    ? value.user_id ?? value.id ?? value.value ?? value.user?.id
+    : value;
+  return POSITIVE_ID.test(text(raw)) ? text(raw) : '';
+}
+
+function createdUsernameName(value) {
+  const raw = text(value)
+    .replace(/[^\s,，]+@[^\s,，]+/g, ' ')
+    .replace(/[,，]/g, ' ')
+    .split(/\s+/)
+    .filter(part => part && !/^\d+$/.test(part))
+    .join(' ');
+  const normalized = raw.replace(/\s+/g, ' ').trim();
+  return /[\u3400-\u9fff]/.test(normalized) ? normalized.replace(/\s/g, '') : normalized;
+}
+
+function displayName(value, { createdUsername = '', allowId = true } = {}) {
   if (value && typeof value === 'object') {
     const full = `${value.first_name || ''}${value.last_name || ''}`.trim();
     if (full) return full;
-    return text(value.username || value.name || value.display_name || value.nickname || value.email || value.id);
+    const created = createdUsernameName(value.created_username ?? value.createdUsername ?? createdUsername);
+    if (created) return created;
+    return text(value.username || value.name || value.display_name || value.nickname || value.email || (allowId ? value.id : ''));
   }
-  return text(value);
+  const raw = text(value);
+  return allowId ? raw : (POSITIVE_ID.test(raw) ? '' : raw);
 }
 
-function annotatorOf(row) {
-  return displayName(row?.annotator ?? row?.annotator_name ?? row?.completed_by ?? row?.created_by ?? row?.triggered_by ?? row?.user);
+function taskAnnotatorMap(detail, task) {
+  const map = new Map();
+  for (const list of [detail?.annotators, task?.annotators]) {
+    if (!Array.isArray(list)) continue;
+    for (const value of list) {
+      const key = userId(value);
+      const name = displayName(value, { allowId: false });
+      if (key && name) map.set(key, name);
+    }
+  }
+  return map;
+}
+
+function resolvedName(value, userMap, createdUsername = '') {
+  const key = userId(value);
+  if (key && userMap?.has(key)) return userMap.get(key);
+  const name = displayName(value, { createdUsername, allowId: false });
+  if (name) return name;
+  return key ? `用户ID ${key}` : '';
+}
+
+function annotatorOf(row, userMap) {
+  const candidates = [
+    [row?.annotator, row?.created_username],
+    [row?.annotator_name, row?.created_username],
+    [row?.completed_by, row?.created_username],
+    [row?.created_by, row?.created_username],
+    [row?.triggered_by, row?.created_username],
+    [row?.user, row?.created_username],
+  ];
+  for (const [value, createdUsername] of candidates) {
+    const name = resolvedName(value, userMap, createdUsername);
+    if (name) return name;
+  }
+  return '';
 }
 
 function annotationForTask(detail, event) {
@@ -524,11 +578,27 @@ async function collectProjectHistory(projectIds, { requestJSON, origin = HISTORY
             .catch(() => task); // History rows remain useful even if task detail is unavailable.
           const historyPromise = fetchHistoryPaged(`${currentOrigin}/api/fsm/entities/task/${taskId}/history`, { requestJSON, origin: currentOrigin, signal, kind: `任务 ${taskId} 历史` });
           const [detail, rows] = await Promise.all([detailPromise, historyPromise]);
+          const userMap = taskAnnotatorMap(detail, task);
           for (const event of rows) {
             const status = classifyHistoryStatus(event);
             if (!status) continue;
             const annotation = annotationForTask(detail, event);
-            raw.push({ ...event, project_id: projectId, project_name: projectMap.get(projectId)?.project_name || '', task_id: taskId, status, annotator: displayName(event.annotator ?? event.annotation?.completed_by ?? event.context_data?.annotator ?? annotation?.completed_by ?? task.annotator ?? task.annotators?.[0] ?? event.completed_by) || '未识别人员', task_url: `${currentOrigin}/workspaces/all/projects/${projectId}/data?task=${taskId}` });
+            const candidates = [
+              [event.annotator, event.created_username],
+              [event.annotator_name, event.created_username],
+              [event.annotation?.completed_by, event.annotation?.created_username],
+              [event.context_data?.annotator, event.context_data?.created_username],
+              [annotation?.completed_by, annotation?.created_username],
+              [task.annotator, task.created_username],
+              [task.annotators?.[0], task.created_username],
+              [event.completed_by, event.created_username],
+            ];
+            let annotator = '';
+            for (const [value, createdUsername] of candidates) {
+              annotator = resolvedName(value, userMap, createdUsername);
+              if (annotator) break;
+            }
+            raw.push({ ...event, project_id: projectId, project_name: projectMap.get(projectId)?.project_name || '', task_id: taskId, status, annotator: annotator || '未识别人员', task_url: `${currentOrigin}/workspaces/all/projects/${projectId}/data?task=${taskId}` });
           }
         } catch (error) {
           if (error.name === 'AbortError') throw error;
