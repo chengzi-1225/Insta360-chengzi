@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 框ID通过率统计
 // @namespace    local.insta360.region-pass-rate
-// @version      1.2.0
+// @version      1.3.0
 // @description  读取项目包历史审核记录，按时间和标注员统计通过率并导出Excel明细。
 // @match        https://label.insta360.com/*
 // @homepageURL  https://github.com/chengzi-1225/Insta360-chengzi
@@ -500,7 +500,7 @@ async function fetchHistoryPaged(url, { requestJSON, origin = HISTORY_DEFAULT_OR
   }
 }
 
-async function collectProjectHistory(projectIds, { requestJSON, origin = HISTORY_DEFAULT_ORIGIN, signal, start = '', end = '', onProgress, concurrency = 3 } = {}) {
+async function collectProjectHistory(projectIds, { requestJSON, origin = HISTORY_DEFAULT_ORIGIN, signal, start = '', end = '', onProgress, concurrency = 8 } = {}) {
   const projects = parseProjectIds(projectIds);
   // Validate the requested date range before making network calls.
   filterHistoryRows([], { start, end });
@@ -510,7 +510,7 @@ async function collectProjectHistory(projectIds, { requestJSON, origin = HISTORY
   const failures = [], raw = [];
   for (const projectId of projects) {
     let tasks = [];
-    try { tasks = await fetchHistoryPaged(`${currentOrigin}/api/tasks/?project=${projectId}&page_size=200`, { requestJSON, origin: currentOrigin, signal, kind: `项目 ${projectId} 任务`, onPage: info => onProgress?.({ phase: 'tasks', projectId, ...info }) }); }
+    try { tasks = await fetchHistoryPaged(`${currentOrigin}/api/tasks/?project=${projectId}&page_size=500`, { requestJSON, origin: currentOrigin, signal, kind: `项目 ${projectId} 任务`, onPage: info => onProgress?.({ phase: 'tasks', projectId, ...info }) }); }
     catch (error) { if (error.name === 'AbortError') throw error; failures.push({ project_id: projectId, task_id: '', message: error.message }); tasks = error.partialRows || []; }
     const validTasks = tasks.filter(task => id(task?.id) && id(task?.project ?? task?.project_id) === projectId);
     let cursor = 0, done = 0;
@@ -519,12 +519,11 @@ async function collectProjectHistory(projectIds, { requestJSON, origin = HISTORY
         if (signal?.aborted) throw abortError();
         const task = validTasks[cursor++], taskId = id(task.id);
         try {
-          let detail = task;
-          try {
-            const fetched = await requestJSON(`${currentOrigin}/api/tasks/${taskId}/`, { signal });
-            if (fetched && typeof fetched === 'object') detail = fetched;
-          } catch { /* History rows remain useful even if task detail is unavailable. */ }
-          const rows = await fetchHistoryPaged(`${currentOrigin}/api/fsm/entities/task/${taskId}/history`, { requestJSON, origin: currentOrigin, signal, kind: `任务 ${taskId} 历史` });
+          const detailPromise = requestJSON(`${currentOrigin}/api/tasks/${taskId}/`, { signal })
+            .then(fetched => fetched && typeof fetched === 'object' ? fetched : task)
+            .catch(() => task); // History rows remain useful even if task detail is unavailable.
+          const historyPromise = fetchHistoryPaged(`${currentOrigin}/api/fsm/entities/task/${taskId}/history`, { requestJSON, origin: currentOrigin, signal, kind: `任务 ${taskId} 历史` });
+          const [detail, rows] = await Promise.all([detailPromise, historyPromise]);
           for (const event of rows) {
             const status = classifyHistoryStatus(event);
             if (!status) continue;
