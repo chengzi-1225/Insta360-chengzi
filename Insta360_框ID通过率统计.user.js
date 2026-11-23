@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Insta360 框ID通过率统计
 // @namespace    local.insta360.region-pass-rate
-// @version      1.0.0
-// @description  粘贴质检表，自动读取实际矩形框ID，按标注员去重汇总通过率，导出Excel明细。
+// @version      1.1.0
+// @description  读取项目包历史审核记录，按时间和标注员统计通过率并导出Excel明细。
 // @match        https://label.insta360.com/*
 // @homepageURL  https://github.com/chengzi-1225/Insta360-chengzi
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/Insta360_框ID通过率统计.user.js
@@ -286,6 +286,233 @@ async function fetchTaskJSON(url, { fetchImpl = globalThis.fetch, signal, timeou
   throw new Error('没有执行有效的读取请求');
 }
 
+const HISTORY_DEFAULT_ORIGIN = 'https://label.insta360.com';
+const POSITIVE_ID = /^[1-9]\d*$/;
+const ACCEPTED = new Set(['REVIEWED_ACCEPTED', 'REVIEW_ACCEPTED', 'ACCEPTED', 'APPROVED', 'PASS', 'PASSED', '通过', '审核通过']);
+const REJECTED = new Set(['REVIEWED_REJECTED', 'REVIEW_REJECTED', 'REJECTED', 'REJECT', '审核驳回', '审核未通过']);
+const NON_REVIEW = new Set(['ANNOTATED', 'TASK_ANNOTATED', 'REWORK', 'REPAIR', 'CREATED', 'PENDING', 'PENDING_ANNOTATION', 'APPEALED', 'APPEAL_ACCEPTED', 'APPEAL_REJECTED', 'ACCEPTANCE_ACCEPTED', 'ACCEPTANCE_REJECTED']);
+
+function text(value) {
+  return String(value ?? '').trim();
+}
+
+function id(value) {
+  const raw = value && typeof value === 'object' ? value.id ?? value.value : value;
+  return POSITIVE_ID.test(text(raw)) ? text(raw) : '';
+}
+
+function normalized(value) {
+  return text(value).replace(/[\s-]+/g, '_').toUpperCase();
+}
+
+function recordValues(record) {
+  const values = [];
+  for (const key of ['state', 'status', 'current_state', 'currentStatus', 'workflow_state', 'workflowState', 'previous_state', 'previousStatus', 'previous_status', 'transition_name', 'transition', 'action', 'result']) {
+    if (record && record[key] != null) values.push(record[key]);
+  }
+  const context = record?.context_data && typeof record.context_data === 'object' ? record.context_data : null;
+  if (context) for (const key of ['state', 'status', 'previous_state', 'result', 'review_result', 'review_status']) if (context[key] != null) values.push(context[key]);
+  return values;
+}
+
+function parseProjectIds(input) {
+  const values = text(input).split(/[,，;；\s]+/).filter(Boolean);
+  if (!values.length || values.some(value => !POSITIVE_ID.test(value))) throw new Error('项目 ID 必须是正整数，可用空格、换行或逗号分隔');
+  return [...new Set(values)];
+}
+
+function classifyHistoryStatus(record) {
+  const stateValue = record?.state ?? record?.current_state ?? record?.currentStatus ?? record?.workflow_state ?? record?.workflowState ?? record?.status;
+  if (stateValue != null && NON_REVIEW.has(normalized(stateValue))) return '';
+  for (const value of recordValues(record)) {
+    const raw = text(value);
+    const norm = normalized(raw);
+    if (ACCEPTED.has(raw) || ACCEPTED.has(norm) || /(?:REVIEW|审核).*?(?:ACCEPT|PASS|通过)/i.test(raw)) return '通过';
+    if (REJECTED.has(raw) || REJECTED.has(norm) || /(?:REVIEW|审核).*?(?:REJECT|FAIL|驳回|未通过)/i.test(raw)) return '驳回';
+  }
+  return '';
+}
+
+function eventTime(row) {
+  const value = row?.created_at ?? row?.createdAt ?? row?.timestamp ?? row?.time;
+  const time = Date.parse(value || '');
+  return Number.isFinite(time) ? time : 0;
+}
+
+function localDayBoundary(value, end = false) {
+  if (!value) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value).trim());
+  if (!match) throw new Error('日期必须使用 YYYY-MM-DD 格式');
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]), end ? 23 : 0, end ? 59 : 0, end ? 59 : 0, end ? 999 : 0);
+  if (date.getFullYear() !== Number(match[1]) || date.getMonth() !== Number(match[2]) - 1 || date.getDate() !== Number(match[3])) throw new Error('日期无效');
+  return date.getTime();
+}
+
+function filterHistoryRows(rows, { start = '', end = '' } = {}) {
+  if (!Array.isArray(rows)) throw new TypeError('历史记录必须是数组');
+  const from = localDayBoundary(start, false);
+  const to = localDayBoundary(end, true);
+  if (from != null && to != null && from > to) throw new Error('开始日期不能晚于结束日期');
+  return rows.filter(row => {
+    const time = eventTime(row);
+    return time && (from == null || time >= from) && (to == null || time <= to);
+  });
+}
+
+function displayName(value) {
+  if (value && typeof value === 'object') {
+    const full = `${value.first_name || ''}${value.last_name || ''}`.trim();
+    if (full) return full;
+    return text(value.username || value.name || value.display_name || value.nickname || value.email || value.id);
+  }
+  return text(value);
+}
+
+function annotatorOf(row) {
+  return displayName(row?.annotator ?? row?.annotator_name ?? row?.completed_by ?? row?.created_by ?? row?.triggered_by ?? row?.user);
+}
+
+function annotationForTask(detail, event) {
+  const annotations = Array.isArray(detail?.annotations) ? detail.annotations.filter(value => value && !value.was_cancelled) : [];
+  const requested = event?.annotation_id ?? event?.annotation?.id ?? event?.context_data?.annotation_id ?? event?.context_data?.annotation?.id;
+  const match = requested == null ? null : annotations.find(value => String(value.id) === String(requested));
+  if (match) return match;
+  return [...annotations].sort((a, b) => eventTime(b) - eventTime(a))[0] || annotations[0] || null;
+}
+
+function projectOf(row) {
+  return id(row?.project_id ?? row?.project ?? row?.context_data?.project_id);
+}
+
+function taskOf(row) {
+  return id(row?.task_id ?? row?.task ?? row?.context_data?.task_id ?? row?.context_data?.task?.id);
+}
+
+function projectNameOf(row) {
+  return text(row?.project_name ?? row?.project_title ?? row?.context_data?.project_name);
+}
+
+function aggregateHistory(rows) {
+  if (!Array.isArray(rows)) throw new TypeError('历史记录必须是数组');
+  const people = new Map();
+  const projects = new Map();
+  const issues = [];
+  let pass = 0, reject = 0;
+  for (const row of rows) {
+    if (!row || typeof row !== 'object') { issues.push({ message: '历史记录格式不正确' }); continue; }
+    const status = row.status || classifyHistoryStatus(row);
+    if (!['通过', '驳回'].includes(status)) continue;
+    const annotator = annotatorOf(row) || '未识别人员';
+    const projectId = projectOf(row) || '未知项目';
+    const projectName = projectNameOf(row);
+    const personKey = annotator;
+    const projectKey = projectId;
+    if (!people.has(personKey)) people.set(personKey, { annotator, pass_count: 0, reject_count: 0, total_count: 0, pass_rate: null });
+    if (!projects.has(projectKey)) projects.set(projectKey, { project_id: projectId, project_name: projectName, pass_count: 0, reject_count: 0, total_count: 0, pass_rate: null });
+    const person = people.get(personKey), project = projects.get(projectKey);
+    const passValue = status === '通过';
+    if (passValue) { pass++; person.pass_count++; project.pass_count++; }
+    else { reject++; person.reject_count++; project.reject_count++; }
+    person.total_count++; project.total_count++;
+  }
+  const finish = item => ({ ...item, pass_rate: item.total_count ? item.pass_count / item.total_count : null });
+  const peopleRows = [...people.values()].map(finish).sort((a, b) => a.annotator.localeCompare(b.annotator, 'zh-CN'));
+  const projectRows = [...projects.values()].map(finish).sort((a, b) => a.project_id.localeCompare(b.project_id, 'en'));
+  return { people: peopleRows, projects: projectRows, issues, totals: { pass_count: pass, reject_count: reject, total_count: pass + reject, pass_rate: pass + reject ? pass / (pass + reject) : null } };
+}
+
+function safeURL(value, base, origin) {
+  const url = new URL(value, base);
+  if (url.origin !== origin || !/^https?:$/.test(url.protocol) || url.username || url.password) throw new Error('分页地址必须属于当前登录网站');
+  url.hash = '';
+  return url.href;
+}
+
+function abortError() { return new DOMException('已停止读取', 'AbortError'); }
+
+async function fetchHistoryPaged(url, { requestJSON, origin = HISTORY_DEFAULT_ORIGIN, signal, kind = '历史记录', onPage } = {}) {
+  if (typeof requestJSON !== 'function') throw new TypeError('requestJSON 必须是函数');
+  const rows = [], seen = new Set(), visited = new Set();
+  let next = url, expected = null, base = `${origin}/`, page = 0;
+  try {
+    while (next) {
+      if (signal?.aborted) throw abortError();
+      const address = safeURL(next, base, origin);
+      if (visited.has(address)) throw new Error(`${kind}分页地址重复`);
+      visited.add(address);
+      const data = await requestJSON(address, { signal });
+      if (signal?.aborted) throw abortError();
+      const batch = Array.isArray(data) ? data : Array.isArray(data?.results) ? data.results : Array.isArray(data?.tasks) ? data.tasks : null;
+      if (!batch) throw new Error(`${kind}接口返回格式不正确`);
+      if (data && !Array.isArray(data) && data.count != null) {
+        if (!Number.isSafeInteger(data.count) || data.count < 0) throw new Error(`${kind}数量格式不正确`);
+        if (expected != null && expected !== data.count) throw new Error(`${kind}总数量发生变化`);
+        expected = data.count;
+      }
+      for (const row of batch) {
+        const key = row?.id == null ? `row:${rows.length}:${JSON.stringify(row)}` : String(row.id);
+        if (!seen.has(key)) { seen.add(key); rows.push(row); }
+      }
+      page++;
+      onPage?.({ page, count: rows.length, total: expected });
+      next = Array.isArray(data) ? null : data.next || null;
+      base = address;
+    }
+    if (expected != null && rows.length !== expected) throw new Error(`${kind}读取不完整：共 ${expected} 条，实际 ${rows.length} 条`);
+    return rows;
+  } catch (error) {
+    if (signal?.aborted || error?.name === 'AbortError') throw abortError();
+    error.partialRows = rows.slice();
+    throw error;
+  }
+}
+
+async function collectProjectHistory(projectIds, { requestJSON, origin = HISTORY_DEFAULT_ORIGIN, signal, start = '', end = '', onProgress, concurrency = 3 } = {}) {
+  const projects = parseProjectIds(projectIds);
+  // Validate the requested date range before making network calls.
+  filterHistoryRows([], { start, end });
+  const currentOrigin = new URL(origin).origin;
+  const projectRows = await fetchHistoryPaged(`${currentOrigin}/api/projects/?ids=${projects.join(',')}&page_size=100`, { requestJSON, origin: currentOrigin, signal, kind: '项目' });
+  const projectMap = new Map(projectRows.map(row => [id(row?.id), { project_id: id(row?.id), project_name: text(row?.title ?? row?.name) }]));
+  const failures = [], raw = [];
+  for (const projectId of projects) {
+    let tasks = [];
+    try { tasks = await fetchHistoryPaged(`${currentOrigin}/api/tasks/?project=${projectId}&page_size=200`, { requestJSON, origin: currentOrigin, signal, kind: `项目 ${projectId} 任务`, onPage: info => onProgress?.({ phase: 'tasks', projectId, ...info }) }); }
+    catch (error) { if (error.name === 'AbortError') throw error; failures.push({ project_id: projectId, task_id: '', message: error.message }); tasks = error.partialRows || []; }
+    const validTasks = tasks.filter(task => id(task?.id) && id(task?.project ?? task?.project_id) === projectId);
+    let cursor = 0, done = 0;
+    async function worker() {
+      while (cursor < validTasks.length) {
+        if (signal?.aborted) throw abortError();
+        const task = validTasks[cursor++], taskId = id(task.id);
+        try {
+          let detail = task;
+          try {
+            const fetched = await requestJSON(`${currentOrigin}/api/tasks/${taskId}/`, { signal });
+            if (fetched && typeof fetched === 'object') detail = fetched;
+          } catch { /* History rows remain useful even if task detail is unavailable. */ }
+          const rows = await fetchHistoryPaged(`${currentOrigin}/api/fsm/entities/task/${taskId}/history`, { requestJSON, origin: currentOrigin, signal, kind: `任务 ${taskId} 历史` });
+          for (const event of rows) {
+            const status = classifyHistoryStatus(event);
+            if (!status) continue;
+            const annotation = annotationForTask(detail, event);
+            raw.push({ ...event, project_id: projectId, project_name: projectMap.get(projectId)?.project_name || '', task_id: taskId, status, annotator: displayName(event.annotator ?? event.annotation?.completed_by ?? event.context_data?.annotator ?? annotation?.completed_by ?? task.annotator ?? task.annotators?.[0] ?? event.completed_by) || '未识别人员', task_url: `${currentOrigin}/workspaces/all/projects/${projectId}/data?task=${taskId}` });
+          }
+        } catch (error) {
+          if (error.name === 'AbortError') throw error;
+          failures.push({ project_id: projectId, task_id: taskId, message: error.message });
+        }
+        done++;
+        onProgress?.({ phase: 'history', projectId, taskId, done, total: validTasks.length, count: raw.length });
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), validTasks.length || 1) }, worker));
+  }
+  const selected = filterHistoryRows(raw, { start, end });
+  const aggregate = aggregateHistory(selected);
+  return { projects, projectRows: projects.map(projectId => projectMap.get(projectId) || { project_id: projectId, project_name: '' }), rows: selected, allRows: raw, failures, ...aggregate, complete: failures.length === 0 };
+}
+
 /**
  * Create an XLSX workbook without dependencies. Percent columns are zero based.
  * Keep helpers inside this function so the complete exporter can be inlined.
@@ -491,7 +718,7 @@ function workbookBytes(sheets) {
   return bytes;
 }
 
-return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, workbookBytes};
+return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, parseProjectIds, classifyHistoryStatus, filterHistoryRows, aggregateHistory, fetchHistoryPaged, collectProjectHistory, workbookBytes};
 })();
 (function () {
   'use strict';
@@ -503,184 +730,154 @@ return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, workbookBytes
   const css = document.createElement('style');
   css.textContent = `
     :host{all:initial;font:14px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;color:#1c2c3b}
-    *{box-sizing:border-box} [hidden]{display:none!important} button,input,textarea{font:inherit} button{cursor:pointer}
-    button{border:1px solid #ced8df;background:#fff;color:#244354;border-radius:8px;padding:8px 13px} button:hover{background:#edf5f5}
-    button:disabled{opacity:.45;cursor:default} .primary{background:#12675b;color:#fff;border-color:#12675b}.primary:hover{background:#0d544a}
-    #launcher{position:fixed;right:22px;bottom:156px;z-index:2147483600;box-shadow:0 3px 16px #16362e33;border-color:#12675b;color:#12675b;font-weight:600}
+    *{box-sizing:border-box}[hidden]{display:none!important}button,input,textarea{font:inherit}button{cursor:pointer}
+    button{border:1px solid #ced8df;background:#fff;color:#244354;border-radius:8px;padding:8px 13px}button:hover{background:#edf5f5}
+    button:disabled{opacity:.45;cursor:default}.primary{background:#2864e8;color:#fff;border-color:#2864e8}.primary:hover{background:#1f54cb}
+    #launcher{position:fixed;right:22px;bottom:156px;z-index:2147483600;box-shadow:0 3px 16px #16362e33;border-color:#2864e8;color:#2864e8;font-weight:600}
     #backdrop{position:fixed;inset:0;background:#13293466;z-index:2147483601;display:grid;place-items:center;padding:20px}
-    #panel{width:min(1120px,96vw);height:min(880px,92vh);background:#f7fafb;border-radius:16px;box-shadow:0 18px 90px #0d273644;display:flex;flex-direction:column;overflow:hidden}
-    header{padding:20px 24px 14px;display:flex;align-items:flex-start;gap:16px;background:white;border-bottom:1px solid #dfe8eb}
-    h1{font-size:20px;line-height:1.4;margin:0 0 4px;font-weight:650} header p{margin:0;color:#61727e;font-size:13px} #close{margin-left:auto;padding:4px 12px;font-size:20px}
-    main{padding:18px 24px 24px;overflow:auto;flex:1} label{display:block;font-weight:600;margin-bottom:7px}.hint{font-size:12px;color:#647783;margin:7px 0}
-    textarea{display:block;width:100%;height:140px;resize:vertical;min-height:85px;border:1px solid #c7d5dc;border-radius:9px;padding:11px;background:#fff;color:#223947}
-    textarea:focus,button:focus-visible,select:focus-visible{outline:2px solid #46a496;outline-offset:2px} .toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin:12px 0}
-    #file{display:none}.option{display:inline-flex;gap:6px;align-items:center;font-weight:400;margin:0 0 0 auto;font-size:13px}.option input{accent-color:#12675b}
-    #status{white-space:pre-line;color:#4c6574;min-height:24px;font-size:13px} progress{width:100%;height:7px;accent-color:#12675b;display:block;margin:5px 0 14px}
-    #metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin:15px 0}.metric{border:1px solid #dce6e9;border-radius:10px;background:#fff;padding:12px 16px}
-    .metric span{display:block;color:#6c7e89;font-size:12px}.metric strong{display:block;font-size:25px;margin-top:4px;font-variant-numeric:tabular-nums;color:#164a43}
-    .resultbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:16px 0 10px}.resultbar strong{margin-right:auto}
-    .tablewrap{border:1px solid #d8e2e6;border-radius:10px;overflow:auto;background:#fff;max-height:350px}table{border-collapse:collapse;width:100%;font-size:13px}
-    th{position:sticky;top:0;background:#edf4f4;font-weight:600;color:#435e68}th,td{text-align:left;padding:10px 14px;border-bottom:1px solid #e6edef;white-space:nowrap}tbody tr:last-child td{border-bottom:0}
-    td:not(:first-child){font-variant-numeric:tabular-nums} .muted{color:#778b97}.warning{background:#fff5e5;color:#8b5716;border:1px solid #f0d7a8;border-radius:8px;padding:10px 12px;margin:12px 0;font-size:13px}
-    details{font-size:13px;margin-top:12px} summary{cursor:pointer;color:#3d6677}.detailsbody{margin-top:8px;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word}
-    #rules{color:#657b87;font-size:12px;border-top:1px solid #dce6e9;padding-top:12px;margin-top:17px} #rules p{margin:4px 0}
-    @media(max-width:650px){main{padding:14px}header{padding:16px}#backdrop{padding:8px}#metrics{grid-template-columns:repeat(2,1fr)}.option{margin-left:0}.metric strong{font-size:22px}}
+    #panel{width:min(1160px,96vw);height:min(900px,94vh);background:#f7fafb;border-radius:16px;box-shadow:0 18px 90px #0d273644;display:flex;flex-direction:column;overflow:hidden}
+    header{padding:20px 24px 14px;display:flex;align-items:flex-start;gap:16px;background:#fff;border-bottom:1px solid #dfe8eb}h1{font-size:20px;line-height:1.4;margin:0 0 4px;font-weight:650}header p{margin:0;color:#61727e;font-size:13px}#close{margin-left:auto;padding:4px 12px;font-size:20px}
+    main{padding:18px 24px 24px;overflow:auto;flex:1}label{display:block;font-weight:600;margin-bottom:7px}.hint{font-size:12px;color:#647783;margin:7px 0}
+    textarea{display:block;width:100%;height:70px;resize:vertical;min-height:55px;border:1px solid #c7d5dc;border-radius:9px;padding:10px;background:#fff;color:#223947}
+    textarea:focus,input:focus,button:focus-visible,summary:focus-visible{outline:2px solid #6a93ed;outline-offset:2px}.toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin:12px 0}.date{display:inline-flex;align-items:center;gap:7px;font-size:13px;font-weight:400;margin:0}.date input{border:1px solid #c7d5dc;border-radius:7px;padding:7px 9px;background:#fff;color:#223947}
+    #status{white-space:pre-line;color:#4c6574;min-height:24px;font-size:13px}progress{width:100%;height:7px;accent-color:#2864e8;display:block;margin:5px 0 14px}
+    .projectbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0 8px}.projectbar strong{margin-right:auto}.projectbar button{padding:5px 9px;font-size:12px}
+    #projects{border:1px solid #d8e2e6;border-radius:10px;background:#fff;max-height:240px;overflow:auto}.project{display:flex;align-items:center;gap:9px;padding:10px 13px;border-bottom:1px solid #edf1f3}.project:last-child{border-bottom:0}.project:hover{background:#f6f9ff}.project input{accent-color:#2864e8}.project-title{font-weight:600;min-width:0;overflow-wrap:anywhere}.project-id{color:#7b8b95;font-size:12px;margin-left:auto;font-variant-numeric:tabular-nums}
+    #metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:15px 0}.metric{border:1px solid #dce6e9;border-radius:10px;background:#fff;padding:12px 14px}.metric span{display:block;color:#6c7e89;font-size:12px}.metric strong{display:block;font-size:23px;margin-top:4px;font-variant-numeric:tabular-nums;color:#164a43}
+    .resultbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:16px 0 10px}.resultbar strong{margin-right:auto}.tablewrap{border:1px solid #d8e2e6;border-radius:10px;overflow:auto;background:#fff;max-height:340px}table{border-collapse:collapse;width:100%;font-size:13px}th{position:sticky;top:0;background:#edf4f4;font-weight:600;color:#435e68}th,td{text-align:left;padding:9px 12px;border-bottom:1px solid #e6edef;white-space:nowrap}tbody tr:last-child td{border-bottom:0}td:not(:first-child){font-variant-numeric:tabular-nums}
+    .warning{background:#fff5e5;color:#8b5716;border:1px solid #f0d7a8;border-radius:8px;padding:10px 12px;margin:12px 0;font-size:13px}details{font-size:13px;margin-top:12px}summary{cursor:pointer;color:#3d6677}.detailsbody{margin-top:8px;max-height:200px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+    #rules{color:#657b87;font-size:12px;border-top:1px solid #dce6e9;padding-top:12px;margin-top:17px}#rules p{margin:4px 0}
+    @media(max-width:750px){main{padding:14px}header{padding:16px}#backdrop{padding:8px}#metrics{grid-template-columns:repeat(2,1fr)}.project-id{margin-left:0}.date{width:100%}}
   `;
   root.append(css);
-  // All dynamic data is inserted as text; pasted links and comments are never interpreted as HTML.
   const layout = document.createElement('div');
   layout.innerHTML = `
-    <button id="launcher" type="button">框 ID 通过率</button>
+    <button id="launcher" type="button">历史通过率</button>
     <div id="backdrop" hidden><section id="panel" role="dialog" aria-modal="true" aria-labelledby="title">
-      <header><div><h1 id="title">按框 ID 统计通过率</h1><p>同标注员合并 · 重复数据去重 · 合格数据与主体框计入总数</p></div><button id="close" type="button" aria-label="收起统计面板">×</button></header>
+      <header><div><h1 id="title">所选项目历史统计</h1><p>每次历史审核记录分别统计 · 支持按日期筛选 · 通过率 = 通过 ÷（通过 + 驳回）</p></div><button id="close" type="button" aria-label="收起统计面板">×</button></header>
       <main>
-        <label for="input">1. 粘贴完整质检表（包含合格、不合格记录）</label>
-        <textarea id="input" spellcheck="false" placeholder="从表格复制整片数据后粘贴到这里。支持原来的 9 列顺序，也支持带表头的表格。"></textarea>
-        <p class="hint">无表头列顺序：任务链接、质检员、标注员、合格/不合格、问题类型、问题描述、构图比例、图片文件名、附件。统计范围为本次粘贴或导入的任务。</p>
-        <div class="toolbar"><button id="start" class="primary" type="button">读取框数并统计</button><button id="import" type="button">导入 CSV / TSV / TXT</button><input id="file" type="file" accept=".csv,.tsv,.txt,text/plain,text/csv"><button id="cancel" type="button" disabled>停止</button><label class="option"><input id="drafts" type="checkbox" checked>有草稿时使用最新已保存草稿</label></div>
-        <div id="status" role="status" aria-live="polite">先登录标注平台，再粘贴质检数据。仅点击统计时读取任务。</div><progress id="progress" max="1" value="0" hidden></progress>
+        <label for="projectIds">1. 输入项目 ID</label>
+        <textarea id="projectIds" spellcheck="false" placeholder="支持多个项目 ID，用空格、换行或逗号分隔，例如：10475, 10464"></textarea>
+        <div class="toolbar"><button id="loadProjects" type="button">读取项目列表</button><button id="selectAll" type="button">全选项目</button><button id="clearAll" type="button">清除选择</button><span id="selectedCount" class="hint">已选 0 个项目</span></div>
+        <div class="projectbar"><strong>项目列表</strong><span id="projectHint" class="hint">先读取项目列表</span></div>
+        <div id="projects" aria-live="polite"></div>
+        <div class="toolbar"><label class="date">开始日期 <input id="startDate" type="date"></label><label class="date">结束日期 <input id="endDate" type="date"></label><button id="start" class="primary" type="button">统计选中项目</button><button id="cancel" type="button" disabled>停止</button></div>
+        <div id="status" role="status" aria-live="polite">先登录标注平台，输入项目 ID 后读取项目列表。</div><progress id="progress" max="1" value="0" hidden></progress>
         <section id="results" hidden>
           <div id="metrics"></div><div id="warning" class="warning" hidden></div>
           <div class="resultbar"><strong>2. 标注员汇总</strong><button id="copy" type="button">复制汇总表</button><button id="csv" type="button">导出汇总 CSV</button><button id="excel" class="primary" type="button">导出完整 Excel</button></div>
-          <div class="tablewrap"><table><thead><tr><th>标注员</th><th>任务数</th><th>总框 ID</th><th>错误 ID</th><th>通过 ID</th><th>通过率</th><th>状态</th></tr></thead><tbody id="body"></tbody></table></div>
-          <details id="notes"><summary>匹配说明与待核对记录</summary><div class="detailsbody" id="details"></div></details>
+          <div class="tablewrap"><table><thead><tr><th>标注员</th><th>通过次数</th><th>驳回次数</th><th>审核次数</th><th>通过率</th><th>状态</th></tr></thead><tbody id="body"></tbody></table></div>
+          <details id="notes"><summary>历史记录与待核对说明</summary><div class="detailsbody" id="details"></div></details>
         </section>
-        <div id="rules"><p>通过率 = 1 − 错误框 ID 数 ÷ 总框 ID 数。相同项目、任务、框 ID 只计一次；同框多次报错只算一个错误 ID。</p><p>原框 ID 已更换时，仅在同任务该构图比例唯一时自动对应。无法读取或无法唯一对应的任务会标为“待核对”，受影响的通过率暂不显示。</p><p>完整 Excel 含标注员汇总、任务明细、框 ID 明细、质检记录和待核对记录。草稿选择与框 ID 对应方式会保留在明细中。</p></div>
+        <div id="rules"><p>每一条历史通过或历史驳回记录都单独统计，同一任务多次审核不会去重。</p><p>日期按历史记录时间筛选，开始日期和结束日期都包含当天。无法识别的历史状态不计入通过率，并保留在明细说明中。</p><p>完整 Excel 包含标注员汇总、项目汇总、历史记录和待核对与口径。</p></div>
       </main>
     </section></div>`;
   root.append(layout);
   const $ = id => root.getElementById(id);
-  let result = null, controller = null, lastFocus = null, copyTimer = 0, importing = false;
+  let result = null, controller = null, lastFocus = null, copyTimer = 0, projectRows = [];
   const percent = value => typeof value === 'number' ? `${(value * 100).toFixed(2)}%` : '待核对';
   const cellValue = value => value === null || value === undefined ? '待核对' : String(value);
-  function show() { lastFocus = document.activeElement; $('backdrop').hidden = false; $('input').focus(); }
+  const today = new Date();
+  const isoDate = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
+  $('startDate').value = isoDate(monthStart); $('endDate').value = isoDate(today);
+  function show() { lastFocus = document.activeElement; $('backdrop').hidden = false; $('projectIds').focus(); }
   function hide() { $('backdrop').hidden = true; (lastFocus?.isConnected ? lastFocus : $('launcher')).focus(); }
-  $('launcher').addEventListener('click', show);
-  $('close').addEventListener('click', hide);
-  $('backdrop').addEventListener('click', event => { if (event.target === $('backdrop')) hide(); });
-  // Keep the host page's annotation shortcuts from handling keys typed in this tool.
+  function requestJSON(url, { signal } = {}) {
+    return fetch(url, { method: 'GET', credentials: 'same-origin', headers: { Accept: 'application/json' }, cache: 'no-store', signal }).then(async response => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}：读取失败`);
+      const type = response.headers.get('content-type');
+      if (type && !/\bjson\b/i.test(type)) throw new Error('接口返回的不是 JSON，请确认登录状态');
+      return response.json();
+    });
+  }
+  function selectedIds() { return [...$('projects').querySelectorAll('input[type="checkbox"]:checked')].map(input => input.value); }
+  function updateSelection() {
+    const ids = selectedIds(); $('selectedCount').textContent = `已选 ${ids.length} 个项目`;
+    $('start').disabled = !ids.length || !!controller;
+  }
+  function renderProjects() {
+    $('projects').replaceChildren();
+    for (const project of projectRows) {
+      const label = document.createElement('label'); label.className = 'project';
+      const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = project.project_id; checkbox.checked = true;
+      const title = document.createElement('span'); title.className = 'project-title'; title.textContent = project.project_name || `项目 ${project.project_id}`;
+      const id = document.createElement('span'); id.className = 'project-id'; id.textContent = `ID ${project.project_id}`;
+      label.append(checkbox, title, id); $('projects').append(label);
+      checkbox.addEventListener('change', updateSelection);
+    }
+    $('projectHint').textContent = projectRows.length ? `共 ${projectRows.length} 个项目` : '没有找到项目';
+    updateSelection();
+  }
+  $('launcher').addEventListener('click', show); $('close').addEventListener('click', hide); $('backdrop').addEventListener('click', event => { if (event.target === $('backdrop')) hide(); });
   for (const type of ['keydown', 'keyup', 'keypress']) host.addEventListener(type, event => event.stopPropagation());
   root.addEventListener('keydown', event => {
     if ($('backdrop').hidden) return;
     if (event.key === 'Escape') { event.preventDefault(); hide(); }
-    if (event.key === 'Tab') {
-      const focusable = [...$('panel').querySelectorAll('button,input,textarea,summary')].filter(el => !el.disabled && el.type !== 'file' && !el.closest('[hidden]') && (el.tagName === 'SUMMARY' || !el.closest('details:not([open])')));
-      const first = focusable[0], last = focusable.at(-1);
-      if (event.shiftKey && root.activeElement === first) { event.preventDefault(); last.focus(); }
-      else if (!event.shiftKey && root.activeElement === last) { event.preventDefault(); first.focus(); }
-    }
   });
-  function invalidate() { result = null; $('results').hidden = true; if (!controller) $('status').textContent = '数据已更新，请重新读取框数并统计。'; }
-  $('input').addEventListener('input', invalidate);
-  $('drafts').addEventListener('change', invalidate);
-  $('import').addEventListener('click', () => $('file').click());
-  $('file').addEventListener('change', async () => {
-    const file = $('file').files?.[0];
-    if (!file) return;
-    if (controller || importing) { $('file').value = ''; return; }
-    importing = true; invalidate();
-    for (const id of ['start', 'import', 'input', 'drafts']) $(id).disabled = true;
-    $('status').textContent = `正在导入 ${file.name}…`;
-    try {
-      const bytes = await file.arrayBuffer();
-      let text = new TextDecoder('utf-8').decode(bytes);
-      if (text.includes('\uFFFD')) text = new TextDecoder('gb18030').decode(bytes);
-      $('input').value = text; invalidate(); $('status').textContent = `已导入 ${file.name}，点击“读取框数并统计”。`;
-    } catch (error) { $('status').textContent = `导入失败：${error.message}`; }
-    finally { importing = false; busy(false); $('file').value = ''; }
-  });
+  function invalidate() { result = null; $('results').hidden = true; if (!controller) $('status').textContent = '条件已更新，请重新统计。'; }
+  $('projectIds').addEventListener('input', invalidate); $('startDate').addEventListener('change', invalidate); $('endDate').addEventListener('change', invalidate);
   function busy(value) {
-    for (const id of ['input', 'drafts', 'start', 'import']) $(id).disabled = value;
+    for (const id of ['projectIds', 'loadProjects', 'selectAll', 'clearAll', 'start', 'startDate', 'endDate']) $(id).disabled = value;
     $('cancel').disabled = !value; $('progress').hidden = !value;
   }
+  $('loadProjects').addEventListener('click', async () => {
+    if (controller) return;
+    invalidate();
+    let ids;
+    try { ids = Core.parseProjectIds($('projectIds').value); } catch (error) { $('status').textContent = error.message; return; }
+    busy(true); $('status').textContent = `正在读取 ${ids.length} 个项目…`;
+    try {
+      const rows = await Core.fetchHistoryPaged(`${location.origin}/api/projects/?ids=${ids.join(',')}&page_size=100`, { requestJSON, origin: location.origin, kind: '项目' });
+      const map = new Map(rows.map(row => [String(row.id), { project_id: String(row.id), project_name: String(row.title ?? row.name ?? '') }]));
+      projectRows = ids.map(id => map.get(id) || { project_id: id, project_name: '' }); renderProjects();
+      $('status').textContent = `已读取 ${projectRows.length} 个项目，请勾选后统计。`;
+    } catch (error) { projectRows = []; renderProjects(); $('status').textContent = `项目读取失败：${error.message}`; }
+    finally { busy(false); }
+  });
+  $('selectAll').addEventListener('click', () => { for (const input of $('projects').querySelectorAll('input[type="checkbox"]')) input.checked = true; updateSelection(); });
+  $('clearAll').addEventListener('click', () => { for (const input of $('projects').querySelectorAll('input[type="checkbox"]')) input.checked = false; updateSelection(); });
   $('cancel').addEventListener('click', () => controller?.abort());
   $('start').addEventListener('click', async () => {
-    if (controller || importing) return;
-    invalidate();
-    const parsed = Core.parseTable($('input').value, location.origin);
-    if (parsed.issues.length || !parsed.rows.length) {
-      $('status').textContent = parsed.issues.map(issue => `${issue.source_row ? `第 ${issue.source_row} 行：` : ''}${issue.message}`).join('\n') || '请先粘贴质检表。';
-      return;
-    }
-    const groups = new Map();
-    for (const row of parsed.rows) groups.set(`${row.project_id}/${row.task_id}`, row);
-    controller = new AbortController(); const signal = controller.signal;
-    busy(true); $('progress').max = groups.size; $('progress').value = 0;
-    $('status').textContent = `${parsed.rows.length} 条质检记录，${groups.size} 个唯一任务，正在读取…`;
-    const data = Object.create(null), entries = [...groups.entries()]; let cursor = 0, done = 0, failed = 0;
+    if (controller) return;
+    const ids = selectedIds();
+    if (!ids.length) { $('status').textContent = '请先读取并勾选至少一个项目。'; return; }
+    if ($('startDate').value && $('endDate').value && $('startDate').value > $('endDate').value) { $('status').textContent = '开始日期不能晚于结束日期。'; return; }
+    invalidate(); controller = new AbortController(); const signal = controller.signal; busy(true); $('progress').hidden = false; $('progress').removeAttribute('value');
+    $('status').textContent = `正在读取 ${ids.length} 个项目的任务历史…`;
     try {
-      await Promise.all(Array.from({ length: Math.min(3, entries.length) }, async () => {
-        while (cursor < entries.length && !signal.aborted) {
-          const [key, row] = entries[cursor++];
-          try { data[key] = await Core.fetchTaskJSON(`${location.origin}/api/tasks/${row.task_id}/`, { signal }); }
-          catch (error) {
-            if (signal.aborted) throw error;
-            data[key] = { error: error.message }; failed++;
-          }
-          done++; $('progress').value = done;
-          $('status').textContent = `已读取 ${done} / ${entries.length} 个任务${failed ? `，${failed} 个读取失败（会列入待核对）` : ''}。`;
-        }
-      }));
-      if (signal.aborted) throw new DOMException('已停止', 'AbortError');
-      result = Core.calculate(parsed.rows, data, { useDrafts: $('drafts').checked });
-      render();
-      $('status').textContent = result.complete
-        ? `统计完成：${parsed.rows.length} 条记录，${result.totals.tasks} 个任务；${result.tasks.filter(t => t.version === '最新草稿').length} 个任务使用最新已保存草稿。`
-        : `读取结束：有 ${result.issues.length} 条待核对记录，请查看明细。`;
-    } catch (error) {
-      invalidate(); $('status').textContent = signal.aborted ? '已停止。本次没有生成统计结果；可以重新开始。' : `统计失败：${error.message}`;
-    } finally { controller = null; busy(false); }
+      result = await Core.collectProjectHistory(ids, { requestJSON, origin: location.origin, signal, start: $('startDate').value, end: $('endDate').value, onProgress: info => { if (info.phase === 'history') $('status').textContent = `项目 ${info.projectId}：已读取 ${info.done} / ${info.total} 个任务，发现 ${info.count || 0} 条审核记录…`; else if (info.phase === 'tasks') $('status').textContent = `项目 ${info.projectId}：正在读取任务列表…`; } });
+      render(); $('status').textContent = result.complete ? `统计完成：${result.rows.length} 条历史审核记录。` : `读取结束：有 ${result.failures.length} 条待核对记录。`;
+    } catch (error) { invalidate(); $('status').textContent = signal.aborted ? '已停止，本次没有生成统计结果。' : `统计失败：${error.message}`; }
+    finally { controller = null; busy(false); }
   });
   function render() {
     $('results').hidden = false; $('metrics').replaceChildren(); $('body').replaceChildren();
-    const metrics = [['唯一任务', result.totals.tasks], [result.complete ? '总框 ID' : '已读取框 ID', result.totals.regions], [result.complete ? '错误 ID' : '已匹配错误 ID', result.totals.errors], ['整体通过率', percent(result.totals.pass_rate)]];
-    for (const [name, value] of metrics) {
-      const box = document.createElement('div'); box.className = 'metric';
-      const label = document.createElement('span'), strong = document.createElement('strong'); label.textContent = name; strong.textContent = value; box.append(label, strong); $('metrics').append(box);
-    }
-    for (const p of result.people) {
-      const tr = document.createElement('tr');
-      for (const value of [p.annotator, p.task_count, p.region_count, p.error_count, p.pass_count, percent(p.pass_rate), p.pass_rate === null ? '待核对' : '已核对']) {
-        const td = document.createElement('td'); td.textContent = cellValue(value); tr.append(td);
-      }
-      $('body').append(tr);
-    }
-    $('warning').hidden = result.complete;
-    $('warning').textContent = '有任务读取失败或错误 ID 无法唯一对应。受影响标注员及整体通过率暂不显示，导出的表格会保留待核对原因。';
-    const lines = result.issues.map(i => `[待核对] ${i.source_row ? `第${i.source_row}行 ` : ''}${i.task_id ? `任务${i.task_id} ` : ''}${i.message}`);
-    for (const note of result.mappingNotes) lines.push(`[自动对应] 第${note.source_row}行 / 任务${note.task_id}：${note.original_region_id || '无原框ID'} → ${note.matched_region_id}（${note.match_method}）`);
-    $('details').textContent = lines.join('\n') || '所有任务已读取，所有错误均已对应到具体框 ID。';
-    $('notes').open = !result.complete;
+    const metrics = [['选中项目', result.projects.length], ['历史通过', result.totals.pass_count], ['历史驳回', result.totals.reject_count], ['审核次数', result.totals.total_count], ['整体通过率', percent(result.totals.pass_rate)]];
+    for (const [name, value] of metrics) { const box = document.createElement('div'); box.className = 'metric'; const label = document.createElement('span'), strong = document.createElement('strong'); label.textContent = name; strong.textContent = value; box.append(label, strong); $('metrics').append(box); }
+    for (const person of result.people) { const tr = document.createElement('tr'); for (const value of [person.annotator, person.pass_count, person.reject_count, person.total_count, percent(person.pass_rate), '已核对']) { const td = document.createElement('td'); td.textContent = cellValue(value); tr.append(td); } $('body').append(tr); }
+    $('warning').hidden = result.complete; $('warning').textContent = '部分项目或任务历史读取失败，结果只包含已成功读取的记录；失败原因见明细和 Excel。';
+    const lines = [...result.failures.map(item => `[读取失败] 项目 ${item.project_id}${item.task_id ? ` / 任务 ${item.task_id}` : ''}：${item.message}`), ...result.issues.map(item => `[待核对] ${item.message || item}`)];
+    $('details').textContent = lines.join('\n') || '所有历史审核记录均已读取并按日期筛选。'; $('notes').open = !result.complete || !!lines.length;
   }
-  function summaryRows(formatted = false) {
-    return result.people.map(p => [p.annotator, p.task_count, p.region_count, p.error_count, p.pass_count, formatted ? percent(p.pass_rate) : p.pass_rate, p.pass_rate === null ? '待核对' : '已核对']);
-  }
-  const summaryHeaders = ['标注员', '任务数', '总框ID', '错误框ID', '通过框ID', '通过率', '统计状态'];
-  function save(bytes, name, type) {
-    const url = URL.createObjectURL(new Blob([bytes], { type })); const a = document.createElement('a'); a.href = url; a.download = name; root.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
-  }
+  const summaryHeaders = ['标注员', '通过次数', '驳回次数', '审核次数', '通过率', '统计状态'];
+  const summaryRows = formatted => result.people.map(person => [person.annotator, person.pass_count, person.reject_count, person.total_count, formatted ? percent(person.pass_rate) : person.pass_rate, '已核对']);
+  function save(bytes, name, type) { const url = URL.createObjectURL(new Blob([bytes], { type })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; root.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000); }
   const dateStamp = () => new Date().toISOString().replace(/[-:]/g, '').slice(0, 15).replace('T', '_');
-  $('copy').addEventListener('click', async () => {
-    if (!result) return;
-    const text = [summaryHeaders, ...summaryRows(true)].map(row => row.map(value => String(value ?? '待核对').replace(/[\t\r\n]/g, ' ')).join('\t')).join('\n');
-    try {
-      if (typeof GM_setClipboard === 'function') GM_setClipboard(text, 'text'); else await navigator.clipboard.writeText(text);
-      $('copy').textContent = '已复制'; clearTimeout(copyTimer); copyTimer = setTimeout(() => { $('copy').textContent = '复制汇总表'; }, 1600);
-    } catch { $('status').textContent = '复制失败，请使用“导出汇总 CSV”或“导出完整 Excel”。'; }
-  });
-  $('csv').addEventListener('click', () => { if (result) save(Core.toCSV(summaryHeaders, summaryRows(true)), `标注员框ID通过率_${result.complete ? '' : '待核对_'}${dateStamp()}.csv`, 'text/csv;charset=utf-8'); });
+  $('copy').addEventListener('click', async () => { if (!result) return; const text = [summaryHeaders, ...summaryRows(true)].map(row => row.map(value => String(value ?? '').replace(/[\t\r\n]/g, ' ')).join('\t')).join('\n'); try { if (typeof GM_setClipboard === 'function') GM_setClipboard(text, 'text'); else await navigator.clipboard.writeText(text); $('copy').textContent = '已复制'; clearTimeout(copyTimer); copyTimer = setTimeout(() => { $('copy').textContent = '复制汇总表'; }, 1600); } catch { $('status').textContent = '复制失败，请导出 CSV 或 Excel。'; } });
+  $('csv').addEventListener('click', () => { if (result) save(Core.toCSV(summaryHeaders, summaryRows(true)), `项目历史通过率_${dateStamp()}.csv`, 'text/csv;charset=utf-8'); });
   $('excel').addEventListener('click', () => {
     if (!result) return;
+    const projectHeaders = ['项目ID', '项目名称', '通过次数', '驳回次数', '审核次数', '通过率'];
+    const historyHeaders = ['项目ID', '项目名称', '任务ID', '标注员', '审核结果', '历史时间', '触发人', '原始状态', '任务链接'];
+    const issueRows = [['统计口径', '', '', '', '', `通过率=历史通过次数÷（历史通过次数+历史驳回次数）；每次历史记录分别统计。`], ['时间范围', '', '', '', '', `${$('startDate').value || '不限'} 至 ${$('endDate').value || '不限'}（含首尾日期）`], ...result.failures.map(item => ['读取失败', item.project_id, item.task_id, '', '', item.message]), ...result.issues.map(item => ['待核对', '', '', '', '', item.message || String(item)])];
     const sheets = [
-      { name: '标注员通过率', headers: summaryHeaders, rows: summaryRows(), percentColumns: [5] },
-      { name: '每条数据框数', headers: ['项目ID', '任务ID', '标注员', '总框ID', '错误框ID', '通过框ID', '通过率', '选用版本', '版本ID', '版本时间', '任务链接', '待核对原因'], percentColumns: [6], rows: result.tasks.map(t => [t.project_id, t.task_id, t.annotator, t.region_count, t.error_count, t.pass_count, t.pass_rate, t.version, t.version_id, t.updated_at, t.url, t.issue || '']) },
-      { name: '框ID明细', headers: ['项目ID', '任务ID', '标注员', '框ID', '框标签', '是否错误', '质检原行号', '选用版本', '唯一键'], rows: result.regions.map(r => [r.project_id, r.task_id, r.annotator, r.region_id, r.label, r.error ? '是' : '否', r.qc_source_rows.join('、'), r.version, r.key]) },
-      { name: '质检记录', headers: ['原行号', '项目ID', '任务ID', '标注员', '质检员', '质检结果', '问题类型', '问题描述', '构图比例', '图片文件名', '附件', '原框ID', '当前框ID', '对应方式', '任务链接'], rows: result.qc.map(q => [q.source_row, q.project_id, q.task_id, q.annotator, q.reviewer, q.result, q.reason, q.comment, q.ratio, q.image, q.attachment, q.original_region_id, q.matched_region_id, q.match_method, q.url]) },
-      { name: '待核对与口径', headers: ['类型', '原行号', '项目ID', '任务ID', '标注员', '说明'], rows: [['统计口径', '', '', '', '', '通过率=1−错误框ID/总框ID；按项目/任务/框去重，含主体和合格数据。统计范围仅限导入任务。'], ['版本口径', '', '', '', '', $('drafts').checked ? '优先最新已保存草稿，无草稿使用已提交标注；不包含未保存改动。' : '仅使用已提交标注，不包含草稿和未保存改动。'], ...result.issues.map(i => ['待核对', i.source_row || '', i.project_id || '', i.task_id || '', i.annotator || '', i.message])] }
+      { name: '标注员通过率', headers: summaryHeaders, rows: summaryRows(false), percentColumns: [4] },
+      { name: '项目汇总', headers: projectHeaders, rows: result.projects.map(project => [project.project_id, project.project_name, project.pass_count, project.reject_count, project.total_count, project.pass_rate]), percentColumns: [5] },
+      { name: '历史记录', headers: historyHeaders, rows: result.rows.map(row => [row.project_id, row.project_name, row.task_id, row.annotator, row.status, row.created_at || '', row.triggered_by?.first_name ? `${row.triggered_by.first_name}${row.triggered_by.last_name || ''}` : String(row.triggered_by ?? ''), row.state || row.previous_state || row.transition_name || '', row.task_url || '']) },
+      { name: '待核对与口径', headers: ['类型', '项目ID', '任务ID', '标注员', '结果', '说明'], rows: issueRows },
     ];
-    // A blank rate in an incomplete workbook always has an explicit status/reason alongside it.
-    try { save(Core.workbookBytes(sheets), `按实际框ID统计_标注员通过率_${result.complete ? '' : '待核对_'}${dateStamp()}.xlsx`, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); }
-    catch (error) { $('status').textContent = `导出失败：${error.message}。可以先导出汇总 CSV。`; }
+    try { save(Core.workbookBytes(sheets), `项目历史通过率_${dateStamp()}.xlsx`, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); } catch (error) { $('status').textContent = `导出失败：${error.message}`; }
   });
 })();
 
