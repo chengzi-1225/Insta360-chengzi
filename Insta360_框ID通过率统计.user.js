@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 框ID通过率统计
 // @namespace    local.insta360.region-pass-rate
-// @version      1.3.1
+// @version      1.3.2
 // @description  读取项目包历史审核记录，按时间和标注员统计通过率并导出Excel明细。
 // @match        https://label.insta360.com/*
 // @homepageURL  https://github.com/chengzi-1225/Insta360-chengzi
@@ -435,6 +435,26 @@ function taskAnnotatorMap(detail, task) {
   return map;
 }
 
+function addUserDirectoryRows(map, rows) {
+  for (const value of Array.isArray(rows) ? rows : []) {
+    const key = userId(value);
+    const name = displayName(value, { allowId: false });
+    if (key && name) map.set(key, name);
+  }
+  return map;
+}
+
+function candidateName(candidates, userMap) {
+  let fallback = '';
+  for (const [value, createdUsername] of candidates) {
+    const name = resolvedName(value, userMap, createdUsername);
+    if (!name) continue;
+    if (!fallback) fallback = name;
+    if (!/^用户ID \d+$/.test(name)) return name;
+  }
+  return fallback;
+}
+
 function resolvedName(value, userMap, createdUsername = '') {
   const key = userId(value);
   if (key && userMap?.has(key)) return userMap.get(key);
@@ -561,12 +581,27 @@ async function collectProjectHistory(projectIds, { requestJSON, origin = HISTORY
   const currentOrigin = new URL(origin).origin;
   const projectRows = await fetchHistoryPaged(`${currentOrigin}/api/projects/?ids=${projects.join(',')}&page_size=100`, { requestJSON, origin: currentOrigin, signal, kind: '项目' });
   const projectMap = new Map(projectRows.map(row => [id(row?.id), { project_id: id(row?.id), project_name: text(row?.title ?? row?.name) }]));
-  const failures = [], raw = [];
+  const failures = [], raw = [], userDirectory = new Map();
+  let userDirectoryPromise = null;
+  const loadUserDirectory = () => {
+    if (!userDirectoryPromise) {
+      userDirectoryPromise = fetchHistoryPaged(`${currentOrigin}/api/users/?page_size=500`, { requestJSON, origin: currentOrigin, signal, kind: '用户' })
+        .then(rows => { addUserDirectoryRows(userDirectory, rows); return true; })
+        .catch(error => {
+          if (error.name === 'AbortError') throw error;
+          addUserDirectoryRows(userDirectory, error.partialRows || []);
+          failures.push({ project_id: '', task_id: '', message: `用户姓名读取失败：${error.message}` });
+          return false;
+        });
+    }
+    return userDirectoryPromise;
+  };
   for (const projectId of projects) {
     let tasks = [];
     try { tasks = await fetchHistoryPaged(`${currentOrigin}/api/tasks/?project=${projectId}&page_size=500`, { requestJSON, origin: currentOrigin, signal, kind: `项目 ${projectId} 任务`, onPage: info => onProgress?.({ phase: 'tasks', projectId, ...info }) }); }
     catch (error) { if (error.name === 'AbortError') throw error; failures.push({ project_id: projectId, task_id: '', message: error.message }); tasks = error.partialRows || []; }
     const validTasks = tasks.filter(task => id(task?.id) && id(task?.project ?? task?.project_id) === projectId);
+    if (validTasks.some(task => userId(task?.annotator) || (Array.isArray(task?.annotators) && task.annotators.some(value => userId(value))))) void loadUserDirectory().catch(() => {});
     let cursor = 0, done = 0;
     async function worker() {
       while (cursor < validTasks.length) {
@@ -578,7 +613,8 @@ async function collectProjectHistory(projectIds, { requestJSON, origin = HISTORY
             .catch(() => task); // History rows remain useful even if task detail is unavailable.
           const historyPromise = fetchHistoryPaged(`${currentOrigin}/api/fsm/entities/task/${taskId}/history`, { requestJSON, origin: currentOrigin, signal, kind: `任务 ${taskId} 历史` });
           const [detail, rows] = await Promise.all([detailPromise, historyPromise]);
-          const userMap = taskAnnotatorMap(detail, task);
+          const userMap = new Map(userDirectory);
+          for (const [key, name] of taskAnnotatorMap(detail, task)) userMap.set(key, name);
           for (const event of rows) {
             const status = classifyHistoryStatus(event);
             if (!status) continue;
@@ -593,10 +629,12 @@ async function collectProjectHistory(projectIds, { requestJSON, origin = HISTORY
               [task.annotators?.[0], task.created_username],
               [event.completed_by, event.created_username],
             ];
-            let annotator = '';
-            for (const [value, createdUsername] of candidates) {
-              annotator = resolvedName(value, userMap, createdUsername);
-              if (annotator) break;
+            let annotator = candidateName(candidates, userMap);
+            if (/^用户ID \d+$/.test(annotator)) {
+              await loadUserDirectory();
+              const resolvedMap = new Map(userDirectory);
+              for (const [key, name] of taskAnnotatorMap(detail, task)) resolvedMap.set(key, name);
+              annotator = candidateName(candidates, resolvedMap);
             }
             raw.push({ ...event, project_id: projectId, project_name: projectMap.get(projectId)?.project_name || '', task_id: taskId, status, annotator: annotator || '未识别人员', task_url: `${currentOrigin}/workspaces/all/projects/${projectId}/data?task=${taskId}` });
           }
