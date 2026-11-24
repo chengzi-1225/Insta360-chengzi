@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Label Studio 自动构图（以主体为中心）
 // @namespace    https://label.insta360.com/
-// @version      2.5.6
-// @description  按当前主体识别缺失比例、自动构图，原生标注列表高亮新写入框；支持滚动、手动调整窗口及逐步撤销
+// @version      2.6.0
+// @description  按主体自动构图；无人场景按选中或已有比例框居中补齐，高亮新写入框，支持滚动、调整窗口及撤销
 // @author       chengzi
 // @match        https://label.insta360.com/*
 // @grant        none
@@ -28,6 +28,7 @@
  *  v2.4：主体单选/多选、按主体补充缺失比例、新增框高亮及独立撤销记录；
  *  自动构图统一比较标准/更紧/更松候选，优先保住完整主体并兼顾景物。
  *  v2.5.3：按当前主体检查缺失，原生列表精确高亮新写入框，多主体互不混算。
+ *  v2.6.0：无人场景按选中比例框或已有框共同中心补齐，无框时整图居中。
  * ===================================================================== */
 
 (function () {
@@ -146,13 +147,25 @@
       return { base, labels };
     },
 
+    aspectOf(region) {
+      const { base, labels } = this.regionLabelsOf(region);
+      const from = nameOf(base && base.from_name) || '';
+      if (from === 'subject_tool') return null;
+      const known = ASPECT_DEFS.find(a => a.name === from);
+      if (known) return known;
+      const key = labels.map(label => this.matchAspect(this.parseRatioText(label))).find(Boolean) ||
+        this.matchAspect(this.parseRatioText(from.replace(/_/g, ':')));
+      return ASPECT_DEFS.find(a => a.key === key) || null;
+    },
+
     /** 读取某个控件已存在的区域，转换成百分比框 */
     readRegions(controlName, annot) {
       const out = [];
+      const aspect = ASPECT_DEFS.find(a => a.name === controlName);
       this.regionList(annot).forEach(r => {
         const res = r.results && r.results[0];
         const from = nameOf(res && res.from_name);
-        if (from !== controlName) return;
+        if (from !== controlName && (!aspect || this.aspectOf(r)?.key !== aspect.key)) return;
         out.push({
           x: num(r.x), y: num(r.y), w: num(r.width), h: num(r.height),
           region: r,
@@ -374,6 +387,7 @@
 
       const ctl = this.controlFor(controlName, an) || (s.names && s.names.get(controlName));
       if (!ctl) throw new Error('找不到控件 ' + controlName);
+      const actualControlName = nameOf(ctl) || controlName;
       const obj = (s.names && s.names.get(this.imageName())) || this.imageName();
 
       const area = { x: box.x, y: box.y, width: box.w, height: box.h, rotation: 0 };
@@ -386,7 +400,7 @@
 
       const errors = [];
       const tries = [
-        ['模板复制', () => this.writeFromTemplate(area, labelValue, an, controlName)],
+        ['模板复制', () => this.writeFromTemplate(area, labelValue, an, actualControlName)],
         ['createResult', () => an.createResult(area, value, ctl, obj)],
         ['createResult(旧)', () => an.createResult(this.imageName(),
           { from_name: (ctl && ctl.name) || controlName, to_name: this.imageName(), type: 'rectanglelabels', value })],
@@ -429,7 +443,7 @@
       }));
     },
 
-    selectedSubjectIds(annot) {
+    selectedRegionIds(annot) {
       const an = annot || this.annotation();
       if (!an) return [];
       const rs = an.regionStore || {};
@@ -448,7 +462,12 @@
         else if (typeof source === 'object') Object.keys(source).forEach(k => { if (source[k]) { add(k); add(source[k]); } });
       });
       if (!ids.size) add(an.highlightedNode);
-      return this.subjectEntries(an).filter(s => ids.has(s.id)).map(s => s.id);
+      return [...ids];
+    },
+
+    selectedSubjectIds(annot) {
+      const ids = new Set(this.selectedRegionIds(annot));
+      return this.subjectEntries(annot).filter(s => ids.has(s.id)).map(s => s.id);
     },
 
     /** 删除一个区域 */
@@ -1458,6 +1477,44 @@
     };
   }
 
+  /** 无主体时沿参考比例框的共同中心补齐，保持比例并限制在参考范围内。 */
+  function planReferenceCrops(input) {
+    var W = input.imageWidth, H = input.imageHeight;
+    if (!(W > 0 && H > 0)) throw new Error('imageWidth / imageHeight 无效');
+    var refs = (input.references || []).filter(function (r) {
+      return r && [r.x, r.y, r.w, r.h].every(Number.isFinite) && r.w > 0 && r.h > 0 &&
+        r.x >= 0 && r.y >= 0 && r.x + r.w <= 100.001 && r.y + r.h <= 100.001;
+    });
+    function median(values) {
+      values.sort(function (a, b) { return a - b; });
+      var mid = Math.floor(values.length / 2);
+      return values.length % 2 ? values[mid] : (values[mid - 1] + values[mid]) / 2;
+    }
+    var cx = refs.length ? median(refs.map(function (r) { return r.x + r.w / 2; })) : 50;
+    var cy = refs.length ? median(refs.map(function (r) { return r.y + r.h / 2; })) : 50;
+    var rw = Math.min(refs.length ? median(refs.map(function (r) { return r.w; })) : 100, 2 * Math.min(cx, 100 - cx));
+    var rh = Math.min(refs.length ? median(refs.map(function (r) { return r.h; })) : 100, 2 * Math.min(cy, 100 - cy));
+    var reference = { x: cx - rw / 2, y: cy - rh / 2, w: rw, h: rh, count: refs.length };
+    var aspects = input.aspects && input.aspects.length ? input.aspects : ASPECTS;
+    var crops = aspects.map(function (a) {
+      var ratio = ratioOf(a);
+      var width = Math.min(rw * W / 100, rh * H / 100 * ratio);
+      var height = width / ratio;
+      return {
+        key: a.key, fromName: a.name, label: a.label, ratio: ratio,
+        box: { x: cx - width / W * 50, y: cy - height / H * 50, w: width / W * 100, h: height / H * 100 },
+        pixel: { width: width, height: height, aspect: ratio },
+        cut: { head: false }, warnings: [], score: 0, recommended: false
+      };
+    });
+    return {
+      mode: 'center', modeLabel: '居中', autoMode: 'center', overridden: false, confidence: 0,
+      reasons: [refs.length ? '按参考比例框的共同中心补齐，保持参考范围，不移动旧框。' : '没有主体框和可用比例框，按整张图片居中生成。'],
+      evidence: {}, facing: 'none', roomSide: 'none', horizonY: null, skyRatio: 0,
+      subject: null, reference: reference, image: { width: W, height: H }, sceneOk: false, crops: crops
+    };
+  }
+
   /* ---------------------------------------------------------------- 多构图 */
 
   // 同一比例可以给出多个构图方案（Label Studio 允许一个比例画多个框）。
@@ -1569,6 +1626,7 @@
     decideComposition: decideComposition,
     facingOf: facingOf,
     planCrops: planCrops,
+    planReferenceCrops: planReferenceCrops,
     planOne: planOne,
     planVariants: planVariants,
     cropRectToTarget: cropRectToTarget,
@@ -2415,6 +2473,8 @@
     subjectIds: new Set(),
     subjectKnown: new Set(),
     subjectSignature: null,
+    referenceContext: null, // 无主体时锁定参考 ID；几何坐标每次从标注中读取
+    referenceGeneratedIds: new Set(), // 自动补出的框不反过来缩小共同参考范围
     annotation: null,
     taskId: null,
     previewTimer: 0,
@@ -2635,6 +2695,7 @@
   .lsac-check input{margin:0;cursor:pointer;accent-color:#0969da}
   .lsac-subjects{display:flex;flex-direction:column;gap:5px;max-height:100px;overflow:auto}
   .lsac-subject-actions{display:flex;gap:5px}
+  .lsac-subject-actions[hidden]{display:none}
   .lsac-subject-actions button{font:inherit;font-size:10px;cursor:pointer;background:#fff;
     border:1px solid #d0d7de;border-radius:5px;padding:3px 6px;color:#0969da}
   .lsac-hint{font-size:10px;color:#6e7781}
@@ -2714,7 +2775,7 @@
             <button data-act="selected-subjects">用画布选中的主体</button>
             <button data-act="all-subjects">全选主体</button>
           </div>
-          <div class="lsac-hint">点标注列表的主体可切换；多选按一组构图。</div>
+          <div class="lsac-hint" data-subject-hint>点标注列表的主体可切换；多选按一组构图。</div>
         </div>
         <div class="lsac-sec">
           <span class="lsac-lbl">构图方式<span class="r" data-act="mode-auto" title="回到自动判断">自动判断</span></span>
@@ -3025,9 +3086,10 @@
       const n = def ? ((comp.byName || {})[def.name] | 0) : 0;
       const cnt = btn.querySelector('.n');
       if (cnt) cnt.textContent = n > 1 ? n + '个' : '';
+      const scope = LS.subjectEntries().length ? '当前主体' : '当前图片';
       btn.title = isMiss
-        ? ((comp.otherByKey || {})[key] ? '其他主体已有此比例，当前主体仍缺 · 点一下补一个' : '当前主体缺这个比例 · 点一下补一个')
-        : '当前主体已到位 · 点一下切换是否写入';
+        ? ((comp.otherByKey || {})[key] ? '其他主体已有此比例，当前主体仍缺 · 点一下补一个' : scope + '缺这个比例 · 点一下补一个')
+        : scope + '已到位 · 点一下切换是否写入';
     });
     syncCompletenessUI(comp);
     const all = STATE.aspects.size === ASPECT_DEFS.length;
@@ -3046,11 +3108,13 @@
     const sumEl = panel.querySelector('[data-sum]');
     if (sumEl) sumEl.textContent = sum;
     const scope = panel.querySelector('[data-subject-scope]');
+    const entries = LS.subjectEntries();
     if (scope) {
-      const subjects = LS.subjectEntries().filter(s => STATE.subjectIds.has(s.id));
+      const subjects = entries.filter(s => STATE.subjectIds.has(s.id));
       scope.textContent = subjects.length > 1
         ? `当前：主体 ${subjects.map(s => s.index).join('、')}（按一组检查）`
-        : subjects.length ? `当前：主体 ${subjects[0].index} · 只统计此主体的比例` : '请先选择构图主体';
+        : subjects.length ? `当前：主体 ${subjects[0].index} · 只统计此主体的比例`
+        : entries.length ? '请先选择构图主体' : referenceLabel(referenceContext().source);
     }
     const badge = panel.querySelector('[data-badge]');
     if (badge) {
@@ -3058,12 +3122,12 @@
       badge.classList.toggle('ok', !missingKeys.length);
       badge.title = missingKeys.length
         ? '缺 ' + missingKeys.map(k => (ASPECT_DEFS.find(a => a.key === k) || {}).label).join(' ')
-        : '当前主体的五个比例都已存在';
+        : (entries.length ? '当前主体' : '当前图片') + '的五个比例都已存在';
     }
     const mini = panel.querySelector('[data-mini]');
     if (mini) {
       const plan = STATE.last && STATE.last.plan;
-      const modeKey = STATE.mode === 'auto' ? ((plan && plan.autoMode) || 'auto') : STATE.mode;
+      const modeKey = !entries.length ? 'center' : STATE.mode === 'auto' ? ((plan && plan.autoMode) || 'auto') : STATE.mode;
       mini.textContent = `${missingKeys.length ? '缺 ' + missingKeys.length : '已齐'} · ${modeName(modeKey)}`;
     }
   }
@@ -3132,7 +3196,8 @@
   /** 点红色比例格 = 只补这一个比例，立刻写入 */
   async function fillOne(key) {
     if (!ASPECT_DEFS.some(a => a.key === key)) return;
-    if (!STATE.subjectIds.size) {
+    const entries = refreshSubjects();
+    if (entries.length && !STATE.subjectIds.size) {
       info('<span class="lsac-warn">先在上面的「构图主体」里勾选主体，才能补比例</span>', false);
       return;
     }
@@ -3145,6 +3210,7 @@
     refreshSubjects();
     const an = LS.annotation();
     if (!an) return;
+    if (!LS.subjectEntries(an).length) referenceContext(an);
     STATE.added = STATE.added.filter(item => {
       try { return LS.regionList(an).indexOf(item.region) >= 0; } catch (e) { return false; }
     });
@@ -3170,8 +3236,9 @@
     syncWrittenRows();
 
     if (manual) {
+      const scope = LS.subjectEntries(an).length ? '当前主体' : '当前图片';
       info('<span style="color:#57606a">已刷新：' +
-        (comp.missing.length ? '当前主体缺 ' + comp.missing.length + ' 个比例' : '当前主体的五个比例都已存在') +
+        (comp.missing.length ? scope + '缺 ' + comp.missing.length + ' 个比例' : scope + '的五个比例都已存在') +
         (comp.source === 'outliner' ? '（按右侧列表的标签读的）' : '') + '</span>', true);
     }
     return comp.total > 0;
@@ -3194,6 +3261,56 @@
     return LS.subjectEntries(annot).map(s => [s.id, s.x, s.y, s.w, s.h].join(':')).join('|');
   }
 
+  function referenceLabel(source) {
+    return source === 'selected' ? '按已选中的比例框居中'
+      : source === 'existing' ? '按已有比例框共同中心补齐' : '整图居中';
+  }
+
+  function nativeReferenceSelection(annot) {
+    return LS.selectedRegionIds(annot).sort().join('|');
+  }
+
+  /** 锁定参考区域的身份，移动时读新坐标；自动选中新框不改变用户的原参考。 */
+  function referenceContext(annot) {
+    const an = annot || LS.annotation();
+    const seen = new Set();
+    const crops = ASPECT_DEFS.flatMap(a => LS.readRegions(a.name, an)).filter(r => {
+      if (!r.region || seen.has(r.region) || ![r.x, r.y, r.w, r.h].every(Number.isFinite) ||
+          !(r.w > 0 && r.h > 0) || r.x < 0 || r.y < 0 || r.x + r.w > 100.001 || r.y + r.h > 100.001) return false;
+      seen.add(r.region);
+      return true;
+    });
+    const idOf = r => String(r.region.id);
+    const native = nativeReferenceSelection(an);
+    const selectedIds = new Set(LS.selectedRegionIds(an));
+    const selected = crops.filter(r => selectedIds.has(idOf(r)));
+    const manual = crops.filter(r => !STATE.referenceGeneratedIds.has(idOf(r)));
+    const previous = STATE.referenceContext;
+    let source = previous ? previous.source : 'image';
+    let refs = previous ? crops.filter(r => previous.ids.has(idOf(r))) : [];
+    if ((!previous || previous.native !== native) && selected.length) {
+      source = 'selected'; refs = selected;
+    } else if (!previous || previous.native !== native || source !== 'selected' || !refs.length) {
+      refs = manual;
+      source = refs.length ? 'existing' : 'image';
+    }
+    const signature = source + ':' + refs.map(r => [idOf(r), r.x, r.y, r.w, r.h].join(':')).sort().join('|');
+    const current = { ids: new Set(refs.map(idOf)), source, native, signature, references: refs };
+    STATE.referenceContext = current;
+    if (previous && previous.signature !== signature && !STATE.busy) {
+      STATE.last = null;
+      STATE.pick = {};
+      clearPreview();
+      scheduleAutoPreview(120);
+    }
+    return current;
+  }
+
+  function resetReference() {
+    STATE.referenceContext = null;
+    STATE.referenceGeneratedIds.clear();
+  }
+
   function refreshSubjects() {
     const an = LS.annotation();
     if (STATE.annotation !== an || STATE.taskId !== taskId()) {
@@ -3207,12 +3324,14 @@
       STATE.undoStack = [];
       clearAddedHighlights();
       STATE.subjectBindings.clear();
+      resetReference();
       STATE.pick = {};
       clearPreview();
     }
     const entries = LS.subjectEntries(an);
     const signature = subjectSignature(an);
     if (STATE.subjectSignature !== signature) {
+      resetReference();
       const initial = STATE.subjectSignature === null;
       if (STATE.subjectSignature !== null) { clearPreview(); STATE.last = null; }
       const available = new Set(entries.map(s => s.id));
@@ -3236,8 +3355,12 @@
       `${STATE.subjectIds.has(s.id) ? ' checked' : ''}${STATE.busy ? ' disabled' : ''}>` +
       `主体 ${s.index} · ${s.x + s.w / 2 < 33 ? '左侧' : s.x + s.w / 2 > 67 ? '右侧' : '中间'}` +
       ` · 中心 ${Math.round(s.x + s.w / 2)}% / ${Math.round(s.y + s.h / 2)}%</label>`
-    ).join('') : '<span class="lsac-hint">请先在画布框出主体。</span>';
-    panel.querySelector('.lsac-subject-count').textContent = `${STATE.subjectIds.size}/${entries.length} 已选`;
+    ).join('') : '<span class="lsac-hint">无主体框：参考比例框补齐；没有框时整图居中。</span>';
+    panel.querySelector('.lsac-subject-count').textContent = entries.length ? `${STATE.subjectIds.size}/${entries.length} 已选` : '参考框居中';
+    panel.querySelector('.lsac-subject-actions').hidden = !entries.length;
+    panel.querySelector('[data-subject-hint]').textContent = entries.length
+      ? '点标注列表的主体可切换；多选按一组构图。'
+      : '可先选中一个比例框，再点红色缺失比例补齐。';
   }
 
   function subjectSelectionChanged() {
@@ -3289,6 +3412,7 @@
 
   /** 缺失展示、补齐去重和覆盖范围共同使用这个主体筛选，避免彼此矛盾。 */
   function regionsForSubjects(controlName, annot) {
+    if (!LS.subjectEntries(annot).length) return LS.readRegions(controlName, annot);
     const subjects = selectedSubjects(annot);
     return LS.readRegions(controlName, annot).filter(crop => matchesSubjects(crop, subjects));
   }
@@ -3630,11 +3754,9 @@
       const size = LS.imageSize();
 
       // 主体框
-      if (!entries.length) {
-        throw new Error('当前标注没有「主体」框，请先用左侧「主体(6)」工具框出主体');
-      }
       const subjects = entries.filter(s => STATE.subjectIds.has(s.id)).map(s => ({ x: s.x, y: s.y, w: s.w, h: s.h }));
-      if (!subjects.length) throw new Error('请至少选择一个主体，再预览或写入');
+      if (entries.length && !subjects.length) throw new Error('请至少选择一个主体，再预览或写入');
+      const reference = entries.length ? null : referenceContext(annot);
 
       // 勾选的比例（only 时只算那一个）
       // only（点红格补一个）优先于勾选：那个比例没被勾也能补
@@ -3646,7 +3768,7 @@
       // 画面证据（像素分析）：决定三分法是否有方向依据、头部位置、地平线
       let scene = null;
       let sceneErr = null;
-      if (STATE.scene) {
+      if (STATE.scene && !reference) {
         if (!auto) info('<span style="color:#57606a">正在分析画面…</span>');
         try {
           const img = await LS.imageData(320);
@@ -3677,7 +3799,10 @@
       }
 
       // 计算
-      const plan = ComposeCore.planCrops({
+      const plan = reference ? ComposeCore.planReferenceCrops({
+        imageWidth: size.width, imageHeight: size.height,
+        references: reference.references, aspects
+      }) : ComposeCore.planCrops({
         imageWidth: size.width,
         imageHeight: size.height,
         subjects,
@@ -3686,6 +3811,7 @@
         scene,
         variants: STATE.multi ? 3 : 1,
       });
+      if (reference) plan.referenceSource = reference.source;
       plan.sceneErr = sceneErr;
       plan.sceneUsed = !!scene;
       plan.scene = scene;
@@ -3740,12 +3866,13 @@
 
       // ---- 写入
       if (!willWrite.length) {
+        const scope = reference ? '当前图片' : '当前主体';
         clearPreview();
         renderPlan(plan, willWrite, false);
         info(panel.querySelector('.lsac-info').innerHTML +
           `<div class="lsac-ok" style="margin-top:6px">${only
-            ? '当前主体的这个比例已经有了，不需要再补'
-            : '当前主体的所列比例都已有框；要重写就切到「覆盖同比例」或「总是追加」'}</div>`, true);
+            ? scope + '的这个比例已经有了，不需要再补'
+            : scope + '的所列比例都已有框；要重写就切到「覆盖同比例」或「总是追加」'}</div>`, true);
         return;
       }
 
@@ -3760,7 +3887,8 @@
           const box = (c.chosen || c).box;
           const area = LS.writeCrop(c.fromName, c.label, box, annot, c.key);
           created.push({ crop: c, region: area });
-          if (area && area.id != null) STATE.subjectBindings.set(String(area.id), {
+          if (reference && area && area.id != null) STATE.referenceGeneratedIds.add(String(area.id));
+          if (!reference && area && area.id != null) STATE.subjectBindings.set(String(area.id), {
             box: { x: num(area.x), y: num(area.y), w: num(area.width), h: num(area.height) },
             subjects: selectedSubjects(annot).map(s => ({ id: s.id, x: s.x, y: s.y, w: s.w, h: s.h }))
           });
@@ -3794,14 +3922,16 @@
       if (strategy === 'fill') STATE.added = created;
       STATE.written = created;
       watchWrittenRows();
+      if (reference) reference.native = nativeReferenceSelection(annot);
       refreshCounts();
       // 写入完把预览叠层收掉：框已经真的在标注里了，再罩一层虚线只会挡住看图。
       // 「新增」这件事由比例格上的橙色角标继续标着，不靠叠层。
       clearPreview();
       // 顺手把新框选中、右侧列表滚过去，省得用户在长列表里自己翻
       focusNewRegions(created);
+      if (reference && STATE.referenceContext) STATE.referenceContext.native = nativeReferenceSelection(annot);
       // 写入后同步已有比例的跳过状态。
-      syncSkippedAfterWrite(plan, willWrite);
+      syncSkippedAfterWrite(plan, created, failed);
     } catch (e) {
       if (auto) return;          // 自动预览失败不弹错，免得打字时一直闪红
       info('<span class="lsac-bad">' + esc(e && e.message || e) + '</span>', false);
@@ -3811,7 +3941,7 @@
   }
 
   /** 写入后按标注的真实状态回填「跳过」标记。 */
-  function syncSkippedAfterWrite(plan, willWrite) {
+  function syncSkippedAfterWrite(plan, created, failed) {
     const an = LS.annotation();
     if (!an || !plan || !Array.isArray(plan.crops)) return;
     const strategy = plan.strategy || STATE.strategy || 'fill';
@@ -3831,7 +3961,7 @@
     if (last && last.plan === plan) {
       const remaining = plan.crops.filter(c => !c.skipped && !c.writeError);
       last.willWrite = remaining;
-      renderPlan(plan, remaining, false, (willWrite || []).length);
+      renderPlan(plan, remaining, false, (created || []).length, failed);
     }
   }
 
@@ -3840,15 +3970,15 @@
     const strategy = plan.strategy || STATE.strategy || 'fill';
     const strategyLabel = (STRATEGIES.find(s => s.key === strategy) || {}).label || '';
     const conf = Math.round(plan.confidence * 100);
+    const reference = plan.reference;
     const willWriteCount = (willWrite || []).length;
 
     // 第一行就是结论：构图方式 · 写入方式 · 这次会写几个
     lines.push(
       `<div class="lsac-line" style="margin-top:0">` +
-      `<span><span class="m">${esc(modeName(plan.mode))}</span>` +
+      `<span><span class="m">${esc(reference ? referenceLabel(plan.referenceSource) : modeName(plan.mode))}</span>` +
       `<span style="color:#6e7781;font-size:10.5px"> · ${esc(strategyLabel)}</span></span>` +
-      `<span style="color:#6e7781;font-size:10.5px">${plan.overridden ? '手动指定' : '置信度 ' + conf + '%'}` +
-      ` · 写 ${willWriteCount} 个</span></div>`
+      `<span style="color:#6e7781;font-size:10.5px">${reference ? '' : (plan.overridden ? '手动指定' : '置信度 ' + conf + '%') + ' · '}写 ${willWriteCount} 个</span></div>`
     );
 
     plan.crops.forEach(c => {
@@ -3861,7 +3991,7 @@
       else { status = ch.recommended ? '推荐' : '可用'; cls = ch.recommended ? 'lsac-ok' : 'lsac-warn'; }
       // 分数条：让「推荐」不再是个黑盒，能看出这个框到底比别的差在哪
       const sc = Math.round(ch.score * 100);
-      const bar = c.skipped || c.writeError ? '' :
+      const bar = reference || c.skipped || c.writeError ? '' :
         `<span class="lsac-sc" title="综合得分：头安全/主体完整度/充盈度/落点/边距">` +
         `<span class="lsac-scb"><i style="width:${sc}%"></i></span>${sc}</span>`;
       lines.push(
@@ -3906,6 +4036,10 @@
         `　占画幅 ${areaPct.toFixed(1)}%</div></div>`
       );
     }
+    if (reference) {
+      more.push(`<div class="lsac-hint">参考中心 ${(reference.x + reference.w / 2).toFixed(1)}% / ${(reference.y + reference.h / 2).toFixed(1)}%` +
+        ` · ${reference.count ? reference.count + ' 个参考框' : '整张图片'}</div>`);
+    }
     const why = plan.reasons.join('；');
     if (why) {
       more.push(`<div style="color:#6e7781;font-size:10.5px">` +
@@ -3930,11 +4064,11 @@
     if (evParts.length) more.push(`<div class="lsac-ev">证据：${esc(evParts.join(' · '))}</div>`);
     if (plan.sceneErr) {
       more.push(`<div class="lsac-warn" style="font-size:10px">${esc(plan.sceneErr)}</div>`);
-    } else if (!plan.sceneUsed && STATE.mode === 'auto') {
+    } else if (!reference && !plan.sceneUsed && STATE.mode === 'auto') {
       more.push(`<div class="lsac-warn" style="font-size:10px">未做画面分析，三分法没有方向依据</div>`);
     }
     if (more.length) {
-      lines.push(`<details class="lsac-more"><summary>判断依据 / 主体</summary>${more.join('')}</details>`);
+      lines.push(`<details class="lsac-more"><summary>${reference ? '参考范围' : '判断依据 / 主体'}</summary>${more.join('')}</details>`);
     }
 
     if (failed && failed.length) {
@@ -4206,7 +4340,26 @@
     const row = target.closest('.lsf-outliner-item');
     if (!row) return;
     const match = outlinerRegionRows().find(entry => entry.row === row);
-    const subject = match && LS.subjectEntries().find(s => s.region === match.region);
+    const entries = LS.subjectEntries();
+    if (!entries.length && match && LS.aspectOf(match.region)) {
+      if (STATE.busy) return;
+      refreshSubjects();
+      const context = referenceContext();
+      const id = String(match.region.id);
+      let ids = new Set(context.source === 'selected' ? context.ids : []);
+      if (event.ctrlKey || event.metaKey || event.shiftKey) {
+        if (ids.has(id)) ids.delete(id); else ids.add(id);
+      } else ids = new Set([id]);
+      STATE.referenceContext = { ...context, ids, source: ids.size ? 'selected' : 'existing', native: nativeReferenceSelection() };
+      STATE.last = null;
+      clearPreview();
+      clearAddedHighlights();
+      refreshCounts();
+      info('<span class="lsac-hint">' + referenceLabel(STATE.referenceContext.source) + '，点缺失比例即可补齐。</span>', true);
+      scheduleAutoPreview(120);
+      return;
+    }
+    const subject = match && entries.find(s => s.region === match.region);
     if (!subject) return;
     refreshSubjects();
     if (event.ctrlKey || event.metaKey || event.shiftKey) {
@@ -4383,7 +4536,7 @@
         .map(r => {
           const res = r.results && r.results[0];
           return [res && res.from_name && (res.from_name.name || res.from_name), r.id, r.x, r.y, r.width, r.height].join(':');
-        }).join('|');
+        }).join('|') + (!LS.subjectEntries(an).length ? '#' + nativeReferenceSelection(an) : '');
       if (sig !== lastSig) {
         lastSig = sig;
         // 手画/删除框之后，撤销栈里的记录可能已经失效，只剪枝不整体清空
