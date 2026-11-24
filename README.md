@@ -3,11 +3,11 @@
 涉及多个场景整合
 
 <!-- id-switching:start -->
-## ID 切换 v3.18.3
+## ID 切换 v3.18.4
 
-[安装 / 更新](https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/insta360-IDswitching.user.js) · [使用说明](docs/id-switching.md) · [视频测试页面（下载后双击打开）](docs/demos/insta360-id-switch.html) · [完整测试包](docs/downloads/insta360-IDswitching-3.18.3.zip)
+[安装 / 更新](https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/insta360-IDswitching.user.js) · [使用说明](docs/id-switching.md) · [视频测试页面（下载后双击打开）](docs/demos/insta360-id-switch.html) · [完整测试包](docs/downloads/insta360-IDswitching-3.18.4.zip)
 
-空格默认播放 / 暂停视频；「更新数值」和「更新任务」分开设置，两个更新默认均未绑定，可在「快捷键设置 → 播放与更新」分别录制。标签同步默认关闭，可在 Regions 的「显示控制」中单独开启并记住设置。旧版混合更新及占用空格的绑定会释放，其它自定义按键保留。
+空格默认播放 / 暂停视频；「更新数值」和「更新任务」分开设置，两个更新默认均未绑定，可在「快捷键设置 → 播放与更新」分别录制。标签同步默认关闭，可在「快捷键设置」里的“辅助功能”区域单独开启并记住设置。旧版混合更新及占用空格的绑定会释放，其它自定义按键保留。
 
 按按钮含义和所在面板区分两种更新，不再依赖 lil-gui 数字编号。同名按钮自动扫描后显示数值、任务分组。保留预设多选与框选、ID 切换、选中显隐、标签同步及原生删框撤回。
 

@@ -2,7 +2,7 @@
 // @name         insta360-IDswitching
 // @namespace    local.ls.toolkit
 // @author       chengzi
-// @version      3.18.3
+// @version      3.18.4
 // @description  空格播放暂停视频，数值更新与任务更新独立改绑；保留预设框选、原生删框撤回、选中显隐与可开关的标签同步。
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
@@ -2585,6 +2585,7 @@
     let result = 'idle';
     let historyPaused = false;
     let enabled = false;
+    let toggleButton = null;
 
     try { enabled = localStorage.getItem(STORAGE_KEY) === 'true'; } catch (e) {}
 
@@ -2596,30 +2597,15 @@
       if (current) current = { ...current, panels: {}, cancelled: new Set(), before: null };
       result = enabled ? 'enabled' : 'off';
       try { localStorage.setItem(STORAGE_KEY, String(enabled)); } catch (e) {}
-      mountToggle();
+      updateToggleButton();
       schedule();
       showToast(enabled ? '标签同步已开启' : '标签同步已关闭', 1500);
       return enabled;
     }
 
-    function mountToggle() {
-      const toolbar = document.getElementById('__selected_visibility_toolbar');
-      if (!toolbar) return;
-      let button = document.getElementById('__angle_inherit_btn');
-      if (!button) {
-        button = document.createElement('button');
-        button.id = '__angle_inherit_btn';
-        button.type = 'button';
-        button.setAttribute('aria-label', '标签同步开关');
-        button.style.cssText = 'height:24px;max-width:100%;padding:0 9px;border:1px solid #c9d9ee;border-radius:4px;cursor:pointer;font:inherit;white-space:nowrap';
-        button.addEventListener('mousedown', event => event.preventDefault());
-        button.addEventListener('click', event => {
-          event.preventDefault(); event.stopPropagation(); setEnabled(!enabled);
-        });
-      }
-      const anchor = document.getElementById('__selected_visibility_btn');
-      if (anchor && anchor.parentElement === toolbar) anchor.insertAdjacentElement('afterend', button);
-      else if (button.parentElement !== toolbar) toolbar.appendChild(button);
+    function updateToggleButton() {
+      const button = toggleButton;
+      if (!button) return;
       const text = `标签同步：${enabled ? '开' : '关'}`;
       const title = enabled ? '自动把上一个连续 ID 的拍摄角度和人物构图同步到当前 ID' : '已关闭标签自动同步';
       if (button.textContent !== text) button.textContent = text;
@@ -2629,6 +2615,23 @@
         button.style.background = enabled ? '#edf5ff' : '#fff';
         button.style.color = enabled ? '#287bd6' : '#64748b';
       }
+    }
+
+    function createToggleButton() {
+      if (!toggleButton) {
+        toggleButton = document.createElement('button');
+        toggleButton.id = '__angle_inherit_btn';
+        toggleButton.type = 'button';
+        toggleButton.className = 'shortcut-angle-toggle';
+        toggleButton.setAttribute('aria-label', '标签同步开关');
+        toggleButton.style.cssText = 'height:34px;min-width:112px;padding:0 12px;border:1px solid #c9d9ee;border-radius:6px;cursor:pointer;font:inherit;white-space:nowrap';
+        toggleButton.addEventListener('mousedown', event => event.preventDefault());
+        toggleButton.addEventListener('click', event => {
+          event.preventDefault(); event.stopPropagation(); setEnabled(!enabled);
+        });
+      }
+      updateToggleButton();
+      return toggleButton;
     }
 
     function pauseForHistory() {
@@ -2881,7 +2884,6 @@
 
     function sync() {
       timer = null;
-      mountToggle();
       const next = selected();
       if (!enabled) {
         generation++;
@@ -2921,7 +2923,6 @@
 
     function start() {
       if (!document.body) return;
-      mountToggle();
       new MutationObserver(schedule).observe(document.body, {
         childList: true, subtree: true, characterData: true,
         attributes: true, attributeFilter: ['class', 'checked', 'disabled'],
@@ -2950,9 +2951,11 @@
     }
 
     window.__ANGLE_INHERIT = {
-      version: '3.16.1',
+      version: '3.16.2',
       enabled: () => enabled,
       setEnabled,
+      createToggleButton,
+      refreshToggleButton: updateToggleButton,
       pauseForHistory,
       config: CFG,
       state() {
@@ -2964,7 +2967,7 @@
     };
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
     else start();
-    console.log('[标签同步] v3.16.1 已加载：默认关闭，可手动开启相邻 ID 标签同步');
+    console.log('[标签同步] v3.16.2 已加载：默认关闭，开关位于快捷键设置');
   })();
 
   // 原生删除：固定本次选择，整组放进一条编辑历史，不依赖列表序号或显隐缓存。
@@ -3446,6 +3449,13 @@
         #${DIALOG_ID} .shortcut-core-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;align-items:start}
         #${DIALOG_ID} .shortcut-section{min-width:0;padding:16px;border:1px solid #e0e8f2;border-radius:9px;background:#fff}
         #${DIALOG_ID} .shortcut-media-section{grid-column:1/-1}
+        #${DIALOG_ID} .shortcut-feature-section{margin-top:16px}
+        #${DIALOG_ID} .shortcut-feature-row{display:flex;align-items:center;justify-content:space-between;gap:16px;min-height:46px}
+        #${DIALOG_ID} .shortcut-feature-description{min-width:0}
+        #${DIALOG_ID} .shortcut-feature-description strong{display:block;color:#49617e;font-size:12px;font-weight:500;line-height:1.5}
+        #${DIALOG_ID} .shortcut-feature-description small{display:block;margin-top:2px;color:#94a3b7;font-size:10px;line-height:1.5}
+        #${DIALOG_ID} .shortcut-angle-toggle{flex:0 0 auto;color:#526780;background:#fff}
+        #${DIALOG_ID} .shortcut-angle-toggle[aria-pressed=true]{border-color:#a8c5e7;background:#edf5ff;color:#287bd6}
         #${DIALOG_ID} .shortcut-section-heading{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:12px}
         #${DIALOG_ID} h3{font-size:13px;font-weight:650;margin:0;color:#3d5573}
         #${DIALOG_ID} .shortcut-section-count{font-size:10px;white-space:nowrap;color:#7e92ac;background:#f0f4f9;padding:2px 6px;border-radius:4px}
@@ -3535,6 +3545,20 @@
         for (const action of actions) rows.appendChild(actionRow(action));
         section.append(heading, rows); core.appendChild(section);
       }
+      const featureSection = document.createElement('section'); featureSection.className = 'shortcut-section shortcut-feature-section';
+      const featureHeading = document.createElement('div'); featureHeading.className = 'shortcut-section-heading';
+      const featureTitle = document.createElement('h3'); featureTitle.textContent = '辅助功能';
+      const featureBadge = document.createElement('span'); featureBadge.className = 'shortcut-section-count'; featureBadge.textContent = '独立开关';
+      featureHeading.append(featureTitle, featureBadge);
+      const featureRow = document.createElement('div'); featureRow.className = 'shortcut-feature-row';
+      const featureDescription = document.createElement('div'); featureDescription.className = 'shortcut-feature-description';
+      const featureName = document.createElement('strong'); featureName.textContent = '标签同步';
+      const featureHelp = document.createElement('small'); featureHelp.textContent = '自动把上一个连续 ID 的拍摄角度和人物构图同步到当前 ID；默认关闭。';
+      featureDescription.append(featureName, featureHelp);
+      const angleButton = window.__ANGLE_INHERIT?.createToggleButton?.();
+      if (angleButton) featureRow.append(featureDescription, angleButton);
+      else featureRow.append(featureDescription);
+      featureSection.append(featureHeading, featureRow);
       const pageSection = document.createElement('details'); pageSection.className = 'shortcut-section shortcut-page-section';
       const pageHeading = document.createElement('summary'); pageHeading.className = 'shortcut-page-summary';
       const pageTitle = document.createElement('span'); pageTitle.className = 'shortcut-page-title'; pageTitle.textContent = '页面按钮与标签';
@@ -3551,7 +3575,7 @@
       scanTools.append(searchInput, rescan, scanStatus);
       pageRows = document.createElement('div'); pageRows.className = 'shortcut-rows shortcut-page-rows';
       pageSection.append(pageHeading, scanHelp, scanTools, pageRows);
-      body.append(core, pageSection);
+      body.append(core, featureSection, pageSection);
       errorNode = document.createElement('div'); errorNode.setAttribute('role', 'alert');
       const footer = document.createElement('div'); footer.className = 'shortcut-footer';
       for (const [text, cls, run] of [
@@ -3577,6 +3601,7 @@
         '默认空格播放 / 暂停；两个更新默认未绑定，可在下方分别录制后保存。';
       previousFocus = document.activeElement;
       dialog.querySelector('.shortcut-page-section').open = false;
+      window.__ANGLE_INHERIT?.refreshToggleButton?.();
       draft = bindings(); searchInput.value = ''; scanPage(); refreshFields(); dialog.showModal();
       dialog.querySelector('.shortcut-body').scrollTop = 0;
     }
@@ -3633,7 +3658,7 @@
 
     load();
     window.__LS_SHORTCUTS = {
-      version: '3.18.3', open: openSettings, scan: scanPage,
+      version: '3.18.4', open: openSettings, scan: scanPage,
       hint: id => bindings()[id] || '',
       state: () => ({ bindings: bindings(), defaults: { ...defaults }, overrides: { ...overrides },
         pageActions: Array.from(pageActions.values(), ({ id, label, page, matches, available }) => ({ id, label, group: page.group, matches, available })) }),
@@ -3642,5 +3667,5 @@
     else start();
   })();
 
-  console.log('[LabelStudio 工具集] v3.18.3 已加载');
+  console.log('[LabelStudio 工具集] v3.18.4 已加载');
 })();
