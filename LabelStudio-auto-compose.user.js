@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Label Studio 自动构图（以主体为中心）
 // @namespace    https://label.insta360.com/
-// @version      2.5.3
+// @version      2.5.6
 // @description  按当前主体识别缺失比例、自动构图，原生标注列表高亮新写入框；支持滚动、手动调整窗口及逐步撤销
-// @author       lead
+// @author       chengzi
 // @match        https://label.insta360.com/*
 // @grant        none
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/LabelStudio-auto-compose.user.js
@@ -723,6 +723,27 @@
     return { side: side, offset: off, conf: headConf || 0 };
   }
 
+  /** 两侧边界、路面和主体位置同时成立，才把汇聚点用于道路构图。 */
+  function guidingPath(scene, subject) {
+    var vp = scene && scene.vanishing, path = vp && vp.path;
+    if (!path || !scene.ok || !(scene.quality >= 0.15) ||
+        !(vp.confidence >= 0.60) || !(vp.strength >= 0.32) ||
+        !(path.confidence >= 0.60) || !(path.continuity >= 0.65) || !(path.surface >= 0.65)) return null;
+    if (![vp.x, vp.y, path.left, path.right, path.bottom].every(Number.isFinite) ||
+        vp.x < 0 || vp.x > 1 || vp.y < 0 || vp.y > 0.58 ||
+        path.left < 0 || path.right > 1 || path.right - path.left < 0.12 ||
+        path.bottom < 0.85 || path.bottom > 1 || path.bottom - vp.y < 0.30) return null;
+    var feet = (subject.y + subject.h) / 100;
+    if (feet <= vp.y + 0.12) return null;
+    var t = clamp((feet - vp.y) / (path.bottom - vp.y), 0, 1);
+    var left = vp.x + (path.left - vp.x) * t;
+    var right = vp.x + (path.right - vp.x) * t;
+    var center = (subject.x + subject.w / 2) / 100;
+    // 容许人在路边；远离道路的另一主体不能借用背景道路。
+    var margin = Math.min(0.06, Math.max(0.025, (right - left) * 0.15));
+    return center >= left - margin && center <= right + margin ? vp : null;
+  }
+
   /* ---------------------------------------------------------- 构图方式判断 */
 
   /**
@@ -755,7 +776,7 @@
     var horizonY = null;
     if (scene && scene.horizon && scene.horizon.strength >= 0.35) horizonY = scene.horizon.y;
     var skyRatio = (scene && scene.sky && scene.sky.ratio) || 0;
-    var vanishing = scene && scene.vanishing && scene.vanishing.confidence >= 0.20 ? scene.vanishing : null;
+    var vanishing = guidingPath(scene, s);
     var features = (scene && Array.isArray(scene.features)) ? scene.features : [];
     var featureScore = features.length ? Math.max.apply(null, features.map(function (f) { return f.score || 0; })) : 0;
     var groundInterest = (scene && isFinite(scene.groundInterest)) ? scene.groundInterest : 0;
@@ -826,11 +847,11 @@
         '，采用低地平线大留白');
     }
 
-    // 4) 道路/路径灭点可靠时，优先保留「灭点 → 主体 → 前景」的引导线。
+    // 4) 已验证连续道路/小径及主体位置，才保留「灭点 → 主体 → 前景」。
     if (vanishing && vanishing.strength >= 0.32 && area <= 0.52) {
       return ret('road', 0.62 + Math.min(0.30, vanishing.confidence * 0.30),
-        '检测到道路灭点 x=' + (vanishing.x * 100).toFixed(0) + '%、y=' + (vanishing.y * 100).toFixed(0) +
-        '%，采用道路引导构图');
+        '检测到连续路面和两侧引导边界，主体位于道路范围内；灭点 x=' +
+        (vanishing.x * 100).toFixed(0) + '%、y=' + (vanishing.y * 100).toFixed(0) + '%，采用道路引导构图');
     }
 
     // 5) 方向证据强（有明确朝向或一侧明显更空）—— 不管主体多小都用三分法
@@ -1863,42 +1884,164 @@
     return 0.55 * (sum / n) + 0.45 * (lower / (n * 0.45));
   }
 
-  function detectVanishingPoint(busy, cols, rows, o) {
+  /** 路面需要两条连续边界夹着可辨认的表面，不能只沿杂乱纹理猜一组射线。 */
+  function roadColorGrid(image, cols, rows) {
+    var colors = new Array(cols * rows);
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        var rgb = [0, 0, 0];
+        for (var dy = 0; dy < 3; dy++) {
+          for (var dx = 0; dx < 3; dx++) {
+            var x = Math.min(image.width - 1, Math.floor((c + (dx + 0.5) / 3) * image.width / cols));
+            var y = Math.min(image.height - 1, Math.floor((r + (dy + 0.5) / 3) * image.height / rows));
+            var p = (y * image.width + x) * 4;
+            for (var k = 0; k < 3; k++) rgb[k] += image.data[p + k] / (255 * 9);
+          }
+        }
+        colors[r * cols + c] = rgb;
+      }
+    }
+    return colors;
+  }
+
+  function pathEvidence(colors, cols, rows, vx, vy, leftEnd, rightEnd, subject) {
+    if (rightEnd - leftEnd < 0.12) return null;
+    function color(x, y) {
+      return colors[clamp(Math.floor(y * rows), 0, rows - 1) * cols + clamp(Math.floor(x * cols), 0, cols - 1)];
+    }
+    function distance(a, b) {
+      return (Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2])) / 3;
+    }
+    function occluded(x, y) {
+      return subject && x * 100 >= subject.x && x * 100 <= subject.x + subject.w &&
+        y * 100 >= subject.y && y * 100 <= subject.y + subject.h;
+    }
+    function isGreen(rgb) {
+      return rgb[1] > rgb[0] * 1.10 && rgb[1] > rgb[2] * 1.06 && rgb[1] - rgb[0] > 0.025;
+    }
+    // 先看前景是否仍是连续草地，避免对树叶、衣服和草坡的每条假射线做完整检查。
+    var foregroundN = 0, foregroundGreen = 0;
+    for (var fy = 0.84; fy <= 0.96; fy += 0.04) {
+      var ft = (fy - vy) / (0.98 - vy);
+      var fl = vx + (leftEnd - vx) * ft, fr = vx + (rightEnd - vx) * ft;
+      for (var fx = 1; fx <= 3; fx++) {
+        var sampleX = fl + (fr - fl) * fx / 4;
+        if (occluded(sampleX, fy)) continue;
+        foregroundN++;
+        if (isGreen(color(sampleX, fy))) foregroundGreen++;
+      }
+    }
+    if (foregroundN >= 4 && foregroundGreen / foregroundN > 0.50) return null;
+    var hits = [0, 0], visible = [0, 0], lowerHits = [0, 0], lowerN = [0, 0];
+    var edgeVectors = [[0, 0, 0], [0, 0, 0]], edgeLengths = [0, 0];
+    var rowsN = 0, smoothN = 0, greenN = 0, samples = 0, lowerGreen = 0, lowerSamples = 0, contrast = 0;
+    for (var step = 0; step < 12; step++) {
+      var y = Math.max(0.40, vy + 0.14) + (0.95 - Math.max(0.40, vy + 0.14)) * step / 11;
+      var t = (y - vy) / (0.98 - vy);
+      var left = vx + (leftEnd - vx) * t, right = vx + (rightEnd - vx) * t;
+      if ((right - left) * cols < 2.5) continue;
+      var surface = [];
+      for (var f = 1; f <= 3; f++) {
+        var x = left + (right - left) * f / 4;
+        if (occluded(x, y)) continue;
+        var rgb = color(x, y);
+        surface.push(rgb); samples++;
+        var green = isGreen(rgb);
+        if (green) greenN++;
+        if (y >= 0.82) { lowerSamples++; if (green) lowerGreen++; }
+      }
+      if (surface.length >= 2) {
+        rowsN++;
+        var spread = 0;
+        for (var a = 0; a < surface.length; a++) {
+          for (var b = a + 1; b < surface.length; b++) spread = Math.max(spread, distance(surface[a], surface[b]));
+        }
+        if (spread <= 0.12) smoothN++;
+      }
+      var delta = Math.max(1 / cols, (right - left) * 0.08);
+      for (var side = 0; side < 2; side++) {
+        var edge = side ? right : left;
+        if (occluded(edge, y)) continue;
+        var edgeContrast = 0, edgeVector = null;
+        // 网格和候选角度有量化误差，只在边界一格以内找相邻内外色差。
+        for (var offset = -1; offset <= 1; offset++) {
+          var ex = edge + offset * 0.75 / cols;
+          if (ex - delta < 0 || ex + delta > 1) continue;
+          var aColor = color(ex - delta, y), bColor = color(ex + delta, y);
+          var edgeValue = distance(aColor, bColor);
+          if (edgeValue > edgeContrast) {
+            edgeContrast = edgeValue;
+            edgeVector = aColor.map(function (v, k) { return (bColor[k] - v) * (side ? -1 : 1); });
+          }
+        }
+        visible[side]++;
+        if (y >= 0.72) lowerN[side]++;
+        if (edgeContrast >= 0.065) {
+          hits[side]++; contrast += edgeContrast;
+          var length = 0;
+          for (var component = 0; component < 3; component++) {
+            edgeVectors[side][component] += edgeVector[component];
+            length += edgeVector[component] * edgeVector[component];
+          }
+          edgeLengths[side] += Math.sqrt(length);
+          if (y >= 0.72) lowerHits[side]++;
+        }
+      }
+    }
+    if (rowsN < 5 || samples < 12 || greenN / samples > 0.50 ||
+        lowerSamples >= 4 && lowerGreen / lowerSamples > 0.50) return null;
+    var continuity = Math.min(hits[0] / Math.max(1, visible[0]), hits[1] / Math.max(1, visible[1]));
+    var lower = Math.min(lowerHits[0] / Math.max(1, lowerN[0]), lowerHits[1] / Math.max(1, lowerN[1]));
+    var surfaceScore = smoothN / rowsN;
+    if (visible[0] < 5 || visible[1] < 5 || continuity < 0.65 || lower < 0.60 || surfaceScore < 0.65) return null;
+    // 路内与路外的材质变化应沿边界保持一致，地砖和草纹的交替明暗不能算路沿。
+    var coherence = Math.min.apply(null, edgeVectors.map(function (v, side) {
+      return Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]) / Math.max(1e-6, edgeLengths[side]);
+    }));
+    if (coherence < 0.65) return null;
+    var confidence = 0.45 * continuity + 0.35 * surfaceScore +
+      0.20 * clamp(contrast / Math.max(1, hits[0] + hits[1]) / 0.14, 0, 1);
+    return { confidence: round3(confidence), continuity: round3(continuity), surface: round3(surfaceScore), coherence: round3(coherence),
+      left: leftEnd, right: rightEnd, bottom: 0.98 };
+  }
+
+  function detectVanishingPoint(busy, image, cols, rows, subject, o) {
     if (cols < 8 || rows < 8) return null;
-    var best = null, second = 0;
-    var vx, vy, i;
+    var best = null, colors = roadColorGrid(image, cols, rows);
+    var leftEnds = [0.03, 0.16, 0.29, 0.40, 0.47], rightEnds = [0.53, 0.60, 0.71, 0.84, 0.97];
+    var vx, vy, i, j;
     for (vy = 0.12; vy <= 0.58; vy += 0.045) {
       for (vx = 0.20; vx <= 0.80; vx += 0.045) {
         var left = [], right = [];
         for (i = 0; i < 5; i++) {
-          left.push(sampleRayScore(busy, cols, rows, vx, vy, [0.03, 0.16, 0.29, 0.40, 0.47][i], 0.98));
-          right.push(sampleRayScore(busy, cols, rows, vx, vy, [0.53, 0.60, 0.71, 0.84, 0.97][i], 0.98));
+          left.push(sampleRayScore(busy, cols, rows, vx, vy, leftEnds[i], 0.98));
+          right.push(sampleRayScore(busy, cols, rows, vx, vy, rightEnds[i], 0.98));
         }
-        left.sort(function (a, b) { return b - a; });
-        right.sort(function (a, b) { return b - a; });
-        var ls = (left[0] + left[1]) / 2;
-        var rs = (right[0] + right[1]) / 2;
-        var balance = Math.min(ls, rs) / (Math.max(ls, rs) + 1e-6);
-        var score = ((ls + rs) / 2) * (0.55 + 0.45 * balance);
-        if (!best || score > best.score) {
-          second = best ? best.score : second;
-          best = { x: vx, y: vy, score: score, left: ls, right: rs, balance: balance };
-        } else if (score > second) {
-          second = score;
+        for (i = 0; i < left.length; i++) {
+          for (j = 0; j < right.length; j++) {
+            var ls = left[i], rs = right[j];
+            var balance = Math.min(ls, rs) / (Math.max(ls, rs) + 1e-6);
+            var score = ((ls + rs) / 2) * (0.55 + 0.45 * balance);
+            if (score < o.roadMinScore || balance < o.roadMinBalance) continue;
+            var path = pathEvidence(colors, cols, rows, vx, vy, leftEnds[i], rightEnds[j], subject);
+            if (!path) continue;
+            var confidence = 0.45 * path.confidence + 0.35 * clamp(score / 0.50, 0, 1) + 0.20 * balance;
+            var rank = confidence * (0.65 + 0.35 * score);
+            if (confidence >= 0.60 && (!best || rank > best.rank)) {
+              best = { x: vx, y: vy, score: score, left: ls, right: rs, balance: balance,
+                confidence: confidence, rank: rank, path: path };
+            }
+          }
         }
       }
     }
-    if (!best || best.score < o.roadMinScore || best.balance < o.roadMinBalance) return null;
-    var confidence = clamp((best.score - o.roadMinScore) / 0.22, 0, 1) *
-      clamp((best.score - second + 0.015) / 0.08, 0, 1) *
-      clamp(best.balance / 0.72, 0, 1);
-    if (confidence < 0.20) return null;
+    if (!best) return null;
     return {
       x: round3(best.x), y: round3(best.y),
       strength: round3(clamp(best.score / 0.60, 0, 1)),
-      confidence: round3(confidence),
+      confidence: round3(best.confidence),
       left: round3(best.left), right: round3(best.right),
-      balance: round3(best.balance)
+      balance: round3(best.balance), path: best.path
     };
   }
 
@@ -2212,7 +2355,7 @@
     };
     out.lead = lead;
     out.horizon = quality > 0.02 ? detectHorizon(lum, cols, rows, o) : null;
-    out.vanishing = quality > 0.04 ? detectVanishingPoint(busy, cols, rows, o) : null;
+    out.vanishing = quality >= 0.15 ? detectVanishingPoint(busy, image, cols, rows, box, o) : null;
     out.features = detectFeatures(busy, lum, cols, rows, box, o);
     out.sky = detectSky(busy, lum, cols, rows, o);
     out.subjectBusy = round3(subjectBusy);
@@ -2275,6 +2418,7 @@
     annotation: null,
     taskId: null,
     previewTimer: 0,
+    previewRevision: 0, // 关闭实时预览时让尚未完成的旧预览失效
     previewLayer: null,
     previewBar: null,
     previewTargets: [],
@@ -2713,7 +2857,14 @@
     panel.querySelector('.lsac-auto').addEventListener('change', (e) => {
       STATE.autoPreview = e.target.checked;
       savePrefs();
-      if (STATE.autoPreview) scheduleAutoPreview(0);
+      if (STATE.autoPreview) {
+        scheduleAutoPreview(0);
+      } else {
+        if (STATE.previewTimer) clearTimeout(STATE.previewTimer);
+        STATE.previewTimer = 0;
+        STATE.previewRevision++;
+        clearPreview();
+      }
     });
 
     panel.querySelector('[data-act="preview"]').addEventListener('click', () => run('preview'));
@@ -3420,7 +3571,7 @@
     STATE.busy = b;
     if (!panel) return;
     panel.querySelectorAll('button, input').forEach(btn => {
-      if (['hide', 'collapse'].includes(btn.dataset.act)) return;
+      if (['hide', 'collapse'].includes(btn.dataset.act) || btn.classList.contains('lsac-auto')) return;
       btn.disabled = b;
     });
   }
@@ -3464,6 +3615,7 @@
     if (!strategy) strategy = 'fill';
     const only = options.only || null;
     const auto = !!options.auto;
+    const previewRevision = STATE.previewRevision;
     setBusy(true);
     try {
       const entries = refreshSubjects();
@@ -3510,6 +3662,10 @@
           sceneErr = '画面分析失败：' + (e && e.message || e);
         }
       }
+
+      // 计算中关闭过实时预览，旧结果不能再把刚清掉的框画回来。
+      // 新发起的手动预览仍可在实时预览关闭时使用。
+      if (isPreview && previewRevision !== STATE.previewRevision) return;
 
       if (LS.annotation() !== annot || taskId() !== originalTaskId) {
         refreshCounts();
@@ -3644,8 +3800,7 @@
       clearPreview();
       // 顺手把新框选中、右侧列表滚过去，省得用户在长列表里自己翻
       focusNewRegions(created);
-      // 刚写进去的比例现在都「有」了：把跳过状态与主按钮文案同步过来，
-      // 否则按钮还挂着「写入 2 个」，一点却什么都不会发生。
+      // 写入后同步已有比例的跳过状态。
       syncSkippedAfterWrite(plan, willWrite);
     } catch (e) {
       if (auto) return;          // 自动预览失败不弹错，免得打字时一直闪红
@@ -3655,25 +3810,22 @@
     }
   }
 
-  /** 写入后按标注的真实状态回填「跳过」标记，并把主按钮文案同步成下次的实际数量 */
+  /** 写入后按标注的真实状态回填「跳过」标记。 */
   function syncSkippedAfterWrite(plan, willWrite) {
     const an = LS.annotation();
     if (!an || !plan || !Array.isArray(plan.crops)) return;
     const strategy = plan.strategy || STATE.strategy || 'fill';
     if (strategy === 'append') return;      // 追加模式本来就每次都写，不存在跳过
-    let pending = 0;
     plan.crops.forEach(c => {
-      if (!c || c.writeError) { pending++; return; }
+      if (!c || c.writeError) return;
       const has = regionsForSubjects(c.fromName, an).length > 0;
       if (strategy === 'fill' && has) {
         c.skipped = true;
         c.skipReason = '';
-      } else if (!c.skipped) {
-        pending++;
       }
     });
     const btn = panel && panel.querySelector('[data-act="apply"]');
-    if (btn) btn.textContent = pending ? `写入 ${pending} 个` : '写入';
+    if (btn) btn.textContent = '写入';
     // 状态列也重画一次（这次「写 N 个」要按剩下的算，不是按刚写掉的算）
     const last = STATE.last;
     if (last && last.plan === plan) {
@@ -3798,7 +3950,7 @@
 
     if (panel) {
       const btn = panel.querySelector('[data-act="apply"]');
-      if (btn) btn.textContent = willWriteCount ? `写入 ${willWriteCount} 个` : '写入';
+      if (btn) btn.textContent = '写入';
     }
   }
 
