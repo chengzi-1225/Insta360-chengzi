@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Label Studio 自动构图（以主体为中心）
 // @namespace    https://label.insta360.com/
-// @version      2.6.2
-// @description  按主体自动构图；无人场景按选中或已有比例框居中补齐，高亮新写入框，支持滚动、调整窗口及撤销
+// @version      2.6.3
+// @description  新框倍率至少3.5x；按主体或无人场景参考框补比例，支持关闭预览、记住偏好、高亮新框、调整窗口及撤销
 // @author       chengzi
 // @match        https://label.insta360.com/*
 // @grant        none
@@ -31,6 +31,7 @@
  *  v2.6.0：无人场景按选中比例框或已有框共同中心补齐，无框时整图居中。
  *  v2.6.1：写入后关闭实时预览，并在新增比例行显示后自动点击、滚动定位。
  *  v2.6.2：写入只暂停当前图的预览，打开页面或切换下一张时恢复写入前预览。
+ *  v2.6.3：常驻关闭/开启预览按钮；预览与写入统一按平台对角线倍率限制到至少3.5x。
  * ===================================================================== */
 
 (function () {
@@ -680,6 +681,13 @@
 
   function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
   function round3(v) { return Math.round(v * 1000) / 1000; }
+  /** 平台倍率 = 原图像素对角线 / 裁切框像素对角线；保留百分比取整的余量。 */
+  function zoomLimits(W, H, ar, minZoom) {
+    if (!Number.isFinite(minZoom) || minZoom <= 0) return { w: 1, h: 1 };
+    var diagonal = Math.hypot(W, H);
+    var height = Math.max(0, diagonal / minZoom - diagonal * 0.00001) / Math.hypot(ar, 1);
+    return { w: height * ar / W, h: height / H };
+  }
   function cropRectToTarget(box, rect) {
     return {
       left: rect.left + rect.width * box.x / 100,
@@ -969,6 +977,10 @@
       maxHc = Math.min(maxHc, spanCap);
       maxWc = Math.min(maxWc, spanCap);
     }
+    // 先限制尺寸再定位和评分，倍率要求下仍尽可能保住头部。
+    var zoomCap = zoomLimits(W, H, ar, opts.minZoom);
+    maxHc = Math.min(maxHc, zoomCap.h);
+    maxWc = Math.min(maxWc, zoomCap.w);
 
     var hc = sh / fill;
     var wc = hc * R;
@@ -1500,7 +1512,8 @@
     var aspects = input.aspects && input.aspects.length ? input.aspects : ASPECTS;
     var crops = aspects.map(function (a) {
       var ratio = ratioOf(a);
-      var width = Math.min(rw * W / 100, rh * H / 100 * ratio);
+      var zoomCap = zoomLimits(W, H, ratio, (input.options || {}).minZoom);
+      var width = Math.min(rw * W / 100, rh * H / 100 * ratio, zoomCap.w * W, zoomCap.h * H * ratio);
       var height = width / ratio;
       return {
         key: a.key, fromName: a.name, label: a.label, ratio: ratio,
@@ -1572,6 +1585,7 @@
           headroom: opts.headroom,
           sideMargin: opts.sideMargin,
           maxSpan: opts.maxSpan,
+          minZoom: opts.minZoom,
           forceAnchorX: cb.anchorX
         }
       });
@@ -2710,7 +2724,7 @@
     border:1px solid #d0d7de;border-radius:5px;padding:3px 6px;color:#0969da}
   .lsac-hint{font-size:10px;color:#6e7781}
   .lsac-row{display:flex;gap:6px;align-items:stretch}
-  .lsac-actions{flex-shrink:0;padding:7px 29px 8px 10px;border-top:1px solid #eaeef2;background:#fff}
+  .lsac-actions{flex-shrink:0;gap:5px;flex-wrap:wrap;padding:7px 29px 8px 10px;border-top:1px solid #eaeef2;background:#fff}
   .lsac-btn{flex:1;border:1px solid #d0d7de;background:#f6f8fa;border-radius:7px;padding:6px 8px;
     font:inherit;font-size:12px;font-weight:600;cursor:pointer;color:#24292f;transition:.12s;white-space:nowrap}
   .lsac-btn:hover{border-color:#8c959f}
@@ -2718,6 +2732,7 @@
   .lsac-btn.primary{background:#1f883d;border-color:#1a7f37;color:#fff}
   .lsac-btn.primary:hover:not(:disabled){background:#1a7f37}
   .lsac-btn.mini{flex:0 0 auto;padding:6px 9px;font-size:11px;font-weight:500;color:#57606a}
+  .lsac-actions .lsac-btn.mini{padding-left:7px;padding-right:7px}
   .lsac-btn.danger{color:#cf222e;border-color:#f0b5b9;background:#fff}
   .lsac-btn.danger:hover{border-color:#cf222e}
   .lsac-info{background:#f6f8fa;border:1px solid #e1e6eb;border-radius:7px;padding:6px 8px;
@@ -2809,6 +2824,7 @@
               title="左键：点红格补这一个 / 其它格切换是否写入；右键只选它"><span class="lb">${a.label}</span><span class="n" data-count="${a.name}"></span></button>`).join('')}
           </div>
           <div class="lsac-hint">绿=已有 · 红=缺（点一下补这一个）· 灰=本次不写</div>
+          <div class="lsac-hint">新框倍率 ≥3.5x</div>
         </div>
         <div class="lsac-sec">
           <span class="lsac-lbl">写入方式</span>
@@ -2834,6 +2850,7 @@
       <div class="lsac-row lsac-actions">
           <button class="lsac-btn primary" data-act="apply" title="回车键写入">写入</button>
           <button class="lsac-btn mini" data-act="preview" title="P 键预览">预览</button>
+          <button class="lsac-btn mini" data-act="toggle-preview">关闭预览</button>
           <button class="lsac-btn mini danger" data-act="undo" title="Z 键撤销，可连续退 5 步">撤销</button>
         </div>
       <div class="lsac-grip" title="拖动右下角调整面板宽高"></div>
@@ -2930,6 +2947,9 @@
     });
 
     panel.querySelector('[data-act="preview"]').addEventListener('click', () => run('preview'));
+    panel.querySelector('[data-act="toggle-preview"]').addEventListener('click', () => {
+      setAutoPreview(!STATE.autoPreviewPreference);
+    });
     panel.querySelector('[data-act="apply"]').addEventListener('click', () => run('apply'));
     panel.querySelector('[data-act="undo"]').addEventListener('click', doUndo);
     panel.querySelector('[data-act="selected-subjects"]').addEventListener('click', () => {
@@ -2983,7 +3003,7 @@
     // ---- 恢复上次状态
     panel.querySelector('.lsac-scene').checked = STATE.scene;
     panel.querySelector('.lsac-multi').checked = STATE.multi;
-    panel.querySelector('.lsac-auto').checked = STATE.autoPreview;
+    syncAutoPreview();
     syncStrategy();
     syncMode();
     syncAspects();
@@ -3184,10 +3204,20 @@
   }
 
   /** 用户切换保存偏好；写入后仅暂停本图，下张图按原偏好恢复。 */
+  function syncAutoPreview() {
+    if (!panel) return;
+    panel.querySelector('.lsac-auto').checked = STATE.autoPreview;
+    const toggle = panel.querySelector('[data-act="toggle-preview"]');
+    toggle.textContent = STATE.autoPreviewPreference ? '关闭预览' : '开启预览';
+    toggle.title = STATE.autoPreviewPreference
+      ? '清除预览并记住关闭，换图和刷新后也不自动预览'
+      : '恢复自动预览；写入后暂停本图，下一张恢复';
+  }
+
   function setAutoPreview(enabled, { remember = true, delay = 0 } = {}) {
     STATE.autoPreview = !!enabled;
     if (remember) STATE.autoPreviewPreference = STATE.autoPreview;
-    if (panel) panel.querySelector('.lsac-auto').checked = STATE.autoPreview;
+    syncAutoPreview();
     savePrefs();
     if (STATE.autoPreview) {
       scheduleAutoPreview(delay);
@@ -3713,7 +3743,7 @@
     STATE.busy = b;
     if (!panel) return;
     panel.querySelectorAll('button, input').forEach(btn => {
-      if (['hide', 'collapse'].includes(btn.dataset.act) || btn.classList.contains('lsac-auto')) return;
+      if (['hide', 'collapse', 'toggle-preview'].includes(btn.dataset.act) || btn.classList.contains('lsac-auto')) return;
       btn.disabled = b;
     });
   }
@@ -3819,7 +3849,7 @@
       // 计算
       const plan = reference ? ComposeCore.planReferenceCrops({
         imageWidth: size.width, imageHeight: size.height,
-        references: reference.references, aspects
+        references: reference.references, aspects, options: { minZoom: 3.5 }
       }) : ComposeCore.planCrops({
         imageWidth: size.width,
         imageHeight: size.height,
@@ -3828,6 +3858,7 @@
         mode: STATE.mode,
         scene,
         variants: STATE.multi ? 3 : 1,
+        options: { minZoom: 3.5 },
       });
       if (reference) plan.referenceSource = reference.source;
       plan.sceneErr = sceneErr;
