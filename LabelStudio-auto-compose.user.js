@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Label Studio 自动构图（以主体为中心）
 // @namespace    https://label.insta360.com/
-// @version      2.6.2
-// @description  按主体自动构图；无人场景按选中或已有比例框居中补齐，高亮新写入框，支持滚动、调整窗口及撤销
+// @version      2.6.4
+// @description  新框倍率最高3.2x；按主体自动构图，无人场景居中补齐，高亮新增框，支持滚动、调整窗口及撤销
 // @author       chengzi
 // @match        https://label.insta360.com/*
 // @grant        none
@@ -31,6 +31,7 @@
  *  v2.6.0：无人场景按选中比例框或已有框共同中心补齐，无框时整图居中。
  *  v2.6.1：写入后关闭实时预览，并在新增比例行显示后自动点击、滚动定位。
  *  v2.6.2：写入只暂停当前图的预览，打开页面或切换下一张时恢复写入前预览。
+ *  v2.6.4：以2.6.2为基础，新框倍率最高3.2x；修复自动点击后反而取消选中。
  * ===================================================================== */
 
 (function () {
@@ -47,6 +48,7 @@
   const RATIO_PANEL_ALIVE = () => !!window.__LS_RATIO_COVERAGE_ACTIVE ||
     !!document.getElementById('__ls_ratio_coverage_panel');
 
+  const MAX_CROP_ZOOM = 3.2;
   const ASPECT_DEFS = [
     { key: '16_9', label: '16:9', name: 'crop_16_9', value: '16:9', ratio: 16 / 9 },
     { key: '9_16', label: '9:16', name: 'crop_9_16', value: '9:16', ratio: 9 / 16 },
@@ -914,6 +916,24 @@
 
   /* -------------------------------------------------------------- 单比例 */
 
+  // 与原生标签一致：原图像素对角线 / 裁切框像素对角线。
+  // 预留百分比三位小数的舍入余量，避免标成3.2x但实际略超上限。
+  function zoomFloor(W, H, ar, maximum) {
+    if (!(Number.isFinite(maximum) && maximum > 0)) return { w: 0, h: 0 };
+    var diagonal = Math.hypot(W, H);
+    var height = (diagonal / maximum + diagonal * 0.00001) / Math.hypot(ar, 1);
+    return { w: height * ar / W, h: height / H };
+  }
+
+  function zoomOf(box, W, H) {
+    return Math.hypot(W, H) / Math.hypot(box.w * W / 100, box.h * H / 100);
+  }
+
+  function zoomUnavailable(box, W, H, maximum) {
+    return Number.isFinite(maximum) && maximum > 0 && zoomOf(box, W, H) > maximum + 1e-10
+      ? '原图范围不足，无法满足倍率 ≤' + maximum + 'x' : '';
+  }
+
   /**
    * 生成某一个比例的裁剪框。
    * @param {{W,H,bbox,aspect,mode,ctx?,opts?}} o
@@ -964,13 +984,14 @@
     // 「把原图框一遍」，没有任何构图行为。这正是「推荐的这么烂」的根因。
     var maxHc = Math.min(1, 1 / R);
     var maxWc = Math.min(1, R);
+    var zoomSize = zoomFloor(W, H, ar, opts.maxZoom);
     var spanCap = opts.maxSpan != null ? opts.maxSpan : MAX_SPAN;   // 最多占画幅的比例
     if (spanCap > 0) {
-      maxHc = Math.min(maxHc, spanCap);
-      maxWc = Math.min(maxWc, spanCap);
+      maxHc = Math.min(maxHc, Math.max(spanCap, zoomSize.h));
+      maxWc = Math.min(maxWc, Math.max(spanCap, zoomSize.w));
     }
 
-    var hc = sh / fill;
+    var hc = Math.max(sh / fill, zoomSize.h);
     var wc = hc * R;
 
     // 主体左右至少留边距
@@ -992,7 +1013,8 @@
         opts.forceX0 == null && (opts.forceAnchorX == null || opts.forceAnchorX === 0.5)) {
       var centeredW = 2 * Math.min(cx, 1 - cx);
       var centeredH = centeredW / R;
-      if (centeredW >= minW && centeredW < wc && centeredH >= sh && centeredH >= needH && centeredH <= maxHc && centeredW <= maxWc) {
+      if (centeredW >= minW && centeredW >= zoomSize.w && centeredH >= zoomSize.h &&
+          centeredW < wc && centeredH >= sh && centeredH >= needH && centeredH <= maxHc && centeredW <= maxWc) {
         wc = centeredW;
         hc = centeredH;
       }
@@ -1094,6 +1116,7 @@
 
     // --- 5. 转百分比 + 像素级比例校正
     var box = fixRatio(x0, y0, wc, hc, W, H, ar);
+    var unavailableReason = zoomUnavailable(box, W, H, opts.maxZoom);
 
     // --- 6. 评分（v4）：每一项都必须有真实变化，否则分数无法区分好坏
     // v3 的旧公式 0.50*headScore + 0.28*fillScore + 0.22*roomScore 有两个致命问题：
@@ -1209,6 +1232,8 @@
       label: aspect.label,
       ratio: ar,
       box: box,
+      zoom: zoomOf(box, W, H),
+      unavailableReason: unavailableReason,
       pixel: {
         width: round3((box.w / 100) * W),
         height: round3((box.h / 100) * H),
@@ -1222,7 +1247,7 @@
       groundScore: round3(groundScore),
       head: { x: round3(hz.x * 100), y: round3(hz.y * 100), w: round3(hz.w * 100), h: round3(hz.h * 100) },
       score: round3(score),
-      recommended: headScore >= 0.9 && score >= 0.68,
+      recommended: !unavailableReason && headScore >= 0.9 && score >= 0.68,
       warnings: warnings,
       cut: { vertical: cutV, horizontal: cutH, head: headCantFit || headScore < 0.9 }
     };
@@ -1479,7 +1504,7 @@
     };
   }
 
-  /** 无主体时沿参考比例框的共同中心补齐，保持比例并限制在参考范围内。 */
+  /** 无主体时沿参考中心补齐，必要时扩大并平移新框以满足倍率上限。 */
   function planReferenceCrops(input) {
     var W = input.imageWidth, H = input.imageHeight;
     if (!(W > 0 && H > 0)) throw new Error('imageWidth / imageHeight 无效');
@@ -1498,20 +1523,26 @@
     var rh = Math.min(refs.length ? median(refs.map(function (r) { return r.h; })) : 100, 2 * Math.min(cy, 100 - cy));
     var reference = { x: cx - rw / 2, y: cy - rh / 2, w: rw, h: rh, count: refs.length };
     var aspects = input.aspects && input.aspects.length ? input.aspects : ASPECTS;
+    var maximum = (input.options || {}).maxZoom;
     var crops = aspects.map(function (a) {
       var ratio = ratioOf(a);
       var width = Math.min(rw * W / 100, rh * H / 100 * ratio);
+      var zoomSize = zoomFloor(W, H, ratio, maximum);
+      width = Math.min(Math.max(width, zoomSize.w * W), W, H * ratio);
       var height = width / ratio;
+      var box = { x: clamp(cx - width / W * 50, 0, 100 - width / W * 100),
+        y: clamp(cy - height / H * 50, 0, 100 - height / H * 100), w: width / W * 100, h: height / H * 100 };
+      if (zoomSize.w > 0) box = fixRatio(box.x / 100, box.y / 100, box.w / 100, box.h / 100, W, H, ratio);
       return {
         key: a.key, fromName: a.name, label: a.label, ratio: ratio,
-        box: { x: cx - width / W * 50, y: cy - height / H * 50, w: width / W * 100, h: height / H * 100 },
-        pixel: { width: width, height: height, aspect: ratio },
+        box: box, zoom: zoomOf(box, W, H), unavailableReason: zoomUnavailable(box, W, H, maximum),
+        pixel: { width: box.w * W / 100, height: box.h * H / 100, aspect: ratio },
         cut: { head: false }, warnings: [], score: 0, recommended: false
       };
     });
     return {
       mode: 'center', modeLabel: '居中', autoMode: 'center', overridden: false, confidence: 0,
-      reasons: [refs.length ? '按参考比例框的共同中心补齐，保持参考范围，不移动旧框。' : '没有主体框和可用比例框，按整张图片居中生成。'],
+      reasons: [refs.length ? '按参考比例框的共同中心补齐，必要时扩大新框满足倍率上限，不移动旧框。' : '没有主体框和可用比例框，按整张图片居中生成。'],
       evidence: {}, facing: 'none', roomSide: 'none', horizonY: null, skyRatio: 0,
       subject: null, reference: reference, image: { width: W, height: H }, sceneOk: false, crops: crops
     };
@@ -1572,6 +1603,7 @@
           headroom: opts.headroom,
           sideMargin: opts.sideMargin,
           maxSpan: opts.maxSpan,
+          maxZoom: opts.maxZoom,
           forceAnchorX: cb.anchorX
         }
       });
@@ -2809,6 +2841,7 @@
               title="左键：点红格补这一个 / 其它格切换是否写入；右键只选它"><span class="lb">${a.label}</span><span class="n" data-count="${a.name}"></span></button>`).join('')}
           </div>
           <div class="lsac-hint">绿=已有 · 红=缺（点一下补这一个）· 灰=本次不写</div>
+          <div class="lsac-hint">新框倍率 ≤${MAX_CROP_ZOOM}x</div>
         </div>
         <div class="lsac-sec">
           <span class="lsac-lbl">写入方式</span>
@@ -3819,7 +3852,7 @@
       // 计算
       const plan = reference ? ComposeCore.planReferenceCrops({
         imageWidth: size.width, imageHeight: size.height,
-        references: reference.references, aspects
+        references: reference.references, aspects, options: { maxZoom: MAX_CROP_ZOOM }
       }) : ComposeCore.planCrops({
         imageWidth: size.width,
         imageHeight: size.height,
@@ -3828,6 +3861,7 @@
         mode: STATE.mode,
         scene,
         variants: STATE.multi ? 3 : 1,
+        options: { maxZoom: MAX_CROP_ZOOM },
       });
       if (reference) plan.referenceSource = reference.source;
       plan.sceneErr = sceneErr;
@@ -3867,6 +3901,9 @@
         if (strategy === 'fill' && dup) {
           c.skipped = true;
           c.skipReason = '';   // 状态列已经写「已有」，这里不再重复一遍
+        } else if ((c.chosen || c).unavailableReason) {
+          c.skipped = true;
+          c.skipReason = (c.chosen || c).unavailableReason;
         } else {
           willWrite.push(c);
         }
@@ -3885,10 +3922,13 @@
       // ---- 写入
       if (!willWrite.length) {
         const scope = reference ? '当前图片' : '当前主体';
+        const blocked = plan.crops.some(c => c.skipped && c.skipReason);
         setAutoPreview(false, { remember: false });
         renderPlan(plan, willWrite, false);
         info(panel.querySelector('.lsac-info').innerHTML +
-          `<div class="lsac-ok" style="margin-top:6px">${only
+          `<div class="${blocked ? 'lsac-warn' : 'lsac-ok'}" style="margin-top:6px">${blocked
+            ? '原图范围不足，无法满足倍率上限，本次未写入'
+            : only
             ? scope + '的这个比例已经有了，不需要再补'
             : scope + '的所列比例都已有框；要重写就切到「覆盖同比例」或「总是追加」'}</div>`, true);
         return;
@@ -4004,7 +4044,8 @@
       const ch = c.chosen || c;
       const px = `${Math.round(ch.pixel.width)}×${Math.round(ch.pixel.height)}`;
       let status, cls;
-      if (c.skipped) { status = '已有'; cls = 'lsac-ok'; }
+      if (c.skipped && c.skipReason) { status = '不可生成'; cls = 'lsac-warn'; }
+      else if (c.skipped) { status = '已有'; cls = 'lsac-ok'; }
       else if (c.writeError) { status = '失败'; cls = 'lsac-bad'; }
       else if (createdCount != null) { status = '✓'; cls = 'lsac-ok'; }
       else { status = ch.recommended ? '推荐' : '可用'; cls = ch.recommended ? 'lsac-ok' : 'lsac-warn'; }
@@ -4015,7 +4056,7 @@
         `<span class="lsac-scb"><i style="width:${sc}%"></i></span>${sc}</span>`;
       lines.push(
         `<div class="lsac-line">` +
-        `<span><b>${c.label}</b> <span style="color:#6e7781">${px}</span>` +
+        `<span><b>${c.label}</b> <span style="color:#6e7781">${px}${c.skipped ? '' : ' · ' + ch.zoom.toFixed(1) + 'x'}</span>` +
         (c.skipped && c.skipReason ? ` <span style="color:#8c959f;font-size:10px">${esc(c.skipReason)}</span>` : '') +
         `</span>` +
         `<span style="display:flex;align-items:center;gap:5px">${bar}<span class="${cls}">${status}</span></span>` +
@@ -4425,33 +4466,40 @@
       attributes: true, attributeFilter: ['class', 'data-key', 'data-region-id', 'data-id'] });
   }
 
-  /**
-   * 写入后把新框选中、右侧列表滚过去 —— 用户不用在长列表里自己翻找刚写的那一个。
-   *
-   * 选中要三路兜底，因为 LSF 各版本暴露的 API 完全不同：
-   *   1) region 自己带 setSelected / selected（老版本）；
-   *   2) regionStore.selectRegion / setSelection（新版本走 store）；
-   *   3) 直接点列表项（最可靠 —— 这就是用户手点的那一下，平台自己会把画布跳过去）。
-   */
+  /** 原生点击会切换选中状态；只在点击后仍未选中时使用模型兜底。 */
+  function ensureWrittenSelected(area, additive) {
+    const an = LS.annotation(), store = an && an.regionStore;
+    if (!an || !area) return false;
+    const selected = () => LS.selectedRegionIds(an).includes(String(area.id)) || area.selected === true;
+    if (selected()) return true;
+    const attempts = [
+      () => { if (additive && typeof an.toggleRegionSelection === 'function') an.toggleRegionSelection(area); },
+      () => { if (typeof area.setSelected === 'function') area.setSelected(true); },
+      () => { if (store && typeof store.selectRegion === 'function') store.selectRegion(area, additive); },
+      () => { if (typeof an.selectArea === 'function') an.selectArea(area); },
+      () => { if (store && typeof store.setSelection === 'function') {
+        const ids = new Set(additive ? LS.selectedRegionIds(an) : []);
+        ids.add(String(area.id));
+        store.setSelection(LS.regionList(an).filter(r => ids.has(String(r.id))));
+      } }
+    ];
+    for (const attempt of attempts) {
+      try { attempt(); if (selected()) return true; } catch (e) { /* 兼容不同原生选中接口 */ }
+    }
+    return false;
+  }
+
+  /** 写入后先点新行并滚动定位，行尚未渲染时先选中模型并等待补点。 */
   function focusNewRegions(created) {
     const createdList = created || [];
     const areas = createdList.map(item => item && item.region).filter(Boolean);
     if (!areas.length) return false;
 
     const an = LS.annotation();
-    const store = an && an.regionStore;
-    let selected = 0;
-    areas.forEach(area => {
-      try {
-        if (typeof area.setSelected === 'function') { area.setSelected(true); selected++; return; }
-        if (store && typeof store.selectRegion === 'function') { store.selectRegion(area, true); selected++; return; }
-        if (an && typeof an.selectArea === 'function') { an.selectArea(area); selected++; return; }
-        if (store && typeof store.setSelection === 'function') { store.setSelection(areas); selected++; return; }
-      } catch (e) { /* 选中失败不影响写入，继续往下兜底 */ }
-    });
-
     STATE.pendingFocus = { annotation: an, taskId: taskId(), ids: new Set(areas.map(r => String(r.id))), clicked: 0 };
     const clicked = focusPendingWrittenRows();
+    let selected = 0;
+    areas.forEach((area, index) => { if (ensureWrittenSelected(area, index > 0)) selected++; });
     return selected > 0 || clicked > 0;
   }
 
@@ -4478,6 +4526,8 @@
             bubbles: true, cancelable: true, view: window,
             ctrlKey: pending.clicked > 0, metaKey: pending.clicked > 0
           }));
+          // 延迟出现的行可能早已由模型选中；原生点击会取消它，必须读回并纠正。
+          ensureWrittenSelected(region, pending.clicked > 0);
           pending.clicked++;
           clicked++;
         } catch (e) { /* 原生选中失败不影响已经写入的框 */ }
