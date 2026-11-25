@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Label Studio 自动构图（以主体为中心）
 // @namespace    https://label.insta360.com/
-// @version      2.7.0
-// @description  点击识别并标注主体，人物优先、多人分别画框、去重可撤销；新比例框最高3.2x，按主体自动构图
+// @version      2.8.0
+// @description  一次点击识别并标注主体，轮廓识别与局部复检补足头手脚；多人去重可撤销，新比例框最高3.2x
 // @author       chengzi
 // @match        https://label.insta360.com/*
 // @grant        none
@@ -34,6 +34,7 @@
  *  v2.6.4：以2.6.2为基础，新框倍率最高3.2x；修复自动点击后反而取消选中。
  *  v2.6.5：批量写入等原生建框选择完成后，再点击首个新增比例，保留全部新增高亮。
  *  v2.7.0：增加点击识别主体，浏览器内检测人物或主要物体，主体框去重、定位和撤销。
+ *  v2.8.0：改用实例轮廓模型，分块补漏和局部复检补足可见头手脚，保留原框边界。
  * ===================================================================== */
 
 (function () {
@@ -553,110 +554,286 @@
   function num(v) { const n = Number(v); return isFinite(n) ? n : 0; }
   function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  // 点击后才加载模型；仅下载程序和权重，图片像素不发送到识别服务。
+  // 模型只下载到浏览器；检测和轮廓复检均在本机执行。
   const SubjectDetector = {
-    model: null,
-    loading: null,
-    scripts: new Map(),
+    model: null, loading: null, scripts: new Map(),
+    asset: {
+      url: 'https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/models/subject-detection/yolo11s-seg-v1.onnx',
+      bytes: 40636304, sha256: '8cfd200432a7235ed52e7b0a5d4d0c4a20d21356ba5527c467bc0c1fa0a91d73'
+    },
+    labels: 'person,bicycle,car,motorcycle,airplane,bus,train,truck,boat,traffic light,fire hydrant,stop sign,parking meter,bench,bird,cat,dog,horse,sheep,cow,elephant,bear,zebra,giraffe,backpack,umbrella,handbag,tie,suitcase,frisbee,skis,snowboard,sports ball,kite,baseball bat,baseball glove,skateboard,surfboard,tennis racket,bottle,wine glass,cup,fork,knife,spoon,bowl,banana,apple,sandwich,orange,broccoli,carrot,hot dog,pizza,donut,cake,chair,couch,potted plant,bed,dining table,toilet,tv,laptop,mouse,remote,keyboard,cell phone,microwave,oven,toaster,sink,refrigerator,book,clock,vase,scissors,teddy bear,hair drier,toothbrush'.split(','),
     async script(urls, ready) {
       if (ready()) return;
       for (const url of urls) {
-        if (!this.scripts.has(url)) {
-          const loading = new Promise((resolve, reject) => {
-            const node = document.createElement('script');
-            node.src = url; node.crossOrigin = 'anonymous'; node.async = true;
-            const done = error => {
-              clearTimeout(timer); node.onload = node.onerror = null;
-              if (error) { node.remove(); reject(error); } else resolve();
-            };
-            const timer = setTimeout(() => done(new Error('识别程序加载超时')), 18000);
-            node.onload = () => done(ready() ? null : new Error('识别程序未就绪'));
-            node.onerror = () => done(new Error('识别程序下载失败'));
-            document.head.append(node);
-          });
-          this.scripts.set(url, loading);
-        }
-        try { await this.scripts.get(url); if (ready()) return; }
-        catch (e) { this.scripts.delete(url); }
+        if (!this.scripts.has(url)) this.scripts.set(url,new Promise((resolve,reject)=>{
+          const node=document.createElement('script');
+          node.src=url;node.crossOrigin='anonymous';node.async=true;
+          const done=error=>{clearTimeout(timer);node.onload=node.onerror=null;if(error){node.remove();reject(error);}else resolve();};
+          const timer=setTimeout(()=>done(new Error('识别程序加载超时')),25000);
+          node.onload=()=>done(ready()?null:new Error('识别程序未就绪'));
+          node.onerror=()=>done(new Error('识别程序下载失败'));
+          document.head.append(node);
+        }));
+        try {await this.scripts.get(url);if(ready())return;}catch(e){this.scripts.delete(url);}
       }
       throw new Error('识别程序加载失败，请检查网络后重试');
     },
-    async getModel(progress = () => {}) {
-      if (this.model) return this.model;
-      if (this.loading) return this.loading;
-      this.loading = (async () => {
-        progress('正在加载识别程序，首次使用稍慢…');
+    async weights() {
+      const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),90000);
+      try {
+        const response=await fetch(this.asset.url,{mode:'cors',credentials:'omit',referrerPolicy:'no-referrer',signal:controller.signal});
+        if(!response.ok)throw new Error('主体模型下载失败（'+response.status+'），请稍后重试');
+        let buffer;
+        if(response.body?.getReader){
+          const reader=response.body.getReader(),chunks=[];let size=0;
+          try {
+            for(;;){const {done,value}=await reader.read();if(done)break;size+=value.byteLength;
+              if(size>this.asset.bytes){await reader.cancel();throw new Error('主体模型大小校验失败');}chunks.push(value);}
+          }finally{reader.releaseLock();}
+          if(size!==this.asset.bytes)throw new Error('主体模型大小校验失败');
+          const data=new Uint8Array(size);let offset=0;for(const chunk of chunks){data.set(chunk,offset);offset+=chunk.byteLength;}buffer=data.buffer;
+        }else buffer=await response.arrayBuffer();
+        if(buffer.byteLength!==this.asset.bytes)throw new Error('主体模型大小校验失败');
+        if(!window.crypto?.subtle)throw new Error('浏览器无法校验模型，请使用 HTTPS 页面');
+        const digest=await window.crypto.subtle.digest('SHA-256',buffer);
+        const hash=Array.from(new Uint8Array(digest),v=>v.toString(16).padStart(2,'0')).join('');
+        if(hash!==this.asset.sha256)throw new Error('主体模型内容校验失败，请刷新后重试');
+        return new Uint8Array(buffer);
+      }finally{clearTimeout(timer);}
+    },
+    async getModel(progress=()=>{}) {
+      if(this.model)return this.model;if(this.loading)return this.loading;
+      this.loading=(async()=>{
+        progress('正在加载轮廓识别程序，首次使用稍慢…');
         await this.script([
-          'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js',
-          'https://unpkg.com/@tensorflow/tfjs@4.22.0/dist/tf.min.js'
-        ], () => !!window.tf?.loadGraphModel);
-        await window.tf.ready();
-        await this.script([
-          'https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js',
-          'https://unpkg.com/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js'
-        ], () => !!window.cocoSsd?.load);
-        progress('正在下载主体识别模型，下载完成后本页可重复使用…');
-        const loading = window.cocoSsd.load({ base: 'mobilenet_v2' });
-        let timer, expired = false;
-        try {
-          this.model = await Promise.race([loading, new Promise((_, reject) => {
-            timer = setTimeout(() => { expired = true; reject(new Error('识别模型下载超时，请检查网络后重试')); }, 90000);
+          'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.min.js',
+          'https://unpkg.com/onnxruntime-web@1.22.0/dist/ort.wasm.min.js'
+        ],()=>!!window.ort?.InferenceSession?.create);
+        const ort=window.ort;
+        if(ort.env.versions?.web && ort.env.versions.web!=='1.22.0')throw new Error('页面已有其他识别运行时，请刷新后重试');
+        ort.env.wasm.numThreads=1;ort.env.wasm.proxy=false;
+        ort.env.wasm.wasmPaths='https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/';
+        progress('正在下载人物轮廓模型，图片仍在浏览器内处理…');
+        const bytes=await this.weights();
+        const creating=ort.InferenceSession.create(bytes,{executionProviders:['wasm'],graphOptimizationLevel:'all'});
+        let timer,expired=false;
+        try{
+          const session=await Promise.race([creating,new Promise((_,reject)=>{
+            timer=setTimeout(()=>{expired=true;reject(new Error('识别程序初始化超时，请检查网络后重试'));},90000);
           })]);
-          return this.model;
-        } finally {
+          if(session.inputNames.length!==1||session.outputNames.length!==2){await session.release?.();throw new Error('主体模型输入输出不匹配');}
+          this.model=session;return session;
+        }finally{
           clearTimeout(timer);
-          if (expired) loading.then(model => model.dispose?.(), () => {});
+          if(expired)creating.then(session=>session.release?.(),()=>{}).catch(()=>{});
         }
       })();
-      try { return await this.loading; }
-      finally { this.loading = null; }
+      try{return await this.loading;}finally{this.loading=null;}
     },
-    async detect(image, progress) {
-      const model = await this.getModel(progress);
-      progress?.('正在识别人物与主要物体…');
-      const pixels = new ImageData(new Uint8ClampedArray(image.data), image.width, image.height);
-      return model.detect(pixels, 30, 0.50);
+    prepare(image,crop) {
+      const width=image.width,height=image.height,n=640,plane=n*n;
+      if(!Number.isInteger(width)||!Number.isInteger(height)||width<=0||height<=0||image.data?.length!==width*height*4||
+        ![crop?.x,crop?.y,crop?.width,crop?.height].every(Number.isFinite)||crop.width<=0||crop.height<=0||crop.x<0||crop.y<0||crop.x+crop.width>width||crop.y+crop.height>height)throw new Error('待识别图片像素或裁剪范围无效');
+      const scale=Math.min(n/crop.width,n/crop.height),dw=Math.max(1,Math.round(crop.width*scale)),dh=Math.max(1,Math.round(crop.height*scale));
+      const left=Math.floor((n-dw)/2),top=Math.floor((n-dh)/2),data=new Float32Array(plane*3);data.fill(114/255);
+      for(let y=0;y<dh;y++){
+        const sy=Math.max(crop.y,Math.min(crop.y+crop.height-1,crop.y+(y+.5)*crop.height/dh-.5));
+        const y0=Math.floor(sy),y1=Math.min(height-1,y0+1),fy=sy-y0;
+        for(let x=0;x<dw;x++){
+          const sx=Math.max(crop.x,Math.min(crop.x+crop.width-1,crop.x+(x+.5)*crop.width/dw-.5));
+          const x0=Math.floor(sx),x1=Math.min(width-1,x0+1),fx=sx-x0,offset=(y+top)*n+x+left;
+          const a=(y0*width+x0)*4,b=(y0*width+x1)*4,c=(y1*width+x0)*4,d=(y1*width+x1)*4;
+          for(let channel=0;channel<3;channel++)data[channel*plane+offset]=((image.data[a+channel]*(1-fx)+image.data[b+channel]*fx)*(1-fy)+(image.data[c+channel]*(1-fx)+image.data[d+channel]*fx)*fy)/255;
+        }
+      }
+      return {data,transform:{crop,inputSize:n,left,top,scaleX:dw/crop.width,scaleY:dh/crop.height}};
     },
-    same(a, b) {
-      const intersection = Math.max(0, Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x)) *
-        Math.max(0, Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y));
-      const aa=a.w*a.h, ba=b.w*b.h, small=Math.min(aa,ba), large=Math.max(aa,ba);
-      return intersection / Math.max(aa+ba-intersection,1e-9) >= 0.75 ||
-        (intersection / Math.max(small,1e-9) >= 0.92 && small / large >= 0.35);
+    iou(a,b) {
+      const [ax,ay,aw,ah]=a.bbox,[bx,by,bw,bh]=b.bbox;
+      const intersection=Math.max(0,Math.min(ax+aw,bx+bw)-Math.max(ax,bx))*Math.max(0,Math.min(ay+ah,by+bh)-Math.max(ay,by));
+      return intersection/Math.max(aw*ah+bw*bh-intersection,1e-9);
     },
-    boxes(predictions, image) {
-      if (!(image.width>0 && image.height>0) || !Array.isArray(predictions)) return [];
-      const clamp = (v,lo,hi) => Math.max(lo,Math.min(hi,v));
-      const valid = predictions.flatMap(p => {
-        if (!Array.isArray(p?.bbox) || p.bbox.length!==4 ||
-            !p.bbox.every(Number.isFinite) || !Number.isFinite(p.score) || p.score<0.60) return [];
-        const [x,y,w,h]=p.bbox;
-        if (!(w>0&&h>0)) return [];
-        const x1=clamp(x,0,image.width), y1=clamp(y,0,image.height);
-        const x2=clamp(x+w,0,image.width), y2=clamp(y+h,0,image.height);
-        if (x2-x1<4 || y2-y1<4 || (x2-x1)*(y2-y1)/(image.width*image.height)<0.0005) return [];
-        const px=(x2-x1)*0.015, py=(y2-y1)*0.02;
-        const left=clamp(x1-px,0,image.width), top=clamp(y1-py,0,image.height);
-        return [{x:left/image.width*100,y:top/image.height*100,
-          w:(clamp(x2+px,0,image.width)-left)/image.width*100,
-          h:(clamp(y2+py,0,image.height)-top)/image.height*100,kind:p.class,score:p.score}];
+    outline(raw,coefficients,proto,checkWeakEdges=false) {
+      // 轮廓只向外补充同一实例的可见头手脚，不把检测框向内收缩。
+      const [x,y,w,h]=raw,mw=proto.dims[3],mh=proto.dims[2],channels=proto.dims[1],plane=mw*mh;
+      const sx=mw/640,sy=mh/640;
+      const l=Math.max(0,Math.floor((x-Math.max(4,w*.14))*sx)),r=Math.min(mw-1,Math.ceil((x+w+Math.max(4,w*.14))*sx));
+      const t=Math.max(0,Math.floor((y-Math.max(4,h*.14))*sy)),b=Math.min(mh-1,Math.ceil((y+h+Math.max(4,h*.14))*sy));
+      if(r<=l||b<=t)return raw;
+      const rw=r-l+1,rh=b-t+1,bits=new Uint8Array(rw*rh),logits=new Float32Array(bits.length),visited=new Uint8Array(bits.length),stack=new Int32Array(bits.length);
+      for(let py=t;py<=b;py++)for(let px=l;px<=r;px++){
+        let logit=0;const index=py*mw+px;
+        for(let c=0;c<channels;c++)logit+=coefficients[c]*proto.data[c*plane+index];
+        const local=(py-t)*rw+px-l;logits[local]=Number.isFinite(logit)?logit:-Infinity;if(Number.isFinite(logit)&&logit>0)bits[local]=1;
+      }
+      let best=null;
+      for(let start=0;start<bits.length;start++){
+        if(!bits[start]||visited[start])continue;
+        let count=0,inside=0,minX=mw,maxX=0,minY=mh,maxY=0,sp=1;const cells=[];stack[0]=start;visited[start]=1;
+        while(sp){const i=stack[--sp],px=i%rw+l,py=Math.floor(i/rw)+t;count++;cells.push(i);
+          if((px+.5)/sx>=x&&(px+.5)/sx<=x+w&&(py+.5)/sy>=y&&(py+.5)/sy<=y+h)inside++;
+          minX=Math.min(minX,px);maxX=Math.max(maxX,px);minY=Math.min(minY,py);maxY=Math.max(maxY,py);
+          for(const next of [i%rw>0?i-1:-1,i%rw<rw-1?i+1:-1,i>=rw?i-rw:-1,i<bits.length-rw?i+rw:-1]){
+            if(next>=0&&bits[next]&&!visited[next]){visited[next]=1;stack[sp++]=next;}
+          }
+        }
+        if(inside>=Math.max(4,w*h*sx*sy*.04)&&count>=8&&(!best||inside>best.inside))best={inside,count,minX,maxX,minY,maxY,cells};
+      }
+      if(!best||best.count/(w*h*sx*sy)>1.8)return raw;
+      let edge={left:best.minX/sx,top:best.minY/sy,right:(best.maxX+1)/sx,bottom:(best.maxY+1)/sy};
+      if(checkWeakEdges){
+        // 高置信身体作为种子，较弱的连续细边只补手指/发梢等；独立弱噪点不会入框。
+        // 弱边界有距离、面积双重限制，避免背景连片时把整块背景当成人。
+        visited.fill(0);let sp=0,count=0,minX=best.minX,maxX=best.maxX,minY=best.minY,maxY=best.maxY;
+        for(const i of best.cells){visited[i]=1;stack[sp++]=i;}
+        const padX=Math.max(4,w*.06),padY=Math.max(4,h*.03);
+        while(sp){
+          const i=stack[--sp],px=i%rw+l,py=Math.floor(i/rw)+t;count++;
+          minX=Math.min(minX,px);maxX=Math.max(maxX,px);minY=Math.min(minY,py);maxY=Math.max(maxY,py);
+          for(const next of [i%rw>0?i-1:-1,i%rw<rw-1?i+1:-1,i>=rw?i-rw:-1,i<bits.length-rw?i+rw:-1]){
+            if(next<0||visited[next]||logits[next]<=-1)continue;
+            const nx=(next%rw+l+.5)/sx,ny=(Math.floor(next/rw)+t+.5)/sy;
+            if(nx<x-padX||nx>x+w+padX||ny<y-padY||ny>y+h+padY)continue;
+            visited[next]=1;stack[sp++]=next;
+          }
+        }
+        if(count<=best.count*2.25){
+          // 每条新增弱边最多补半个蒙版采样格；已可靠的边界保持原位置。
+          if(minX<best.minX)edge.left=Math.max(x-padX-.5/sx,minX/sx-.5/sx);
+          if(maxX>best.maxX)edge.right=Math.min(x+w+padX+.5/sx,(maxX+1)/sx+.5/sx);
+          if(minY<best.minY)edge.top=Math.max(y-padY-.5/sy,minY/sy-.5/sy);
+          if(maxY>best.maxY)edge.bottom=Math.min(y+h+padY+.5/sy,(maxY+1)/sy+.5/sy);
+          edge.left=Math.min(edge.left,best.minX/sx);edge.right=Math.max(edge.right,(best.maxX+1)/sx);
+          edge.top=Math.min(edge.top,best.minY/sy);edge.bottom=Math.max(edge.bottom,(best.maxY+1)/sy);
+        }
+      }
+      const x1=Math.max(0,Math.min(x,edge.left)),y1=Math.max(0,Math.min(y,edge.top));
+      const x2=Math.min(640,Math.max(x+w,edge.right)),y2=Math.min(640,Math.max(y+h,edge.bottom));
+      if((x2-x1)*(y2-y1)>w*h*1.8)return raw;
+      return [x1,y1,x2-x1,y2-y1];
+    },
+    decode(outputs,tr,image) {
+      const values=Object.values(outputs),det=values.find(o=>o?.dims?.length===3),proto=values.find(o=>o?.dims?.length===4);
+      if(!det||!proto||det.dims[0]!==1||det.dims[1]!==116||!Number.isSafeInteger(det.dims[2])||det.dims[2]<1||det.dims[2]>20000||
+        det.data.length!==116*det.dims[2]||proto.dims[0]!==1||proto.dims[1]!==32||proto.dims[2]!==160||proto.dims[3]!==160||proto.data.length!==32*160*160)throw new Error('主体模型输出张量不匹配');
+      const count=det.dims[2],candidates=[];
+      for(let i=0;i<count;i++){
+        let cls=-1,score=.34;
+        for(let c=0;c<80;c++){const value=det.data[(4+c)*count+i];if(Number.isFinite(value)&&value>score&&value<=1){score=value;cls=c;}}
+        if(cls<0)continue;
+        const cx=det.data[i],cy=det.data[count+i],w=det.data[2*count+i],h=det.data[3*count+i];
+        if(![cx,cy,w,h].every(Number.isFinite)||w<=0||h<=0)continue;
+        candidates.push({class:this.labels[cls],score,bbox:[cx-w/2,cy-h/2,w,h],index:i});
+      }
+      candidates.sort((a,b)=>b.score-a.score);
+      const distinct=[];
+      for(const p of candidates){if(!distinct.some(q=>p.class===q.class&&this.iou(p,q)>.55))distinct.push(p);if(distinct.length>=50)break;}
+      const results=[];
+      for(const candidate of distinct){
+        const original=candidate.bbox,coefficients=Array.from({length:32},(_,c)=>det.data[(84+c)*count+candidate.index]);
+        const raw=coefficients.every(Number.isFinite)?this.outline(original,coefficients,proto,candidate.class==='person'):original;
+        const crop=tr.crop;
+        const x1=Math.max(0,(raw[0]-tr.left)/tr.scaleX),y1=Math.max(0,(raw[1]-tr.top)/tr.scaleY);
+        const x2=Math.min(crop.width,(raw[0]+raw[2]-tr.left)/tr.scaleX),y2=Math.min(crop.height,(raw[1]+raw[3]-tr.top)/tr.scaleY);
+        // 只过滤内部裁剪边缘截断的人；整图边缘的可见人物仍能标注。
+        const tolerance=2/Math.min(tr.scaleX,tr.scaleY);
+        if((crop.x>0&&x1<=tolerance)||(crop.y>0&&y1<=tolerance)||
+          (crop.x+crop.width<image.width&&x2>=crop.width-tolerance)||(crop.y+crop.height<image.height&&y2>=crop.height-tolerance))continue;
+        if(x2<=x1||y2<=y1)continue;
+        results.push({class:candidate.class,score:candidate.score,bbox:[crop.x+x1,crop.y+y1,x2-x1,y2-y1],outlineUsed:raw!==original});
+      }
+      return results;
+    },
+    async infer(image,crop,model) {
+      const input=this.prepare(image,crop),ort=window.ort;
+      let tensor,outputs;
+      try {
+        tensor=new ort.Tensor('float32',input.data,[1,3,640,640]);
+        outputs=await model.run({[model.inputNames[0]]:tensor});
+        return this.decode(outputs,input.transform,image);
+      }finally{tensor?.dispose?.();if(outputs)for(const value of Object.values(outputs))value.dispose?.();}
+    },
+    scanCrops(image) {
+      const {width,height}=image,crops=[{x:0,y:0,width,height}],wide=width>height;
+      const length=wide?width:height,short=wide?height:width;
+      if(length/short<1.55)return crops;
+      const span=Math.min(length,Math.round(short*1.25)),count=Math.min(5,Math.max(2,Math.ceil((length-span)/(span*.65))+1));
+      for(let i=0;i<count;i++){
+        const offset=Math.round((length-span)*i/(count-1));
+        crops.push(wide?{x:offset,y:0,width:span,height}:{x:0,y:offset,width,height:span});
+      }
+      return crops;
+    },
+    refine(reference,predictions,image) {
+      const [x,y,w,h]=reference.bbox;
+      const matches=predictions.filter(p=>p.class===reference.class&&Number.isFinite(p.score)&&p.score>=Math.max(.42,reference.score-.3)&&p.bbox.every(Number.isFinite)).map(p=>{
+        const [px,py,pw,ph]=p.bbox,area=pw*ph/(w*h),distance=Math.hypot((px+pw/2-x-w/2)/w,(py+ph/2-y-h/2)/h);
+        return {p,area,distance,overlap:this.iou(reference,p)};
+      }).filter(p=>p.area>=.45&&p.area<=1.9&&p.distance<=.4&&p.overlap>=.4).sort((a,b)=>b.overlap-a.overlap||b.p.score-a.p.score);
+      if(!matches.length||(matches[1]&&matches[0].overlap-matches[1].overlap<.08))return reference;
+      const p=matches[0].p,[px,py,pw,ph]=p.bbox;
+      const l=Math.max(0,Math.min(x,px)),t=Math.max(0,Math.min(y,py)),r=Math.min(image.width,Math.max(x+w,px+pw)),b=Math.min(image.height,Math.max(y+h,py+ph));
+      if((r-l)*(b-t)>w*h*1.8||x-l>w*.4||r-x-w>w*.4||y-t>h*.4||b-y-h>h*.4)return reference;
+      return {...reference,bbox:[l,t,r-l,b-t],score:Math.max(reference.score,p.score),refined:true,outlineUsed:reference.outlineUsed||p.outlineUsed};
+    },
+    merge(predictions,image) {
+      const result=[];
+      for(const p of predictions.filter(p=>p?.bbox?.length===4&&p.bbox.every(Number.isFinite)&&p.bbox[2]>0&&p.bbox[3]>0).sort((a,b)=>b.score-a.score)){
+        const index=result.findIndex(q=>q.class===p.class&&this.iou(q,p)>=.55);
+        if(index<0)result.push(p);else result[index]=this.refine(result[index],[p],image);
+      }
+      return result;
+    },
+    async detect(image,progress=()=>{},guard=()=>{}) {
+      guard();const model=await this.getModel(progress);guard();
+      const crops=this.scanCrops(image),predictions=[];
+      for(let i=0;i<crops.length;i++){
+        guard();progress('正在识别主体 '+(i+1)+'/'+crops.length+'，随后复检头部与手脚…');
+        try{predictions.push(...await this.infer(image,crops[i],model));}
+        catch(e){guard();if(!i)throw e;}
+        guard();await sleep(0);
+      }
+      let merged=this.merge(predictions,image);
+      const people=merged.filter(p=>p.class==='person'&&p.score>=.45).sort((a,b)=>b.bbox[2]*b.bbox[3]-a.bbox[2]*a.bbox[3]).slice(0,12);
+      for(let i=0;i<people.length;i++){
+        const p=people[i],[x,y,w,h]=p.bbox,padX=Math.max(w*.65,image.width*.025),padY=Math.max(h*.35,image.height*.025);
+        const l=Math.max(0,Math.floor(x-padX)),t=Math.max(0,Math.floor(y-padY)),r=Math.min(image.width,Math.ceil(x+w+padX)),b=Math.min(image.height,Math.ceil(y+h+padY));
+        guard();progress('正在复检人物 '+(i+1)+'/'+people.length+'，检查头部、手和脚…');
+        try{
+          const local=await this.infer(image,{x:l,y:t,width:r-l,height:b-t},model);guard();
+          const index=merged.indexOf(p);if(index>=0)merged[index]=this.refine(p,local,image);
+        }catch(e){guard();/* 保留已经可靠检出的人，不因局部复检失败丢掉主体。 */}
+        await sleep(0);guard();
+      }
+      return this.merge(merged,image);
+    },
+    same(a,b) {
+      const intersection=Math.max(0,Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x))*Math.max(0,Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y));
+      const aa=a.w*a.h,ba=b.w*b.h,small=Math.min(aa,ba),large=Math.max(aa,ba);
+      return intersection/Math.max(aa+ba-intersection,1e-9)>=.75||(intersection/Math.max(small,1e-9)>=.92&&small/large>=.35);
+    },
+    boxes(predictions,image) {
+      if(!(image.width>0&&image.height>0)||!Array.isArray(predictions))return [];
+      const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
+      const valid=predictions.flatMap(p=>{
+        if(!Array.isArray(p?.bbox)||p.bbox.length!==4||!p.bbox.every(Number.isFinite)||!Number.isFinite(p.score)||p.score>1||p.score<(p.class==='person'?.45:.5)||typeof p.class!=='string')return [];
+        const [x,y,w,h]=p.bbox;if(!(w>0&&h>0))return [];
+        const x1=clamp(x,0,image.width),y1=clamp(y,0,image.height),x2=clamp(x+w,0,image.width),y2=clamp(y+h,0,image.height);
+        if(x2-x1<4||y2-y1<4||(x2-x1)*(y2-y1)/(image.width*image.height)<.0003)return [];
+        const left=clamp(x1-1,0,image.width),top=clamp(y1-1,0,image.height);
+        return [{x:left/image.width*100,y:top/image.height*100,w:(clamp(x2+1,0,image.width)-left)/image.width*100,h:(clamp(y2+1,0,image.height)-top)/image.height*100,kind:p.class,score:p.score}];
       });
       const people=valid.filter(b=>b.kind==='person').sort((a,b)=>b.score-a.score);
-      if (people.length) {
-        const result=[];
-        for (const box of people) if (!result.some(old=>this.same(old,box))) result.push(box);
-        return result.slice(0,20).sort((a,b)=>a.x-b.x||a.y-b.y);
-      }
-      return valid.filter(b=>b.score>=0.75).sort((a,b)=>{
-        const rank=r=>r.score*Math.sqrt(r.w*r.h)*(1-0.25*Math.hypot((r.x+r.w/2-50)/50,(r.y+r.h/2-50)/50));
-        return rank(b)-rank(a);
+      if(people.length){const result=[];for(const box of people)if(!result.some(old=>this.same(old,box)))result.push(box);return result.slice(0,20).sort((a,b)=>a.x-b.x||a.y-b.y);}
+      return valid.filter(b=>b.score>=.75).sort((a,b)=>{
+        const rank=r=>r.score*Math.sqrt(r.w*r.h)*(1-.25*Math.hypot((r.x+r.w/2-50)/50,(r.y+r.h/2-50)/50));return rank(b)-rank(a);
       }).slice(0,1);
     }
   };
 
   async function detectionImage() {
     try {
-      const pixels = await LS.imageData(1280);
+      const pixels = await LS.imageData(2048);
       if (pixels?.data && pixels.width>0 && pixels.height>0) return pixels;
     } catch (e) { /* 重新以跨域像素读取方式加载当前原图 */ }
     const src=LS.imageSrc();
@@ -665,7 +842,7 @@
     try {
       const image=await Promise.race([loadImage(src),new Promise(resolve=>{timer=setTimeout(()=>resolve(null),25000);})]);
       if (!image) throw new Error('原图加载失败，请检查图片访问权限');
-      const scale=Math.min(1,1280/Math.max(image.naturalWidth,image.naturalHeight));
+      const scale=Math.min(1,2048/Math.max(image.naturalWidth,image.naturalHeight));
       const canvas=document.createElement('canvas');
       canvas.width=Math.max(1,Math.round(image.naturalWidth*scale));
       canvas.height=Math.max(1,Math.round(image.naturalHeight*scale));
@@ -696,12 +873,17 @@
           LS.imageSize().width===size.width&&LS.imageSize().height===size.height;}
         catch(e){return false;}
       };
+      const guard=()=>{
+        if(!current())throw new Error('图片或标注已切换，本次识别已停止');
+        if(an.readonly===true)throw new Error('当前任务已变为只读，未写入主体');
+        if(subjectSignature(an)!==signature)throw new Error('主体框已发生变化，请重新识别');
+      };
       info('<span class="lsac-hint">正在读取当前原图…</span>',true);
       const image=await detectionImage();
       if (!current()) throw new Error('图片或标注已切换，本次识别已停止');
       const predictions=await SubjectDetector.detect(image,text=>{
         if (current()) info('<span class="lsac-hint">'+esc(text)+'</span>',true);
-      });
+      },guard);
       if (!current()) throw new Error('图片或标注已切换，本次识别已停止');
       if (an.readonly===true) throw new Error('当前任务已变为只读，未写入主体');
       if (subjectSignature(an)!==signature) throw new Error('主体框已发生变化，请重新识别');
@@ -3003,7 +3185,7 @@
       <div class="lsac-scroll">
       <div class="lsac-body" id="__ls_auto_compose_body" tabindex="0" aria-label="构图设置与结果">
         <div class="lsac-sec">
-          <span class="lsac-lbl"><span>构图主体 <span class="lsac-subject-count"></span></span><button class="lsac-detect" data-act="detect-subjects" title="在浏览器内识别人；没人时识别主要物体。首次需要下载模型，结果可撤销">识别主体</button></span>
+          <span class="lsac-lbl"><span>构图主体 <span class="lsac-subject-count"></span></span><button class="lsac-detect" data-act="detect-subjects" title="识别后直接标注主体；人物优先，局部复检头手脚。首次需下载模型，可撤销">识别主体</button></span>
           <div class="lsac-subjects"></div>
           <div class="lsac-subject-actions">
             <button data-act="selected-subjects">用画布选中的主体</button>
