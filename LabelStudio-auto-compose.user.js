@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Label Studio 自动构图（以主体为中心）
 // @namespace    https://label.insta360.com/
-// @version      2.6.0
+// @version      2.6.1
 // @description  按主体自动构图；无人场景按选中或已有比例框居中补齐，高亮新写入框，支持滚动、调整窗口及撤销
 // @author       chengzi
 // @match        https://label.insta360.com/*
@@ -29,6 +29,7 @@
  *  自动构图统一比较标准/更紧/更松候选，优先保住完整主体并兼顾景物。
  *  v2.5.3：按当前主体检查缺失，原生列表精确高亮新写入框，多主体互不混算。
  *  v2.6.0：无人场景按选中比例框或已有框共同中心补齐，无框时整图居中。
+ *  v2.6.1：写入后关闭实时预览，并在新增比例行显示后自动点击、滚动定位。
  * ===================================================================== */
 
 (function () {
@@ -2467,6 +2468,8 @@
     written: [],      // 最近一次成功写入的框，用于原生标注列表高亮
     writtenObserver: null,
     writtenRaf: 0,
+    pendingFocus: null, // 平台异步显示新比例行后再点击，同一批只点一次
+    focusingWritten: false,
     subjectBindings: new Map(), // 本任务内自动生成框与主体的关联；切换主体时保留
     addedSignature: '',
     completeness: null, // 比例齐全度快照 {byName,byKey,missing,total,...}
@@ -2916,16 +2919,7 @@
 
     // ---- 实时预览开关
     panel.querySelector('.lsac-auto').addEventListener('change', (e) => {
-      STATE.autoPreview = e.target.checked;
-      savePrefs();
-      if (STATE.autoPreview) {
-        scheduleAutoPreview(0);
-      } else {
-        if (STATE.previewTimer) clearTimeout(STATE.previewTimer);
-        STATE.previewTimer = 0;
-        STATE.previewRevision++;
-        clearPreview();
-      }
+      setAutoPreview(e.target.checked);
     });
 
     panel.querySelector('[data-act="preview"]').addEventListener('click', () => run('preview'));
@@ -3180,6 +3174,21 @@
     if (!panel) return;
     const cur = STATE.replace ? 'replace' : STATE.strategy;
     panel.querySelectorAll('[data-strategy]').forEach(b => b.classList.toggle('on', b.dataset.strategy === cur));
+  }
+
+  /** 手动切换与写入后关闭走同一路径，同时同步开关、保存偏好并取消旧预览。 */
+  function setAutoPreview(enabled) {
+    STATE.autoPreview = !!enabled;
+    if (panel) panel.querySelector('.lsac-auto').checked = STATE.autoPreview;
+    savePrefs();
+    if (STATE.autoPreview) {
+      scheduleAutoPreview(0);
+    } else {
+      if (STATE.previewTimer) clearTimeout(STATE.previewTimer);
+      STATE.previewTimer = 0;
+      STATE.previewRevision++;
+      clearPreview();
+    }
   }
 
   /** 改任何设置后自动重算预览（关掉实时预览就什么都不做） */
@@ -3867,7 +3876,7 @@
       // ---- 写入
       if (!willWrite.length) {
         const scope = reference ? '当前图片' : '当前主体';
-        clearPreview();
+        setAutoPreview(false);
         renderPlan(plan, willWrite, false);
         info(panel.querySelector('.lsac-info').innerHTML +
           `<div class="lsac-ok" style="margin-top:6px">${only
@@ -3909,6 +3918,7 @@
       });
 
       if (created.length || removed.length) {
+        setAutoPreview(false);
         const rec = { created, removed, annotation: annot, taskId: originalTaskId };
         STATE.undo = rec;
         STATE.undoStack.push(rec);
@@ -4329,16 +4339,19 @@
 
   function clearWrittenHighlights() {
     STATE.written = [];
+    STATE.pendingFocus = null;
     if (STATE.writtenObserver) { STATE.writtenObserver.disconnect(); STATE.writtenObserver = null; }
     if (STATE.writtenRaf) { cancelAnimationFrame(STATE.writtenRaf); STATE.writtenRaf = 0; }
     document.querySelectorAll('.lsac-written-row').forEach(row => row.classList.remove('lsac-written-row'));
   }
 
   function selectOutlinerSubject(event) {
+    if (STATE.focusingWritten) return;
     const target = event.target;
     if (!target || !target.closest || target.closest('button,.lsf-outliner-item__controls,.lsf-panel-tabs__ghost-tab')) return;
     const row = target.closest('.lsf-outliner-item');
     if (!row) return;
+    STATE.pendingFocus = null; // 用户主动选择后，迟到的新行不能再抢回选中
     const match = outlinerRegionRows().find(entry => entry.row === row);
     const entries = LS.subjectEntries();
     if (!entries.length && match && LS.aspectOf(match.region)) {
@@ -4381,10 +4394,12 @@
     STATE.written = STATE.written.filter(({ region }) => alive.has(region));
     if (!STATE.written.length) { clearWrittenHighlights(); return; }
     const written = new Set(STATE.written.map(({ region }) => region));
-    outlinerRegionRows().forEach(({ row, region }) => {
+    const rows = outlinerRegionRows();
+    rows.forEach(({ row, region }) => {
       const highlight = written.has(region);
       if (row.classList.contains('lsac-written-row') !== highlight) row.classList.toggle('lsac-written-row', highlight);
     });
+    focusPendingWrittenRows(rows);
   }
 
   /** 平台通常晚一帧才渲染新行；列表重绘、排序后重新绑定，不反复点击用户的选择。 */
@@ -4426,21 +4441,45 @@
       } catch (e) { /* 选中失败不影响写入，继续往下兜底 */ }
     });
 
-    const wanted = new Set(areas);
-    const rows = outlinerRegionRows().filter(({ region }) => wanted.has(region)).map(({ row }) => row);
+    STATE.pendingFocus = { annotation: an, taskId: taskId(), ids: new Set(areas.map(r => String(r.id))), clicked: 0 };
+    const clicked = focusPendingWrittenRows();
+    return selected > 0 || clicked > 0;
+  }
 
-    rows.forEach((row, index) => {
-      try { row.scrollIntoView({ block: 'nearest' }); } catch (e) { /* ignore */ }
-      // 第一行让平台自己响应普通点击（这会顺带把画布跳到该框）；其余带修饰键做多选
-      try {
-        row.dispatchEvent(new MouseEvent('click', {
-          bubbles: true, cancelable: true, view: window,
-          ctrlKey: index > 0, metaKey: index > 0
-        }));
-      } catch (e) { /* ignore */ }
-    });
-
-    return selected > 0 || rows.length > 0;
+  /** 新行常在写入返回后才渲染；由列表观察器补点，重绘时不重复点击。 */
+  function focusPendingWrittenRows(rows = outlinerRegionRows()) {
+    const pending = STATE.pendingFocus;
+    if (!pending) return 0;
+    if (pending.annotation !== LS.annotation() || pending.taskId !== taskId()) {
+      STATE.pendingFocus = null;
+      return 0;
+    }
+    const alive = new Set(LS.regionList().map(r => String(r.id)));
+    pending.ids.forEach(id => { if (!alive.has(id)) pending.ids.delete(id); });
+    let clicked = 0;
+    STATE.focusingWritten = true;
+    try {
+      rows.forEach(({ row, region }) => {
+        const id = region && String(region.id);
+        if (!pending.ids.has(id) || !row.isConnected) return;
+        pending.ids.delete(id);
+        try { row.scrollIntoView({ block: 'nearest' }); } catch (e) { /* ignore */ }
+        try {
+          row.dispatchEvent(new MouseEvent('click', {
+            bubbles: true, cancelable: true, view: window,
+            ctrlKey: pending.clicked > 0, metaKey: pending.clicked > 0
+          }));
+          pending.clicked++;
+          clicked++;
+        } catch (e) { /* 原生选中失败不影响已经写入的框 */ }
+      });
+    } finally {
+      STATE.focusingWritten = false;
+      // 程序点击仅用于定位，不能把刚写出的窄框变成下一次构图的参考。
+      if (STATE.referenceContext) STATE.referenceContext.native = nativeReferenceSelection();
+    }
+    if (!pending.ids.size) STATE.pendingFocus = null;
+    return clicked;
   }
 
   function doUndo() {
