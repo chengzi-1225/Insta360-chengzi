@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Label Studio 自动构图（以主体为中心）
 // @namespace    https://label.insta360.com/
-// @version      2.6.1
+// @version      2.6.2
 // @description  按主体自动构图；无人场景按选中或已有比例框居中补齐，高亮新写入框，支持滚动、调整窗口及撤销
 // @author       chengzi
 // @match        https://label.insta360.com/*
@@ -30,6 +30,7 @@
  *  v2.5.3：按当前主体检查缺失，原生列表精确高亮新写入框，多主体互不混算。
  *  v2.6.0：无人场景按选中比例框或已有框共同中心补齐，无框时整图居中。
  *  v2.6.1：写入后关闭实时预览，并在新增比例行显示后自动点击、滚动定位。
+ *  v2.6.2：写入只暂停当前图的预览，打开页面或切换下一张时恢复写入前预览。
  * ===================================================================== */
 
 (function () {
@@ -2459,6 +2460,7 @@
     scene: true,      // 是否用画面像素分析（关掉=纯几何，更快但没有方向依据）
     multi: false,     // 多构图：同一比例给多个方案
     autoPreview: true,// 改任何设置后自动重算预览
+    autoPreviewPreference: true, // 用户的开关偏好；本图写入后的暂停不保存成永久关闭
     pick: {},         // 每个比例当前选中的方案序号 {crop_16_9: 0, ...}
     pos: null,        // 面板位置（拖动后记住）
     last: null,       // 当前预览或应用的构图计划
@@ -2517,7 +2519,11 @@
       }
       if (typeof p.scene === 'boolean') STATE.scene = p.scene;
       if (typeof p.multi === 'boolean') STATE.multi = p.multi;
-      if (typeof p.autoPreview === 'boolean') STATE.autoPreview = p.autoPreview;
+      // 旧版 autoPreview=false 可能是写入后自动保存的，升级时恢复写入前预览。
+      if (typeof p.autoPreviewPreference === 'boolean') {
+        STATE.autoPreviewPreference = p.autoPreviewPreference;
+        STATE.autoPreview = p.autoPreviewPreference;
+      }
       // 旧版 scale 不再恢复，避免升级后仍按比例放大成长面板。
       if (p.panelSize && Number.isFinite(+p.panelSize.width) && Number.isFinite(+p.panelSize.height) &&
         +p.panelSize.width > 0 && +p.panelSize.height > 0) {
@@ -2549,7 +2555,8 @@
         replace: STATE.replace,
         scene: STATE.scene,
         multi: STATE.multi,
-        autoPreview: STATE.autoPreview,
+        autoPreview: STATE.autoPreviewPreference,
+        autoPreviewPreference: STATE.autoPreviewPreference,
         panelSize: STATE.panelSize,
         collapsed: STATE.collapsed,
         pos: STATE.pos,
@@ -3176,13 +3183,14 @@
     panel.querySelectorAll('[data-strategy]').forEach(b => b.classList.toggle('on', b.dataset.strategy === cur));
   }
 
-  /** 手动切换与写入后关闭走同一路径，同时同步开关、保存偏好并取消旧预览。 */
-  function setAutoPreview(enabled) {
+  /** 用户切换保存偏好；写入后仅暂停本图，下张图按原偏好恢复。 */
+  function setAutoPreview(enabled, { remember = true, delay = 0 } = {}) {
     STATE.autoPreview = !!enabled;
+    if (remember) STATE.autoPreviewPreference = STATE.autoPreview;
     if (panel) panel.querySelector('.lsac-auto').checked = STATE.autoPreview;
     savePrefs();
     if (STATE.autoPreview) {
-      scheduleAutoPreview(0);
+      scheduleAutoPreview(delay);
     } else {
       if (STATE.previewTimer) clearTimeout(STATE.previewTimer);
       STATE.previewTimer = 0;
@@ -3336,6 +3344,7 @@
       resetReference();
       STATE.pick = {};
       clearPreview();
+      setAutoPreview(STATE.autoPreviewPreference, { remember: false, delay: 500 });
     }
     const entries = LS.subjectEntries(an);
     const signature = subjectSignature(an);
@@ -3876,7 +3885,7 @@
       // ---- 写入
       if (!willWrite.length) {
         const scope = reference ? '当前图片' : '当前主体';
-        setAutoPreview(false);
+        setAutoPreview(false, { remember: false });
         renderPlan(plan, willWrite, false);
         info(panel.querySelector('.lsac-info').innerHTML +
           `<div class="lsac-ok" style="margin-top:6px">${only
@@ -3918,7 +3927,7 @@
       });
 
       if (created.length || removed.length) {
-        setAutoPreview(false);
+        setAutoPreview(false, { remember: false });
         const rec = { created, removed, annotation: annot, taskId: originalTaskId };
         STATE.undo = rec;
         STATE.undoStack.push(rec);
