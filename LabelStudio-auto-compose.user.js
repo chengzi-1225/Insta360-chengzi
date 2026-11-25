@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Label Studio 自动构图（以主体为中心）
 // @namespace    https://label.insta360.com/
-// @version      2.6.4
-// @description  新框倍率最高3.2x；按主体自动构图，无人场景居中补齐，高亮新增框，支持滚动、调整窗口及撤销
+// @version      2.6.5
+// @description  修复批量写入后自动定位新增比例；新框倍率最高3.2x，按主体自动构图，无人场景补齐，高亮新增框
 // @author       chengzi
 // @match        https://label.insta360.com/*
 // @grant        none
@@ -32,6 +32,7 @@
  *  v2.6.1：写入后关闭实时预览，并在新增比例行显示后自动点击、滚动定位。
  *  v2.6.2：写入只暂停当前图的预览，打开页面或切换下一张时恢复写入前预览。
  *  v2.6.4：以2.6.2为基础，新框倍率最高3.2x；修复自动点击后反而取消选中。
+ *  v2.6.5：批量写入等原生建框选择完成后，再点击首个新增比例，保留全部新增高亮。
  * ===================================================================== */
 
 (function () {
@@ -457,7 +458,9 @@
         if (typeof value === 'string' || typeof value === 'number') ids.add(String(value));
         else if (value.id != null) ids.add(String(value.id));
       };
-      const sources = [an.selectedRegions, rs.selectedRegions, rs.selection];
+      const selection = rs.selection;
+      const sources = [an.selectedRegions, rs.selectedRegions,
+        selection && selection.selected != null ? selection.selected : selection];
       sources.forEach(source => {
         if (!source) return;
         if (Array.isArray(source)) source.forEach(add);
@@ -4466,21 +4469,21 @@
       attributes: true, attributeFilter: ['class', 'data-key', 'data-region-id', 'data-id'] });
   }
 
-  /** 原生点击会切换选中状态；只在点击后仍未选中时使用模型兜底。 */
-  function ensureWrittenSelected(area, additive) {
+  /** 写入后保持一个明确的当前框；原生点击已选中项会取消，需读回确认。 */
+  function ensureWrittenSelected(area) {
     const an = LS.annotation(), store = an && an.regionStore;
     if (!an || !area) return false;
-    const selected = () => LS.selectedRegionIds(an).includes(String(area.id)) || area.selected === true;
+    const selected = () => {
+      const ids = LS.selectedRegionIds(an);
+      return ids.length === 1 ? ids[0] === String(area.id) : !ids.length && area.selected === true;
+    };
     if (selected()) return true;
     const attempts = [
-      () => { if (additive && typeof an.toggleRegionSelection === 'function') an.toggleRegionSelection(area); },
-      () => { if (typeof area.setSelected === 'function') area.setSelected(true); },
-      () => { if (store && typeof store.selectRegion === 'function') store.selectRegion(area, additive); },
       () => { if (typeof an.selectArea === 'function') an.selectArea(area); },
+      () => { if (store && typeof store.selectRegion === 'function') store.selectRegion(area, false); },
+      () => { if (typeof area.setSelected === 'function') area.setSelected(true); },
       () => { if (store && typeof store.setSelection === 'function') {
-        const ids = new Set(additive ? LS.selectedRegionIds(an) : []);
-        ids.add(String(area.id));
-        store.setSelection(LS.regionList(an).filter(r => ids.has(String(r.id))));
+        store.setSelection([area]);
       } }
     ];
     for (const attempt of attempts) {
@@ -4489,18 +4492,27 @@
     return false;
   }
 
-  /** 写入后先点新行并滚动定位，行尚未渲染时先选中模型并等待补点。 */
+  /** 批量写入只定位第一个新框；其他新框保留高亮，避免连点、多选互相切换。 */
   function focusNewRegions(created) {
     const createdList = created || [];
     const areas = createdList.map(item => item && item.region).filter(Boolean);
     if (!areas.length) return false;
 
-    const an = LS.annotation();
-    STATE.pendingFocus = { annotation: an, taskId: taskId(), ids: new Set(areas.map(r => String(r.id))), clicked: 0 };
-    const clicked = focusPendingWrittenRows();
-    let selected = 0;
-    areas.forEach((area, index) => { if (ensureWrittenSelected(area, index > 0)) selected++; });
-    return selected > 0 || clicked > 0;
+    const an = LS.annotation(), target = areas[0];
+    const pending = { annotation: an, taskId: taskId(), ids: new Set([String(target.id)]), clicked: 0, ready: false };
+    STATE.pendingFocus = pending;
+    // 原生 afterCreateResult 用 setTimeout 逐个选中新框，必须排在这些任务之后。
+    // MutationObserver 会更早执行，因此在 ready 前也不能让它提前点击并结束等待。
+    setTimeout(() => {
+      if (STATE.pendingFocus !== pending) return;
+      pending.ready = true;
+      const clicked = focusPendingWrittenRows();
+      if (!clicked && STATE.pendingFocus === pending) {
+        ensureWrittenSelected(target);
+        if (STATE.referenceContext) STATE.referenceContext.native = nativeReferenceSelection();
+      }
+    }, 0);
+    return true;
   }
 
   /** 新行常在写入返回后才渲染；由列表观察器补点，重绘时不重复点击。 */
@@ -4511,6 +4523,7 @@
       STATE.pendingFocus = null;
       return 0;
     }
+    if (!pending.ready) return 0;
     const alive = new Set(LS.regionList().map(r => String(r.id)));
     pending.ids.forEach(id => { if (!alive.has(id)) pending.ids.delete(id); });
     let clicked = 0;
@@ -4519,17 +4532,18 @@
       rows.forEach(({ row, region }) => {
         const id = region && String(region.id);
         if (!pending.ids.has(id) || !row.isConnected) return;
-        pending.ids.delete(id);
         try { row.scrollIntoView({ block: 'nearest' }); } catch (e) { /* ignore */ }
         try {
-          row.dispatchEvent(new MouseEvent('click', {
-            bubbles: true, cancelable: true, view: window,
-            ctrlKey: pending.clicked > 0, metaKey: pending.clicked > 0
+          const target = row.querySelector('.lsf-outliner-item__title') || row;
+          target.dispatchEvent(new MouseEvent('click', {
+            bubbles: true, cancelable: true, view: window
           }));
           // 延迟出现的行可能早已由模型选中；原生点击会取消它，必须读回并纠正。
-          ensureWrittenSelected(region, pending.clicked > 0);
-          pending.clicked++;
-          clicked++;
+          if (ensureWrittenSelected(region)) {
+            pending.ids.delete(id);
+            pending.clicked++;
+            clicked++;
+          }
         } catch (e) { /* 原生选中失败不影响已经写入的框 */ }
       });
     } finally {
