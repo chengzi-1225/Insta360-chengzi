@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 框ID通过率统计
 // @namespace    local.insta360.region-pass-rate
-// @version      1.5.2
+// @version      1.5.3
 // @description  统计数据统一入口：项目ID、进度周报、历史通过率和按标注员合并评论。
 // @match        https://label.insta360.com/*
 // @homepageURL  https://github.com/chengzi-1225/Insta360-chengzi
@@ -17,7 +17,7 @@
 (function () {
 'use strict';
 if (window.top !== window.self || document.documentElement.hasAttribute('data-i360-stats-loaded')) return;
-document.documentElement.setAttribute('data-i360-stats-loaded', '2.0.2');
+document.documentElement.setAttribute('data-i360-stats-loaded', '2.0.3');
 const Core = (() => {
 const DEFAULT_ORIGIN = 'https://label.insta360.com';
 const FIELD_NAMES = ['url', 'reviewer', 'annotator', 'result', 'reason', 'comment', 'ratio', 'image', 'attachment'];
@@ -657,6 +657,111 @@ async function collectProjectHistory(projectIds, { requestJSON, origin = HISTORY
   return { projects, projectRows: projects.map(projectId => projectMap.get(projectId) || { project_id: projectId, project_name: '' }), rows: selected, allRows: raw, failures, ...aggregate, complete: failures.length === 0 };
 }
 
+function statsId(value) {
+  const raw = String(value ?? '');
+  return /^[1-9]\d*$/.test(raw) ? raw : '';
+}
+function statsAbort(signal) { if (signal?.aborted) throw new DOMException('已停止读取', 'AbortError'); }
+function statsDate(value, end = false) {
+  if (!value) return '';
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) throw new Error('日期必须使用 YYYY-MM-DD 格式');
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  if (date.getFullYear() !== Number(match[1]) || date.getMonth() !== Number(match[2]) - 1 || date.getDate() !== Number(match[3])) throw new Error('日期无效');
+  return `${value} ${end ? '23:59:59' : '00:00:00'}`;
+}
+function statsCount(value) { return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0; }
+function statsName(row) {
+  const raw = String(row.name || `${row.first_name || ''} ${row.last_name || ''}`).replace(/\s+/g, ' ').trim();
+  return (/[\u3400-\u9fff]/.test(raw) ? raw.replace(/\s/g, '') : raw) || `用户ID ${row.id}`;
+}
+function statsFinish(row) { return { ...row, pass_rate: row.total_count ? row.pass_count / row.total_count : null }; }
+
+// Same endpoint, role, project and time filters used by the platform's native
+// statistics page. Each response row is a person/project aggregate, not an event.
+async function collectProjectStatistics(projectIds, { requestJSON, origin = 'https://label.insta360.com', signal, start = '', end = '', onProgress, projectRows = [] } = {}) {
+  if (!Array.isArray(projectIds) || !projectIds.length || projectIds.some(value => !statsId(value))) throw new Error('项目 ID 必须是正整数数组且不能为空');
+  if (typeof requestJSON !== 'function') throw new TypeError('requestJSON 必须是函数');
+  const ids = [...new Set(projectIds.map(String))];
+  const from = statsDate(start), to = statsDate(end, true);
+  if (from && to && from > to) throw new Error('开始日期不能晚于结束日期');
+  const current = new URL(origin);
+  if (!/^https?:$/.test(current.protocol) || current.username || current.password) throw new Error('当前网站地址无效');
+  const address = new URL('/api/statistics/overview', current.origin);
+  address.searchParams.set('role', 'annotator');
+  address.searchParams.set('project_id', ids.join(','));
+  if (from) address.searchParams.set('start_date', from);
+  if (to) address.searchParams.set('end_date', to);
+  const raw = [], failures = [], issues = [], seen = new Set();
+  let expected = null, pageSize = 100, page = 1;
+  statsAbort(signal);
+  try {
+    while (true) {
+      statsAbort(signal);
+      if (page > 10000) throw new Error('数据统计分页超过上限，未完整读取');
+      address.searchParams.set('page', String(page));
+      address.searchParams.set('page_size', String(pageSize));
+      const data = await requestJSON(address.href, { signal });
+      statsAbort(signal);
+      if (!data || !Array.isArray(data.users_stats) || !statsCount(data.count) || data.error) throw new Error('数据统计接口格式不正确或查询失败');
+      if (data.role != null && data.role !== 'annotator') throw new Error('数据统计角色与标注信息查询不一致');
+      if (expected !== null && expected !== data.count) throw new Error('数据统计总数量发生变化，请重新读取');
+      expected = data.count;
+      if (data.page_size != null) {
+        if (!statsCount(data.page_size) || !data.page_size) throw new Error('数据统计分页大小格式不正确');
+        if (page > 1 && data.page_size !== pageSize) throw new Error('数据统计分页大小发生变化');
+        pageSize = data.page_size;
+      }
+      if (raw.length + data.users_stats.length > expected) throw new Error('数据统计记录数量超过接口总数量');
+      for (const row of data.users_stats) {
+        if (!row || typeof row !== 'object' || !statsId(row.id) || !ids.includes(statsId(row.project_id))) throw new Error('数据统计人员或项目 ID 与选择范围不一致');
+        const key = JSON.stringify([String(row.id), String(row.project_id)]);
+        if (seen.has(key)) throw new Error('数据统计分页包含重复人员项目记录，未能确认完整性');
+        seen.add(key); raw.push(row);
+      }
+      onProgress?.({ phase: 'statistics', done: raw.length, total: expected, page });
+      statsAbort(signal);
+      if (raw.length === expected) break;
+      if (!data.users_stats.length) throw new Error('数据统计分页提前结束，未完整读取');
+      // Some deployments return fewer rows than requested. Retain that effective
+      // size for later pages when they do not report page_size explicitly.
+      if (page === 1 && data.page_size == null) pageSize = data.users_stats.length;
+      page++;
+    }
+  } catch (error) {
+    statsAbort(signal);
+    if (error?.name === 'AbortError') throw error;
+    failures.push({ project_id: ids.join(','), task_id: '', message: `数据统计读取失败：${error.message}` });
+  }
+  statsAbort(signal);
+  const people = new Map();
+  const projects = new Map(ids.map(project_id => [project_id, { project_id, project_name: projectRows.find(row => String(row.project_id) === project_id)?.project_name || '', pass_count: 0, reject_count: 0, total_count: 0 }]));
+  const rows = [];
+  for (const row of raw) {
+    const projectId = String(row.project_id), userId = String(row.id), stat = row.stats;
+    if (!stat || !statsCount(stat.review_passed) || !statsCount(stat.review_rejected_total) || !Number.isSafeInteger(stat.review_passed + stat.review_rejected_total)) {
+      issues.push({ message: `项目 ${projectId} / ${statsName(row)}：通过或驳回数量缺失或无效，该行未计入。` }); continue;
+    }
+    const pass = stat.review_passed, reject = stat.review_rejected_total, total = pass + reject;
+    const mismatch = stat.reviewed_total != null && (!statsCount(stat.reviewed_total) || stat.reviewed_total !== total);
+    const note = mismatch ? `平台被审核总量 ${stat.reviewed_total} 与通过+驳回 ${total} 不一致；通过率仍使用通过÷（通过+驳回）。` : '';
+    if (note) issues.push({ message: `项目 ${projectId} / ${statsName(row)}：${note}` });
+    rows.push({ project_id: projectId, project_name: String(row.project_title || projects.get(projectId).project_name), annotator_id: userId, annotator: statsName(row), pass_count: pass, reject_count: reject, total_count: total, pass_rate: total ? pass / total : null, source_reviewed_total: stat.reviewed_total ?? null, note });
+    if (!people.has(userId)) people.set(userId, { annotator_id: userId, annotator: statsName(row), pass_count: 0, reject_count: 0, total_count: 0 });
+    const project = projects.get(projectId);
+    if (row.project_title) project.project_name = String(row.project_title);
+    for (const target of [people.get(userId), project]) {
+      target.pass_count += pass; target.reject_count += reject; target.total_count += total;
+    }
+  }
+  const peopleRows = [...people.values()].map(statsFinish).sort((a, b) => a.annotator.localeCompare(b.annotator, 'zh-CN') || a.annotator_id.localeCompare(b.annotator_id, 'en', { numeric: true }));
+  const names = new Map();
+  for (const person of peopleRows) names.set(person.annotator, (names.get(person.annotator) || 0) + 1);
+  for (const person of peopleRows) if (names.get(person.annotator) > 1) person.annotator += `（ID ${person.annotator_id}）`;
+  const totals = statsFinish(peopleRows.reduce((sum, row) => ({ pass_count: sum.pass_count + row.pass_count, reject_count: sum.reject_count + row.reject_count, total_count: sum.total_count + row.total_count }), { pass_count: 0, reject_count: 0, total_count: 0 }));
+  return { source: 'data-statistics', projectIds: ids, projectRows: [...projects.values()].map(({ project_id, project_name }) => ({ project_id, project_name })), projects: [...projects.values()].map(statsFinish), people: peopleRows, totals, rows, allRows: raw, failures, issues, complete: failures.length === 0 && issues.length === 0 };
+}
+
 /**
  * Create an XLSX workbook without dependencies. Percent columns are zero based.
  * Keep helpers inside this function so the complete exporter can be inlined.
@@ -862,7 +967,7 @@ function workbookBytes(sheets) {
   return bytes;
 }
 
-return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, parseProjectIds, extractCurrentProjectCards, classifyHistoryStatus, filterHistoryRows, aggregateHistory, fetchHistoryPaged, collectProjectHistory, workbookBytes};
+return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, parseProjectIds, extractCurrentProjectCards, classifyHistoryStatus, filterHistoryRows, aggregateHistory, fetchHistoryPaged, collectProjectHistory, collectProjectStatistics, workbookBytes};
 })();
 const Comments = (() => {
 const COMMENT_DEFAULT_ORIGIN = 'https://label.insta360.com';
@@ -1076,7 +1181,47 @@ function commentBoolean(value) {
   return value === true || value === 1 || value === 'true' || value === '1';
 }
 
-async function collectCommentProjects(projectIds, { origin = COMMENT_DEFAULT_ORIGIN, requestJSON, signal, onProgress, concurrency = 3 } = {}) {
+async function commentFilteredTasks(projectId, { origin, requestJSON, signal, onPage }) {
+  const address = new URL('/api/dm/tasks', origin);
+  address.searchParams.set('project', projectId);
+  address.searchParams.set('query', JSON.stringify({ filters: { conjunction: 'and', items: [{ filter: 'filter:tasks:comment_count', operator: 'greater', type: 'Number', value: 0 }] }, ordering: ['id'] }));
+  const rows = [], seen = new Set();
+  let page = 1, pageSize = 200, expected = null;
+  try {
+    while (true) {
+      commentCheckAbort(signal);
+      if (page > 10000) throw new Error('评论任务分页超过上限');
+      address.searchParams.set('page', String(page)); address.searchParams.set('page_size', String(pageSize));
+      const data = await commentRequest(address.href, { requestJSON, signal });
+      commentCheckAbort(signal);
+      if (!data || !Array.isArray(data.tasks) || !Number.isSafeInteger(data.total) || data.total < 0) throw new Error('评论任务筛选接口格式不正确');
+      if (expected !== null && data.total !== expected) throw new Error('评论任务总数量发生变化');
+      expected = data.total;
+      if (data.page_size != null) {
+        if (!Number.isSafeInteger(data.page_size) || data.page_size <= 0 || page > 1 && data.page_size !== pageSize) throw new Error('评论任务分页大小不正确或发生变化');
+        pageSize = data.page_size;
+      }
+      if (rows.length + data.tasks.length > expected) throw new Error('评论任务数量超过筛选结果总数量');
+      for (const row of data.tasks) {
+        const taskId = commentPositiveId(row?.id);
+        if (!taskId || seen.has(taskId)) throw new Error('评论任务筛选包含无效或重复任务，未能确认完整性');
+        seen.add(taskId);
+        rows.push(row.project == null && row.project_id == null ? { ...row, project_id: projectId } : row);
+      }
+      onPage?.({ count: rows.length, total: expected });
+      commentCheckAbort(signal);
+      if (rows.length === expected) return rows;
+      if (!data.tasks.length) throw new Error('评论任务分页提前结束，未完整读取');
+      if (page === 1 && data.page_size == null) pageSize = data.tasks.length;
+      page++;
+    }
+  } catch (error) {
+    commentCheckAbort(signal, error);
+    const failure = new Error(commentMessage(error)); failure.partialRows = rows; throw failure;
+  }
+}
+
+async function collectCommentProjects(projectIds, { origin = COMMENT_DEFAULT_ORIGIN, requestJSON, signal, onProgress, concurrency = 3, onlyCommented = false } = {}) {
   commentCheckAbort(signal);
   if (!Array.isArray(projectIds) || !projectIds.length || projectIds.some(id => !commentPositiveId(id))) throw new Error('项目 ID 必须是正整数数组且不能为空');
   const projects = [...new Set(projectIds.map(String))];
@@ -1137,6 +1282,12 @@ async function collectCommentProjects(projectIds, { origin = COMMENT_DEFAULT_ORI
       } else validComments.push(value);
     }
     validComments.sort(commentCompare);
+    if (onlyCommented && raw.comment_count != null && !commentFailure) {
+      const expected = Number(raw.comment_count);
+      if (!Number.isSafeInteger(expected) || expected < 0 || expected !== validComments.length) {
+        commentFailure = `评论数量待核对：筛选时 ${raw.comment_count} 条，实际读取 ${validComments.length} 条；期间数量可能发生变化，请重新读取。`;
+      }
+    }
     const allAnnotations = Array.isArray(detail.annotations) ? detail.annotations.filter(value => value && typeof value === 'object') : [];
     const annotations = allAnnotations.filter(value => !commentBoolean(value.was_cancelled) && !commentBoolean(value.is_draft));
     const annotation = commentLatest(annotations, true);
@@ -1179,13 +1330,14 @@ async function collectCommentProjects(projectIds, { origin = COMMENT_DEFAULT_ORI
 
   for (const projectId of projects) {
     commentCheckAbort(signal);
-    progress('tasks', projectId, 0, 0, `正在读取项目 ${projectId} 的全部任务`);
+    progress('tasks', projectId, 0, 0, `正在读取项目 ${projectId} 的${onlyCommented ? '评论数大于 0 的' : '全部'}任务`);
     let tasks = [];
     try {
-      tasks = await fetchPagedRows(`${currentOrigin}/api/tasks/?project=${encodeURIComponent(projectId)}&page_size=200`, {
+      const options = {
         requestJSON, origin: currentOrigin, signal, kind: '任务',
-        onPage: page => progress('tasks', projectId, page.count, page.total ?? page.count, `项目 ${projectId}：已读取 ${page.count} 个任务`),
-      });
+        onPage: page => progress('tasks', projectId, page.count, page.total ?? page.count, `项目 ${projectId}：已筛选 ${page.count} 个${onlyCommented ? '有评论的' : ''}任务`),
+      };
+      tasks = onlyCommented ? await commentFilteredTasks(projectId, options) : await fetchPagedRows(`${currentOrigin}/api/tasks/?project=${encodeURIComponent(projectId)}&page_size=200`, options);
     } catch (error) {
       commentCheckAbort(signal, error);
       tasks = error.partialRows || [];
@@ -1197,6 +1349,8 @@ async function collectCommentProjects(projectIds, { origin = COMMENT_DEFAULT_ORI
       const listedProject = task.project_id ?? task.project;
       if (!id || commentReferenceId(listedProject) !== projectId || (task.project != null && commentReferenceId(task.project) !== projectId)) {
         failures.push({ 项目ID: projectId, 任务ID: commentText(task.id), 说明: !id ? '任务列表包含无效的任务 ID，必须是正整数' : '任务列表的项目 ID 与请求不一致' });
+      } else if (onlyCommented && task.comment_count != null && Number(task.comment_count) === 0) {
+        failures.push({ 项目ID: projectId, 任务ID: id, 说明: '筛选接口返回了零评论任务，已跳过详情读取，请重新筛选核对。' });
       } else validTasks.push(task);
     }
     let cursor = 0, done = 0;
@@ -1225,7 +1379,7 @@ async function collectCommentProjects(projectIds, { origin = COMMENT_DEFAULT_ORI
   comments.sort((a, b) => commentTime(a.评论时间) - commentTime(b.评论时间) || commentCompareId(a.评论ID, b.评论ID) || projects.indexOf(a.项目ID) - projects.indexOf(b.项目ID) || commentCompareId(a.任务ID, b.任务ID));
   const complete = failures.length === 0;
   progress('complete', '', summaries.length, summaries.length, complete ? '全部项目评论读取完成' : '读取结束，存在未完整读取的数据');
-  return { projects, summaries, comments, failures, warnings, complete };
+  return { projects, summaries, comments, failures, warnings, complete, selection: onlyCommented ? 'comment_count>0' : 'all-tasks' };
 }
 
 const COMMENT_GROUP_HEADERS = ['项目ID', '项目名称', '标注员', '涉及任务数', '已读评论数', '内容分段', '合并评论', '任务链接', '读取状态', '标注员ID'];
@@ -1355,6 +1509,7 @@ function commentProjectSheets(output, projectRows = []) {
   sheets.push({ name: '任务汇总', headers: COMMENT_TASK_HEADERS.slice(), rows: detailRows(output.summaries, COMMENT_TASK_HEADERS) });
   const notes = [
     ['导出口径', '', '各项目分别建表，优先按标注员账号ID合并；无ID时按姓名匹配，重名无法确认及未知标注员按任务分开保留。评论为全部时间，不使用历史审核日期筛选。'],
+    ...(output.selection === 'comment_count>0' ? [['任务筛选', '', '仅查询评论数大于0的任务并读取其全部时间评论；任务汇总不含零评论任务，已解决评论仍保留。']] : []),
     ['长内容', '', '长于单元格容量的内容分行保留；标注员汇总的任务数和评论数只在首段显示。'],
     ...output.failures.map(row => [row.项目ID || '', row.任务ID || '', row.说明 || '读取失败']),
     ...output.warnings.map(row => ['', '', typeof row === 'string' ? row : row.message || row.说明 || '用户姓名读取不完整']),
@@ -1411,7 +1566,7 @@ function mountReviewTools(container, callbacks = {}) {
         <div id="historyControls" class="toolbar"><label class="date">开始日期 <input id="startDate" type="date"></label><label class="date">结束日期 <input id="endDate" type="date"></label><button id="start" class="primary" type="button" disabled>读取历史通过率</button></div>
         <div id="commentControls" class="toolbar"><button id="commentStart" class="primary" type="button" disabled>读取全部评论</button><span class="hint">按项目、标注员合并</span></div>
         <div class="toolbar" id="readControls"><button id="cancel" type="button" disabled>停止当前读取</button></div>
-        <p id="commentHint" class="hint">评论读取所选项目的全部时间，不受上方日期限制；同一项目内按标注员合并，不同项目分表。可直接读取评论，无须先统计通过率。</p>
+        <p id="commentHint" class="hint">先筛选评论数大于 0 的任务，再读取全部时间评论，不受上方日期限制；同一项目内按标注员合并，不同项目分表。可直接读取评论，无须先统计通过率。</p>
         <div id="status" role="status" aria-live="polite">先读取当前页面项目，勾选后统计通过率或读取评论。</div><progress id="progress" max="1" value="0" hidden></progress>
         <section id="results" hidden>
           <div id="metrics"></div><div id="warning" class="warning" hidden></div>
@@ -1425,7 +1580,7 @@ function mountReviewTools(container, callbacks = {}) {
           <div class="tablewrap"><table><thead><tr><th>项目</th><th>标注员</th><th>涉及任务数</th><th>已读评论数</th><th>状态</th></tr></thead><tbody id="commentBody"></tbody></table></div>
           <details><summary>评论读取说明</summary><div id="commentDetails" class="detailsbody"></div></details>
         </section>
-        <div id="rules"><p>通过率 = 历史通过次数 ÷（历史通过次数 + 历史驳回次数）。每一条审核记录分别统计，同一任务多次审核不会去重。</p><p>日期按历史记录时间筛选，包含首尾日期。无法识别的历史状态不计入通过率，保留在明细说明中。</p><p>评论 Excel 每个项目各有标注员汇总、逐条评论明细，另附任务汇总和读取状态；已解决及图片评论也保留。优先按标注员账号 ID 合并，归属不明的按任务分开标记待核对。</p><p>两项读取均完成后，“导出完整 Excel”同时包含通过率和评论。长评论分行保留。</p></div>
+        <div id="rules"><p>通过率 = 数据统计的标注通过总量 ÷（标注通过总量 + 标注被驳回总量）。不额外计入申诉通过量。</p><p>直接按所选项目和日期查询平台“数据统计”的标注信息，包含首尾日期；不再逐条读取任务历史。平台被审核总量与通过+驳回不一致时，保留原值并标记待核对。</p><p>评论 Excel 每个项目各有标注员汇总、逐条评论明细，另附有评论的任务汇总和读取状态；已解决及图片评论也保留。优先按标注员账号 ID 合并，归属不明的按任务分开标记待核对。</p><p>两项读取均完成后，“导出完整 Excel”同时包含通过率和评论。长评论分行保留。</p></div>
       </main>
     </section></div>`;
   root.append(layout);
@@ -1435,7 +1590,7 @@ function mountReviewTools(container, callbacks = {}) {
   host.dataset.view = 'history';
   let result = null, commentResult = null, commentGroups = [], controller = null, working = false, externalBusy = false, scopeRevision = 0, scopeKey = '', copyTimer = 0, projectRows = [];
   const setStatus = message => { $('status').textContent = message; callbacks.onStatus?.(message); };
-  const percent = value => typeof value === 'number' ? `${(value * 100).toFixed(2)}%` : '待核对';
+  const percent = value => typeof value === 'number' ? `${(value * 100).toFixed(2)}%` : '—';
   const cellValue = value => value === null || value === undefined ? '待核对' : String(value);
   const today = new Date();
   const isoDate = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
@@ -1515,11 +1670,11 @@ function mountReviewTools(container, callbacks = {}) {
     if (!ids.length) { setStatus('请先读取并勾选至少一个项目。'); return; }
     if ($('startDate').value && $('endDate').value && $('startDate').value > $('endDate').value) { setStatus('开始日期不能晚于结束日期。'); return; }
     invalidateHistory(); controller = new AbortController(); const signal = controller.signal, revision = scopeRevision; busy(true); $('progress').hidden = false; $('progress').removeAttribute('value');
-    setStatus(`正在读取 ${ids.length} 个项目的任务历史…`);
+    setStatus(`正在按项目和日期查询 ${ids.length} 个项目的数据统计…`);
     try {
-      result = await Core.collectProjectHistory(ids, { requestJSON, origin: location.origin, signal, start: $('startDate').value, end: $('endDate').value, onProgress: info => { if (info.phase === 'history') setStatus(`项目 ${info.projectId}：已读取 ${info.done} / ${info.total} 个任务，发现 ${info.count || 0} 条审核记录…`); else if (info.phase === 'tasks') setStatus(`项目 ${info.projectId}：正在读取任务列表…`); } });
+      result = await Core.collectProjectStatistics(ids, { requestJSON, origin: location.origin, signal, projectRows, start: $('startDate').value, end: $('endDate').value, onProgress: info => setStatus(`正在读取数据统计：${info.done} / ${info.total} 条人员项目汇总…`) });
       if (signal.aborted || revision !== scopeRevision) throw new Error('项目选择已更新');
-      render(); setStatus(result.complete ? `统计完成：${result.rows.length} 条历史审核记录。` : `读取结束：有 ${result.failures.length} 条待核对记录。`);
+      render(); setStatus(result.complete ? `统计完成：${result.rows.length} 条人员项目汇总，共 ${result.totals.total_count} 次通过与驳回。` : `读取结束：有 ${result.failures.length + result.issues.length} 条待核对说明。`);
     } catch (error) { invalidateHistory(); setStatus(signal.aborted ? '已停止，本次没有生成统计结果。' : `统计失败：${error.message}`); }
     finally { controller = null; busy(false); }
   });
@@ -1530,7 +1685,7 @@ function mountReviewTools(container, callbacks = {}) {
     invalidateComments(); controller = new AbortController(); const signal = controller.signal, revision = scopeRevision; busy(true); $('progress').removeAttribute('value');
     setStatus(`正在读取 ${ids.length} 个项目的全部评论…`);
     try {
-      commentResult = await Comments.collectCommentProjects(ids, { requestJSON, origin: location.origin, signal, onProgress: info => {
+      commentResult = await Comments.collectCommentProjects(ids, { requestJSON, origin: location.origin, signal, onlyCommented: true, onProgress: info => {
         setStatus(info.message);
         if (info.phase === 'task' && info.total) { $('progress').max = info.total; $('progress').value = info.done; }
         else if (info.phase !== 'complete') $('progress').removeAttribute('value');
@@ -1546,7 +1701,7 @@ function mountReviewTools(container, callbacks = {}) {
   function commentsNeedReview() { return !commentResult.complete || !!commentResult.warnings.length || commentGroups.some(row => row.status !== '已读取'); }
   function renderComments() {
     $('commentResults').hidden = false; $('commentBody').replaceChildren();
-    $('commentSummary').textContent = `${commentResult.projects.length} 个项目 · ${commentResult.summaries.length} 个任务 · ${commentGroups.length} 组标注员 · ${commentResult.comments.length} 条评论（全部时间）。${commentGroups.length > 200 ? '页面显示前 200 组，导出包含全部。' : ''}`;
+    $('commentSummary').textContent = `${commentResult.projects.length} 个项目 · ${commentResult.summaries.length} 个有评论的任务 · ${commentGroups.length} 组标注员 · ${commentResult.comments.length} 条评论（全部时间）。${commentGroups.length > 200 ? '页面显示前 200 组，导出包含全部。' : ''}`;
     for (const person of commentGroups.slice(0, 200)) {
       const tr = document.createElement('tr');
       for (const value of [`${person.project_name || '项目'}（${person.project_id}）`, person.annotator, person.task_count, person.comment_count, person.status]) {
@@ -1561,19 +1716,19 @@ function mountReviewTools(container, callbacks = {}) {
       ...commentResult.warnings.map(row => typeof row === 'string' ? row : row.message || row.说明 || String(row)),
       ...commentGroups.filter(row => row.status !== '已读取').map(row => `项目 ${row.project_id} / ${row.annotator}：${row.status}`),
     ];
-    $('commentDetails').textContent = notes.join('\n') || '所选项目的全部评论已读取；同项目同标注员合并，跨项目分别保留。';
+    $('commentDetails').textContent = notes.join('\n') || '已筛选评论数大于 0 的任务并读取全部评论（含已解决）；同项目同标注员合并，跨项目分别保留。';
   }
   function render() {
     $('results').hidden = false; $('metrics').replaceChildren(); $('body').replaceChildren();
     const metrics = [['选中项目', result.projects.length], ['历史通过', result.totals.pass_count], ['历史驳回', result.totals.reject_count], ['审核次数', result.totals.total_count], ['整体通过率', percent(result.totals.pass_rate)]];
     for (const [name, value] of metrics) { const box = document.createElement('div'); box.className = 'metric'; const label = document.createElement('span'), strong = document.createElement('strong'); label.textContent = name; strong.textContent = value; box.append(label, strong); $('metrics').append(box); }
-    for (const person of result.people) { const tr = document.createElement('tr'); for (const value of [person.annotator, person.pass_count, person.reject_count, person.total_count, percent(person.pass_rate), '已核对']) { const td = document.createElement('td'); td.textContent = cellValue(value); tr.append(td); } $('body').append(tr); }
-    $('warning').hidden = result.complete; $('warning').textContent = '部分项目或任务历史读取失败，结果只包含已成功读取的记录；失败原因见明细和 Excel。';
+    for (const person of result.people) { const tr = document.createElement('tr'); for (const value of [person.annotator, person.pass_count, person.reject_count, person.total_count, percent(person.pass_rate), result.complete ? '已核对' : '待核对']) { const td = document.createElement('td'); td.textContent = cellValue(value); tr.append(td); } $('body').append(tr); }
+    $('warning').hidden = result.complete; $('warning').textContent = '数据统计读取不完整或平台计数存在差异；当前结果仅含已读有效汇总，说明见下方和 Excel。';
     const lines = [...result.failures.map(item => `[读取失败] 项目 ${item.project_id}${item.task_id ? ` / 任务 ${item.task_id}` : ''}：${item.message}`), ...result.issues.map(item => `[待核对] ${item.message || item}`)];
-    $('details').textContent = lines.join('\n') || '所有历史审核记录均已读取并按日期筛选。'; $('notes').open = !result.complete || !!lines.length;
+    $('details').textContent = lines.join('\n') || '已按项目和日期读取平台数据统计全部汇总；没有逐条读取任务历史。无审核记录的通过率显示为“—”。'; $('notes').open = !result.complete || !!lines.length;
   }
   const summaryHeaders = ['标注员', '通过次数', '驳回次数', '审核次数', '通过率', '统计状态'];
-  const summaryRows = formatted => result.people.map(person => [person.annotator, person.pass_count, person.reject_count, person.total_count, formatted ? percent(person.pass_rate) : person.pass_rate, '已核对']);
+  const summaryRows = formatted => result.people.map(person => [person.annotator, person.pass_count, person.reject_count, person.total_count, formatted ? percent(person.pass_rate) : person.pass_rate, result.complete ? '已核对' : '待核对']);
   function save(bytes, name, type) { const url = URL.createObjectURL(new Blob([bytes], { type })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; root.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000); }
   const dateStamp = () => new Date().toISOString().replace(/[-:]/g, '').slice(0, 15).replace('T', '_');
   $('copy').addEventListener('click', async () => { if (!result) return; const text = [summaryHeaders, ...summaryRows(true)].map(row => row.map(value => String(value ?? '').replace(/[\t\r\n]/g, ' ')).join('\t')).join('\n'); try { if (typeof GM_setClipboard === 'function') GM_setClipboard(text, 'text'); else await navigator.clipboard.writeText(text); $('copy').textContent = '已复制'; clearTimeout(copyTimer); copyTimer = setTimeout(() => { $('copy').textContent = '复制汇总表'; }, 1600); } catch { setStatus('复制失败，请导出 CSV 或 Excel。'); } });
@@ -1582,12 +1737,12 @@ function mountReviewTools(container, callbacks = {}) {
     const sheets = [];
     if (result) {
     const projectHeaders = ['项目ID', '项目名称', '通过次数', '驳回次数', '审核次数', '通过率'];
-    const historyHeaders = ['项目ID', '项目名称', '任务ID', '标注员', '审核结果', '历史时间', '触发人', '原始状态', '任务链接'];
-    const issueRows = [['统计口径', '', '', '', '', `通过率=历史通过次数÷（历史通过次数+历史驳回次数）；每次历史记录分别统计。`], ['时间范围', '', '', '', '', `${$('startDate').value || '不限'} 至 ${$('endDate').value || '不限'}（含首尾日期）`], ...result.failures.map(item => ['读取失败', item.project_id, item.task_id, '', '', item.message]), ...result.issues.map(item => ['待核对', '', '', '', '', item.message || String(item)])];
+    const sourceHeaders = ['项目ID', '项目名称', '标注员ID', '标注员', '通过次数', '驳回次数', '通过+驳回', '通过率', '平台被审核总量', '说明'];
+    const issueRows = [['统计口径', '', '', '', '', `来源：数据统计/标注信息；通过率=标注通过总量÷（标注通过总量+标注被驳回总量），不计申诉通过；未逐条读取历史。`], ['时间范围', '', '', '', '', `${$('startDate').value || '不限'} 至 ${$('endDate').value || '不限'}（含首尾日期）`], ...result.failures.map(item => ['读取失败', item.project_id, item.task_id, '', '', item.message]), ...result.issues.map(item => ['待核对', '', '', '', '', item.message || String(item)])];
     sheets.push(
       { name: '标注员通过率', headers: summaryHeaders, rows: summaryRows(false), percentColumns: [4] },
       { name: '项目汇总', headers: projectHeaders, rows: result.projects.map(project => [project.project_id, project.project_name, project.pass_count, project.reject_count, project.total_count, project.pass_rate]), percentColumns: [5] },
-      { name: '历史记录', headers: historyHeaders, rows: result.rows.map(row => [row.project_id, row.project_name, row.task_id, row.annotator, row.status, row.created_at || '', row.triggered_by?.first_name ? `${row.triggered_by.first_name}${row.triggered_by.last_name || ''}` : String(row.triggered_by ?? ''), row.state || row.previous_state || row.transition_name || '', row.task_url || '']) },
+      { name: '数据统计明细', headers: sourceHeaders, rows: result.rows.map(row => [row.project_id, row.project_name, row.annotator_id, row.annotator, row.pass_count, row.reject_count, row.total_count, row.pass_rate, row.source_reviewed_total, row.note]), percentColumns: [7] },
       { name: '待核对与口径', headers: ['类型', '项目ID', '任务ID', '标注员', '结果', '说明'], rows: issueRows },
     );
     }
@@ -1716,7 +1871,7 @@ function mountReviewTools(container, callbacks = {}) {
     const readState = reviewTools?.readState() || {};
     sheets.push({ name: '本次导出范围', headers: ['功能', '读取状态', '说明'], rows: [
       ['项目进度', statistics ? reportHeading(statistics, reportTotals(statistics)) : '未读取', '平台当前任务数量与进度；不是历史通过率。'],
-      ['历史通过率', readState.history ? '已读取' : '未读取', `${readState.start || '不限'} 至 ${readState.end || '不限'}；通过÷（通过+驳回），每次历史记录分别统计。`],
+      ['历史通过率', readState.history ? '已读取' : '未读取', `${readState.start || '不限'} 至 ${readState.end || '不限'}；数据统计/标注信息，通过÷（通过+驳回），不计申诉通过。`],
       ['全部评论', readState.comments ? '已读取' : '未读取', '全部时间；不同项目分别建表，同项目按标注员合并。'],
       ['所选项目', String(selected(activeProjects()).length), selected(activeProjects()).map(project => project.id).join(', ')],
     ] });
