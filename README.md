@@ -3,15 +3,15 @@
 涉及多个场景整合
 
 <!-- id-switching:start -->
-## ID 切换 v3.18.4
+## ID 切换 v3.19.1
 
-[安装 / 更新](https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/insta360-IDswitching.user.js) · [使用说明](docs/id-switching.md) · [视频测试页面（下载后双击打开）](docs/demos/insta360-id-switch.html) · [完整测试包](docs/downloads/insta360-IDswitching-3.18.4.zip)
+[安装 / 更新](https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/insta360-IDswitching.user.js) · [使用说明](docs/id-switching.md) · [常显与框选演示（下载后打开）](docs/demos/insta360-always-visible.html) · [视频演示（下载后打开）](docs/demos/insta360-id-switch.html) · [TXT 备份](docs/downloads/insta360-IDswitching-3.19.1.txt)
 
-空格默认播放 / 暂停视频；「更新数值」和「更新任务」分开设置，两个更新默认均未绑定，可在「快捷键设置 → 播放与更新」分别录制。标签同步默认关闭，可在「快捷键设置」里的“辅助功能”区域单独开启并记住设置。旧版混合更新及占用空格的绑定会释放，其它自定义按键保留。
+新增 **常显设置**：可多选比例、具体 ID，并添加“主体”“杂物”等文本标签。文本支持“完整标签”与“包含文字”匹配，比例和文本刷新后保留；具体 ID 只用于当前任务。
 
-按按钮含义和所在面板区分两种更新，不再依赖 lil-gui 数字编号。同名按钮自动扫描后显示数值、任务分组。保留预设多选与框选、ID 切换、选中显隐、标签同步及原生删框撤回。
+三类列表均支持鼠标拖动框选。从未勾选项开始批量勾选，从已勾选项开始批量取消；Alt 拖动强制取消，Esc 取消本次拖动。保留人物-1、人物-2默认常显、当前框显示和搜索后批量选择。
 
-脚本语法检查、标签同步开关检查和 13 项 Chrome 浏览器检查通过，涵盖真实视频播放暂停、两种更新、设置迁移和窄屏布局。测试页内嵌视频与本次脚本，不会提交业务数据。尚未登录业务平台验证；固定安装和自动更新地址保持不变。
+保留空格播放暂停视频、A / D 导航、S 循环比例、独立的数值与任务更新快捷键、标签同步开关（默认关闭）和原生删框撤回。已通过语法及 Chrome 浏览器检查；演示内嵌当前脚本，使用本地示例。实际业务页面尚未登录验证。
 <!-- id-switching:end -->
 
 ## 审核与评论帧工具箱 1.0.8

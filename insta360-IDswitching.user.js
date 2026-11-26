@@ -2,8 +2,8 @@
 // @name         insta360-IDswitching
 // @namespace    local.ls.toolkit
 // @author       chengzi
-// @version      3.18.4
-// @description  空格播放暂停视频，数值更新与任务更新独立改绑；保留预设框选、原生删框撤回、选中显隐与可开关的标签同步。
+// @version      3.19.1
+// @description  批量常显比例、文本标签与当前任务 ID，支持拖动框选；保留空格视频播放、独立更新快捷键与标签同步开关。
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
 // @match        *://label.insta360.com/*
@@ -268,7 +268,7 @@
 
   // BEGIN SHARED SELECTED VISIBILITY
   /* ============================================================
-   *  选中隐藏：默认保留人物-1、人物-2，可从独立工具栏关闭
+   *  选中隐藏：可批量常显比例与当前任务 ID，默认保留人物-1、人物-2
    *  - 使用原生 region.toggleHidden()，保留 Outliner 中的 ID 条目
    *  - 首次默认开启；保存开关状态；关闭时显示全部框
    *  - 开启时自动处理任务切换、新增框和原生眼睛操作
@@ -280,6 +280,8 @@
     const BUTTON_ID = '__selected_visibility_btn';
     const STORAGE_KEY = 'ls_toolkit_person_only';
     const RATIO_KEY = 'ls_selected_visibility_ratio_v1';
+    const PINS_KEY = 'ls_selected_visibility_pins_v1';
+    const PINS_DIALOG_ID = '__selected_visibility_pins_dialog';
     const RATIOS = ['9:16', '16:9', '1:1', '4:3', '3:4'];
     const TOKENS = /\[\s*(\d+(?:\.\d+)?)\s*[,，]\s*(\d+(?:\.\d+)?)\s*\]|(?:^|[^\dA-Za-z_.+\-−－:：/×,，])(\d+(?:\.\d+)?)\s*[:：/xX×]\s*(\d+(?:\.\d+)?)(?=$|[^\dA-Za-z_.:：/×,，])/g;
     let selectedRatio = 'all';
@@ -289,6 +291,24 @@
     let canvasSelectionPending = false, recentIds = [];
     let knownRegionIds = null, createdRegionIds = new Set(), nativeSelectionKey = null;
     let canvasGestureIds = null, canvasGestureEnded = false;
+    let keepPeople = true, pinnedRatios = new Set(), pinnedIds = new Set(), pinnedTexts = new Map();
+    let pinContext = null, pinAnnotation = null, pinAnnotationId = null, pinGeneration = 0;
+    let pinsDialog = null, pinSearch = null;
+    let pinRatioInput = null, pinError = null, pinPreviousFocus = null;
+    let pinTextInput = null, pinTextMatch = null, pinDrag = null, suppressPinClick = false;
+    try {
+      const saved = JSON.parse(localStorage.getItem(PINS_KEY) || 'null');
+      if (saved && saved.version === 1) {
+        keepPeople = saved.keepPeople !== false;
+        if (Array.isArray(saved.ratios)) pinnedRatios = new Set(saved.ratios.slice(0, 100).map(parsePinRatio).filter(Boolean));
+        if (Array.isArray(saved.texts)) for (const rule of saved.texts.slice(0, 100)) {
+          const label = normalizePinText(rule?.label), match = rule?.match;
+          if (label && ['exact', 'contains'].includes(match)) {
+            pinnedTexts.set(JSON.stringify([match, label]), { label, match, enabled: rule.enabled !== false });
+          }
+        }
+      }
+    } catch (e) {}
     try { enabled = localStorage.getItem(STORAGE_KEY) !== 'false'; } catch (e) {}
     try {
       const saved = localStorage.getItem(RATIO_KEY);
@@ -410,7 +430,7 @@
       return null;
     }
 
-    function isPerson(region) {
+    function regionLabels(region) {
       const labels = [];
       const add = values => {
         if (typeof values === 'string') labels.push(values);
@@ -422,8 +442,517 @@
       add(region.labeling && region.labeling.mainValue);
       if (region.labelings) for (const label of region.labelings) add(label.mainValue);
       if (!labels.length) add(region.labelName);
-      return labels.some(label => /^\s*人物\s*[-_－:：]\s*[12]\s*$/.test(label));
+      return [...new Set(labels.map(label => label.trim()).filter(Boolean))];
     }
+
+    function isPerson(region) {
+      return regionLabels(region).some(label => /^\s*人物\s*[-_－:：]\s*[12]\s*$/.test(label));
+    }
+
+    // 与导航独立：常显集合不会改变 A/D/S 的切换范围。
+    function parsePinRatio(value) {
+      if (typeof value !== 'string' || value.length > 80) return null;
+      const match = value.trim().replace(/^\[\s*|\s*\]$/g, '').match(/^(\d{1,9}(?:\.\d{1,6})?)\s*[:：/,，xX×]\s*(\d{1,9}(?:\.\d{1,6})?)$/);
+      if (!match) return null;
+      const scaled = token => {
+        const [whole, fraction = ''] = token.split('.');
+        return Number(whole) * 1000000 + Number(fraction.padEnd(6, '0'));
+      };
+      const width = scaled(match[1]), height = scaled(match[2]);
+      if (!(width > 0 && height > 0)) return null;
+      let a = width, b = height;
+      while (b) { const remainder = a % b; a = b; b = remainder; }
+      return `${width / a}:${height / a}`;
+    }
+
+    function regionPinRatios(region) {
+      const found = new Set();
+      for (const label of regionLabels(region)) for (const match of label.matchAll(TOKENS)) {
+        const ratio = parsePinRatio(`${match[1] || match[3]}:${match[2] || match[4]}`);
+        if (ratio) found.add(ratio);
+      }
+      return found;
+    }
+
+    function pinId(region) {
+      const value = region && (region.id ?? region.pid);
+      return value === null || value === undefined ? null : String(value);
+    }
+
+    function syncPinContext(ann) {
+      if (!ann) { cancelPinMarquee(); return; }
+      const id = ann.id ?? ann.pk;
+      let taskId = null;
+      for (const key of ['Htx', '__lsf', 'LS', 'labelStudio', '__store', 'lsf']) {
+        try {
+          const store = window[key], as = store?.annotationStore;
+          if ((as?.selected || as?.current) !== ann) continue;
+          taskId = store.task?.id ?? store.task?.pk ??
+            (['string', 'number'].includes(typeof store.task) ? store.task : null);
+          if (taskId != null) break;
+        } catch (e) {}
+      }
+      taskId ??= ann.task?.id ?? (['string', 'number'].includes(typeof ann.task) ? ann.task : null);
+      const context = JSON.stringify(taskId == null ? [location.href] :
+        [location.origin, location.pathname, String(taskId)]);
+      // 保存草稿可能更新同一模型的 annotation.id；实际换标注则是不同的模型身份。
+      const annotationChanged = pinAnnotation && pinAnnotation !== ann &&
+        (id == null || pinAnnotationId == null || String(id) !== pinAnnotationId);
+      if (pinContext !== context || annotationChanged) {
+        const changed = pinContext !== null;
+        cancelPinMarquee();
+        pinnedIds.clear(); pinContext = context; pinGeneration++;
+        if (changed && pinsDialog?.open) {
+          pinSearch.value = '';
+          pinError.textContent = '';
+          showToast('任务已切换：已清空具体 ID 常显，比例和文本设置继续保留', 2200);
+        }
+      }
+      pinAnnotation = ann; pinAnnotationId = id == null ? null : String(id);
+    }
+
+    function isPinned(region) {
+      return keepPeople && isPerson(region) || pinnedIds.has(pinId(region)) ||
+        pinnedRatios.size > 0 && [...regionPinRatios(region)].some(ratio => pinnedRatios.has(ratio)) ||
+        pinnedTexts.size > 0 && regionLabels(region).some(label => {
+          // 输入规则限制 80 字；被匹配的完整标签不受此长度限制。
+          const text = label.trim().replace(/\s+/g, ' ');
+          return text && [...pinnedTexts.values()].some(rule => rule.enabled &&
+            (rule.match === 'contains' ? text.includes(rule.label) : text === rule.label));
+        });
+    }
+
+    function normalizePinText(value) {
+      if (typeof value !== 'string' || /[\u0000-\u001f\u007f]/.test(value)) return null;
+      const text = value.trim().replace(/\s+/g, ' ');
+      return text && text.length <= 80 ? text : null;
+    }
+
+    function pinRows(ann = annotation()) {
+      syncPinContext(ann);
+      return (regionsFor(ann) || []).filter(region => region && !region.classification &&
+        !region.isDrawing && !region.incomplete && region.hideable !== false).map((region, index) => ({
+        region, key: pinId(region), name: regionLabels(region).join(' · ') || '未命名框', index: index + 1,
+      }));
+    }
+
+    function availablePinRatios(rows) {
+      const found = new Set(RATIOS.map(parsePinRatio));
+      const saved = mainNavigation()?.ratios?.();
+      for (const preset of [...(saved?.presets || []), ...(saved?.custom || [])]) {
+        const ratio = parsePinRatio(preset.label);
+        if (ratio) found.add(ratio);
+      }
+      for (const row of rows) for (const ratio of regionPinRatios(row.region)) found.add(ratio);
+      for (const ratio of pinnedRatios) found.add(ratio);
+      return [...found];
+    }
+
+    function savePinPreferences(ratios = pinnedRatios, people = keepPeople, texts = pinnedTexts) {
+      if (ratios.size > 100) { pinError.textContent = '最多常显 100 种比例，请先取消不用的比例。'; return false; }
+      if (texts.size > 100) { pinError.textContent = '最多保存 100 条文本，请先删除不用的文本。'; return false; }
+      try {
+        localStorage.setItem(PINS_KEY, JSON.stringify({ version: 1, ratios: [...ratios], keepPeople: people,
+          texts: [...texts.values()] }));
+      } catch (error) {
+        pinError.textContent = '常显设置保存失败，原设置保持不变。请检查站点存储权限。';
+        refreshPinsDialog();
+        return false;
+      }
+      pinnedRatios = new Set(ratios); keepPeople = people; pinnedTexts = new Map(texts);
+      pinError.textContent = ''; failed = new WeakSet(); sync();
+      return true;
+    }
+
+    function filteredPinRows() {
+      const query = pinSearch.value.trim().toLocaleLowerCase();
+      return pinRows().filter(row => `${row.index} ${row.name} ${row.key || ''}`.toLocaleLowerCase().includes(query));
+    }
+
+    function batchPinIds(checked, clear = false) {
+      const rows = filteredPinRows();
+      if (clear) pinnedIds.clear();
+      else for (const row of rows) {
+        if (!row.key) continue;
+        if (checked) pinnedIds.add(row.key); else pinnedIds.delete(row.key);
+      }
+      pinError.textContent = ''; failed = new WeakSet(); sync();
+    }
+
+    // 框选仅预览，松手后一次提交；矩形放在 dialog 内以保持顶层可见。
+    function cancelPinMarquee() {
+      const drag = pinDrag;
+      if (!drag) return false;
+      pinDrag = null;
+      if (drag.active) suppressPinClick = true;
+      drag.rectangle?.remove();
+      for (const item of drag.items) item.label.classList.remove('pin-marquee-hit', 'pin-marquee-remove');
+      try { if (drag.dialog.hasPointerCapture(drag.pointerId)) drag.dialog.releasePointerCapture(drag.pointerId); } catch (e) {}
+      return true;
+    }
+
+    function pinMarqueeClip(root) {
+      let box = { left: 0, top: 0, right: innerWidth, bottom: innerHeight };
+      for (let node = root; node; node = node.parentElement) {
+        if (node !== root && !/(auto|scroll|hidden|clip)/.test(getComputedStyle(node).overflow)) continue;
+        const rect = node.getBoundingClientRect();
+        box = { left: Math.max(box.left, rect.left), top: Math.max(box.top, rect.top),
+          right: Math.min(box.right, rect.right), bottom: Math.min(box.bottom, rect.bottom) };
+        if (node === pinsDialog) break;
+      }
+      return box;
+    }
+
+    function paintPinMarquee() {
+      const drag = pinDrag;
+      if (!drag) return;
+      if (!drag.dialog.isConnected || !drag.dialog.open || !drag.root.isConnected ||
+          drag.generation !== pinGeneration || drag.signature !== drag.root.dataset.options) {
+        cancelPinMarquee(); return;
+      }
+      if (!drag.active) return;
+      const bounds = drag.root.getBoundingClientRect(), clip = pinMarqueeClip(drag.root);
+      const startX = bounds.left + drag.startX - (drag.root.scrollLeft - drag.scrollX);
+      const startY = bounds.top + drag.startY - (drag.root.scrollTop - drag.scrollY);
+      const left = Math.max(clip.left, Math.min(startX, drag.x)), top = Math.max(clip.top, Math.min(startY, drag.y));
+      const right = Math.min(clip.right, Math.max(startX, drag.x)), bottom = Math.min(clip.bottom, Math.max(startY, drag.y));
+      Object.assign(drag.rectangle.style, { left: `${left}px`, top: `${top}px`,
+        width: `${Math.max(0, right - left)}px`, height: `${Math.max(0, bottom - top)}px` });
+      drag.hits.clear();
+      for (const item of drag.items) {
+        const rect = item.label.getBoundingClientRect();
+        const hit = right > left && bottom > top && Math.min(rect.right, right) > Math.max(rect.left, left) &&
+          Math.min(rect.bottom, bottom) > Math.max(rect.top, top);
+        item.label.classList.toggle('pin-marquee-hit', hit);
+        item.label.classList.toggle('pin-marquee-remove', hit && !drag.checked);
+        if (hit) drag.hits.add(item.key);
+      }
+    }
+
+    function startPinMarquee(event) {
+      if (event.button !== 0 || event.isPrimary === false || event.pointerType === 'touch' ||
+          event.target.closest('button,input:not([type=checkbox]),select')) return;
+      const root = event.target.closest('[data-pin-marquee]');
+      if (!root || !pinsDialog.contains(root)) return;
+      const kind = root.dataset.pinMarquee, attr = `pin${kind[0].toUpperCase()}${kind.slice(1)}`;
+      const items = [...root.querySelectorAll('input[type=checkbox]:not(:disabled)')].map(input => ({
+        input, key: input.dataset[attr], label: input.closest('label'),
+      })).filter(item => item.label && item.key);
+      if (!items.length) return;
+      const first = items.find(item => item.label.contains(event.target));
+      const bounds = root.getBoundingClientRect();
+      pinDrag = { root, dialog: pinsDialog, kind, items, generation: pinGeneration, signature: root.dataset.options,
+        pointerId: event.pointerId, active: false, checked: !event.altKey && !first?.input.checked,
+        downX: event.clientX, downY: event.clientY, x: event.clientX, y: event.clientY,
+        startX: event.clientX - bounds.left, startY: event.clientY - bounds.top,
+        scrollX: root.scrollLeft, scrollY: root.scrollTop, hits: new Set() };
+    }
+
+    window.addEventListener('pointermove', event => {
+      const drag = pinDrag;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      if (!drag.active && Math.hypot(event.clientX - drag.downX, event.clientY - drag.downY) < 5) return;
+      if (!drag.active) {
+        drag.active = true;
+        drag.rectangle = document.createElement('div'); drag.rectangle.className = 'pin-marquee';
+        drag.rectangle.setAttribute('aria-hidden', 'true'); drag.dialog.appendChild(drag.rectangle);
+        try { drag.dialog.setPointerCapture(event.pointerId); } catch (e) {}
+      }
+      event.preventDefault(); event.stopImmediatePropagation();
+      drag.x = event.clientX; drag.y = event.clientY;
+      paintPinMarquee();
+    }, { capture: true, passive: false });
+
+    window.addEventListener('pointerup', event => {
+      const drag = pinDrag;
+      if (!drag || event.pointerId !== drag.pointerId) return;
+      if (!drag.active) { cancelPinMarquee(); return; }
+      event.preventDefault(); event.stopImmediatePropagation();
+      drag.x = event.clientX; drag.y = event.clientY;
+      syncPinContext(annotation()); paintPinMarquee();
+      if (pinDrag !== drag) return;
+      const keys = [...drag.hits], checked = drag.checked;
+      cancelPinMarquee();
+      if (!keys.length) return;
+      if (drag.kind === 'ratio') {
+        const next = new Set(pinnedRatios);
+        for (const key of keys) { if (checked) next.add(key); else next.delete(key); }
+        savePinPreferences(next);
+      } else if (drag.kind === 'text') {
+        const next = new Map(pinnedTexts);
+        for (const key of keys) if (next.has(key)) next.set(key, { ...next.get(key), enabled: checked });
+        savePinPreferences(pinnedRatios, keepPeople, next);
+      } else {
+        const current = new Set(pinRows().map(row => row.key));
+        for (const key of keys) if (current.has(key)) { if (checked) pinnedIds.add(key); else pinnedIds.delete(key); }
+        pinError.textContent = ''; failed = new WeakSet(); sync();
+      }
+    }, true);
+    window.addEventListener('pointercancel', event => { if (pinDrag?.pointerId === event.pointerId) cancelPinMarquee(); }, true);
+    window.addEventListener('pointerdown', event => {
+      if (event.isPrimary === false) return;
+      cancelPinMarquee(); suppressPinClick = false;
+    }, true);
+    window.addEventListener('lostpointercapture', event => { if (pinDrag?.pointerId === event.pointerId) cancelPinMarquee(); }, true);
+    window.addEventListener('blur', cancelPinMarquee);
+    window.addEventListener('scroll', paintPinMarquee, true);
+    window.addEventListener('resize', cancelPinMarquee);
+    window.addEventListener('click', event => {
+      if (suppressPinClick && event.detail > 0) {
+        suppressPinClick = false; event.preventDefault(); event.stopImmediatePropagation();
+      }
+    }, true);
+
+    function refreshPinsDialog() {
+      if (!pinsDialog?.isConnected || !pinsDialog.open) return;
+      const rows = pinRows(), ratios = availablePinRatios(rows);
+      const people = pinsDialog.querySelector('[data-pin-people]');
+      if (people.checked !== keepPeople) people.checked = keepPeople;
+      const ratioList = pinsDialog.querySelector('#__selected_visibility_pin_ratios');
+      const ratioSignature = JSON.stringify(ratios);
+      if (ratioList.dataset.options !== ratioSignature) {
+        if (pinDrag?.root === ratioList) cancelPinMarquee();
+        ratioList.replaceChildren(...ratios.map(ratio => {
+          const label = document.createElement('label');
+          const input = document.createElement('input'); input.type = 'checkbox'; input.dataset.pinRatio = ratio;
+          input.addEventListener('change', () => {
+            const next = new Set(pinnedRatios);
+            if (input.checked) next.add(ratio); else next.delete(ratio);
+            savePinPreferences(next);
+          });
+          const text = document.createElement('span'); text.textContent = ratio;
+          label.append(input, text); return label;
+        }));
+        ratioList.dataset.options = ratioSignature;
+      }
+      for (const input of ratioList.querySelectorAll('input')) {
+        const checked = pinnedRatios.has(input.dataset.pinRatio);
+        if (input.checked !== checked) input.checked = checked;
+      }
+      const textList = pinsDialog.querySelector('#__selected_visibility_pin_texts');
+      const textSignature = JSON.stringify([...pinnedTexts].map(([key, rule]) => [key, rule.label, rule.match]));
+      if (textList.dataset.options !== textSignature) {
+        if (pinDrag?.root === textList) cancelPinMarquee();
+        textList.replaceChildren(...[...pinnedTexts].map(([key, rule]) => {
+          const row = document.createElement('div'); row.className = 'pin-text-row';
+          const label = document.createElement('label');
+          const input = document.createElement('input'); input.type = 'checkbox'; input.dataset.pinText = key;
+          const name = `${rule.label}（${rule.match === 'contains' ? '包含文字' : '完整标签'}）`;
+          input.addEventListener('change', () => {
+            if (!pinnedTexts.has(key)) { refreshPinsDialog(); return; }
+            const next = new Map(pinnedTexts); next.set(key, { ...pinnedTexts.get(key), enabled: input.checked });
+            savePinPreferences(pinnedRatios, keepPeople, next);
+          });
+          const text = document.createElement('span'); text.textContent = name;
+          label.append(input, text);
+          const remove = document.createElement('button'); remove.type = 'button'; remove.textContent = '删除';
+          remove.setAttribute('aria-label', `删除文本 ${name}`);
+          remove.addEventListener('click', () => {
+            const next = new Map(pinnedTexts); next.delete(key); savePinPreferences(pinnedRatios, keepPeople, next);
+          });
+          row.append(label, remove); return row;
+        }));
+        if (!pinnedTexts.size) {
+          const empty = document.createElement('p'); empty.textContent = '添加标签文字后，即可勾选或框选常显。'; textList.appendChild(empty);
+        }
+        textList.dataset.options = textSignature;
+      }
+      for (const input of textList.querySelectorAll('input')) {
+        const checked = !!pinnedTexts.get(input.dataset.pinText)?.enabled;
+        if (input.checked !== checked) input.checked = checked;
+      }
+      const query = pinSearch.value.trim().toLocaleLowerCase();
+      const filtered = rows.filter(row => `${row.index} ${row.name} ${row.key || ''}`.toLocaleLowerCase().includes(query));
+      const ids = pinsDialog.querySelector('#__selected_visibility_pin_ids');
+      const signature = JSON.stringify([pinGeneration, filtered.map(row => [row.key, row.name, row.index])]);
+      if (ids.dataset.options !== signature) {
+        if (pinDrag?.root === ids) cancelPinMarquee();
+        const renderedGeneration = pinGeneration;
+        ids.replaceChildren(...filtered.map(row => {
+          const label = document.createElement('label');
+          const input = document.createElement('input'); input.type = 'checkbox'; input.dataset.pinId = row.key || '';
+          input.disabled = !row.key;
+          input.setAttribute('aria-label', `第 ${row.index} 项 · ${row.name}`);
+          input.addEventListener('change', () => {
+            // 旧列表仍在排队的点击不能把上一任务的 ID 写进新任务。
+            syncPinContext(annotation());
+            if (renderedGeneration !== pinGeneration || !(regionsFor(annotation()) || []).some(region => pinId(region) === row.key)) {
+              refreshPinsDialog(); return;
+            }
+            if (input.checked) pinnedIds.add(row.key); else pinnedIds.delete(row.key);
+            pinError.textContent = ''; failed = new WeakSet(); sync();
+          });
+          const text = document.createElement('span'); text.textContent = `第 ${row.index} 项 · ${row.name}`;
+          label.append(input, text); return label;
+        }));
+        if (!filtered.length) {
+          const empty = document.createElement('p'); empty.textContent = rows.length ? '没有匹配的 ID' : '当前任务还没有可设置的框';
+          ids.appendChild(empty);
+        }
+        ids.dataset.options = signature;
+      }
+      for (const input of ids.querySelectorAll('input')) {
+        const checked = pinnedIds.has(input.dataset.pinId);
+        if (input.checked !== checked) input.checked = checked;
+      }
+      const count = rows.filter(row => pinnedIds.has(row.key)).length;
+      const status = pinsDialog.querySelector('[role=status]');
+      const textCount = [...pinnedTexts.values()].filter(rule => rule.enabled).length;
+      const text = `比例 ${pinnedRatios.size} 项 · 文本 ${textCount} 项 · 本任务 ID ${count} 个 · 列出 ${filtered.length}/${rows.length} 个框${enabled ? '' : ' · 选中隐藏关闭，开启后应用常显设置'}`;
+      if (status.textContent !== text) status.textContent = text;
+    }
+
+    function closePinsDialog() { cancelPinMarquee(); if (pinsDialog?.open) pinsDialog.close(); }
+
+    function addPinText() {
+      const label = normalizePinText(pinTextInput.value), match = pinTextMatch.value;
+      if (!label) { pinError.textContent = '请输入 1～80 个字符的标签文字，例如主体或杂物。'; return; }
+      const next = new Map(pinnedTexts); next.set(JSON.stringify([match, label]), { label, match, enabled: true });
+      if (savePinPreferences(pinnedRatios, keepPeople, next)) pinTextInput.value = '';
+    }
+
+    function addPinRatio() {
+      const ratio = parsePinRatio(pinRatioInput.value);
+      if (!ratio) { pinError.textContent = '请输入有效比例，例如 16:9 或 2.35:1，两项都必须大于 0。'; return; }
+      if (savePinPreferences(new Set([...pinnedRatios, ratio]))) pinRatioInput.value = '';
+    }
+
+    function buildPinsDialog() {
+      const style = document.createElement('style');
+      style.textContent = `
+        #${PINS_DIALOG_ID}{box-sizing:border-box;width:min(660px,calc(100vw - 24px));max-height:calc(100dvh - 32px);
+          padding:0;border:1px solid #d8e2ee;border-radius:12px;color:#33455f;background:#fff;box-shadow:0 16px 64px #172c4640;
+          font:13px/1.5 system-ui,-apple-system,"PingFang SC",sans-serif}
+        #${PINS_DIALOG_ID}[open]{display:flex;flex-direction:column}
+        #${PINS_DIALOG_ID} *{box-sizing:border-box}
+        #${PINS_DIALOG_ID}::backdrop{background:#172c4666}
+        #${PINS_DIALOG_ID} .pin-header{padding:20px 22px 14px}
+        #${PINS_DIALOG_ID} h2{font-size:19px;color:#243a55;margin:0 0 6px}
+        #${PINS_DIALOG_ID} p{margin:0;color:#7b8ba1;font-size:12px}
+        #${PINS_DIALOG_ID} .pin-body{padding:18px 22px;overflow:auto;min-height:0;background:#f6f8fc;border-block:1px solid #e5ebf3;overscroll-behavior:contain}
+        #${PINS_DIALOG_ID} section{margin-top:18px}
+        #${PINS_DIALOG_ID} h3{font-size:13px;margin:0 auto 0 0}
+        #${PINS_DIALOG_ID} .pin-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:10px}
+        #${PINS_DIALOG_ID} button{font:inherit;padding:5px 9px;cursor:pointer;border:1px solid #d8e2ee;border-radius:5px;background:#fff;color:#526780}
+        #${PINS_DIALOG_ID} button:hover{background:#edf5ff;border-color:#abc7e9;color:#246bc1}
+        #${PINS_DIALOG_ID} label{display:flex;align-items:center;gap:8px;min-width:0;cursor:pointer}
+        #${PINS_DIALOG_ID} input[type=checkbox]{width:15px;height:15px;flex:0 0 15px;margin:0;accent-color:#287ce4}
+        #${PINS_DIALOG_ID} input[type=text],#${PINS_DIALOG_ID} input[type=search],#${PINS_DIALOG_ID} select{min-width:0;padding:7px 10px;border:1px solid #d5dfec;border-radius:5px;font:inherit;color:inherit;background:#fff}
+        #${PINS_DIALOG_ID} input:focus-visible,#${PINS_DIALOG_ID} button:focus-visible{outline:2px solid #287ce4;outline-offset:2px}
+        #${PINS_DIALOG_ID} .pin-ratios{display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:7px;margin-bottom:10px}
+        #${PINS_DIALOG_ID} .pin-ratios label,#${PINS_DIALOG_ID} .pin-ids label,#${PINS_DIALOG_ID} .pin-texts label{padding:8px 10px;border:1px solid #e1e8f2;border-radius:5px;background:#fff;overflow-wrap:anywhere}
+        #${PINS_DIALOG_ID} label:has(input:checked){border-color:#b5d1f2;background:#edf5ff;color:#246bc1}
+        #${PINS_DIALOG_ID} .pin-custom{display:flex;flex-wrap:wrap;gap:7px}
+        #${PINS_DIALOG_ID} .pin-custom input{flex:1}
+        #${PINS_DIALOG_ID} .pin-search{width:100%;margin-bottom:10px}
+        #${PINS_DIALOG_ID} .pin-ids{display:grid;gap:5px;max-height:260px;overflow:auto;overscroll-behavior:contain}
+        #${PINS_DIALOG_ID} [data-pin-marquee]{user-select:none;-webkit-user-select:none}
+        #${PINS_DIALOG_ID} .pin-texts{display:grid;gap:5px;margin-top:10px;max-height:180px;overflow:auto;overscroll-behavior:contain}
+        #${PINS_DIALOG_ID} .pin-text-row{display:flex;gap:7px;align-items:stretch}
+        #${PINS_DIALOG_ID} .pin-text-row label{flex:1}
+        #${PINS_DIALOG_ID} .pin-text-row button{align-self:center}
+        #${PINS_DIALOG_ID} label.pin-marquee-hit{background:#dcecff;border-color:#287ce4;outline:1px solid #287ce4;outline-offset:-1px}
+        #${PINS_DIALOG_ID} label.pin-marquee-remove{background:#fff0ee;border-color:#ca7367;outline-color:#ca7367}
+        #${PINS_DIALOG_ID} .pin-marquee{position:fixed;z-index:1;pointer-events:none;border:1px solid #287ce4;background:#287ce420;border-radius:2px}
+        #${PINS_DIALOG_ID} .pin-ids span{min-width:0;white-space:normal}
+        #${PINS_DIALOG_ID} .pin-footer{padding:13px 22px}
+        #${PINS_DIALOG_ID} [role=alert]{color:#b54a4a;margin-bottom:8px;overflow-wrap:anywhere}
+        #${PINS_DIALOG_ID} [role=alert]:empty{display:none}
+        #${PINS_DIALOG_ID} [role=status]{font-size:12px;color:#7b8ba1;flex:1}
+        #${PINS_DIALOG_ID} .pin-done{background:#287ce4;color:#fff;border-color:#287ce4}
+        @media(max-width:480px){#${PINS_DIALOG_ID} .pin-header,#${PINS_DIALOG_ID} .pin-body,#${PINS_DIALOG_ID} .pin-footer{padding:14px}}
+      `;
+      (document.head || document.documentElement).appendChild(style);
+      pinsDialog = document.createElement('dialog'); pinsDialog.id = PINS_DIALOG_ID;
+      pinsDialog.setAttribute('aria-labelledby', '__selected_visibility_pins_title');
+      const header = document.createElement('div'); header.className = 'pin-header';
+      const title = document.createElement('h2'); title.id = '__selected_visibility_pins_title'; title.textContent = '常显设置';
+      const help = document.createElement('p'); help.textContent = '比例和文本刷新后保留；具体 ID 仅用于本次页面的当前任务。拖动框选，按住 Alt 拖动取消；Esc 取消本次框选。';
+      header.append(title, help);
+      const body = document.createElement('div'); body.className = 'pin-body';
+      const peopleLabel = document.createElement('label');
+      const people = document.createElement('input'); people.type = 'checkbox'; people.dataset.pinPeople = '';
+      people.addEventListener('change', () => savePinPreferences(pinnedRatios, people.checked));
+      peopleLabel.append(people, '人物-1、人物-2常显'); body.appendChild(peopleLabel);
+      function action(text, run, name = text) {
+        const button = document.createElement('button'); button.type = 'button'; button.textContent = text;
+        button.setAttribute('aria-label', name); button.addEventListener('click', run); return button;
+      }
+      const ratioSection = document.createElement('section');
+      const ratioActions = document.createElement('div'); ratioActions.className = 'pin-actions';
+      const ratioTitle = document.createElement('h3'); ratioTitle.textContent = '按比例常显';
+      ratioActions.append(ratioTitle, action('全选', () => savePinPreferences(new Set(availablePinRatios(pinRows()))), '比例全选'),
+        action('清空', () => savePinPreferences(new Set()), '清空比例常显'));
+      const ratioList = document.createElement('div'); ratioList.id = '__selected_visibility_pin_ratios'; ratioList.className = 'pin-ratios';
+      ratioList.dataset.pinMarquee = 'ratio';
+      ratioList.setAttribute('role', 'group'); ratioList.setAttribute('aria-label', '常显比例');
+      const form = document.createElement('div'); form.className = 'pin-custom';
+      pinRatioInput = document.createElement('input'); pinRatioInput.type = 'text'; pinRatioInput.maxLength = 80;
+      pinRatioInput.setAttribute('aria-label', '自定义常显比例'); pinRatioInput.placeholder = '自定义比例，例如 2.35:1';
+      form.append(pinRatioInput, action('添加常显比例', addPinRatio));
+      ratioSection.append(ratioActions, ratioList, form); body.appendChild(ratioSection);
+      const textSection = document.createElement('section');
+      const textActions = document.createElement('div'); textActions.className = 'pin-actions';
+      const textTitle = document.createElement('h3'); textTitle.textContent = '按文本标签常显';
+      function batchTexts(checked) {
+        savePinPreferences(pinnedRatios, keepPeople, new Map([...pinnedTexts].map(([key, rule]) => [key, { ...rule, enabled: checked }])));
+      }
+      textActions.append(textTitle, action('全选', () => batchTexts(true), '文本全选'),
+        action('取消全选', () => batchTexts(false), '取消文本全选'));
+      const textForm = document.createElement('div'); textForm.className = 'pin-custom';
+      pinTextInput = document.createElement('input'); pinTextInput.type = 'text'; pinTextInput.maxLength = 80;
+      pinTextInput.setAttribute('aria-label', '常显文本'); pinTextInput.placeholder = '例如：主体、杂物（每次添加一项）';
+      pinTextMatch = document.createElement('select'); pinTextMatch.setAttribute('aria-label', '文本匹配方式');
+      for (const [value, name] of [['exact', '完整标签'], ['contains', '包含文字']]) {
+        const option = document.createElement('option'); option.value = value; option.textContent = name; pinTextMatch.appendChild(option);
+      }
+      textForm.append(pinTextInput, pinTextMatch, action('添加', addPinText, '添加文本常显'));
+      const textList = document.createElement('div'); textList.id = '__selected_visibility_pin_texts'; textList.className = 'pin-texts';
+      textList.dataset.pinMarquee = 'text'; textList.setAttribute('role', 'group'); textList.setAttribute('aria-label', '常显文本标签');
+      textSection.append(textActions, textForm, textList); body.appendChild(textSection);
+      const idSection = document.createElement('section');
+      const idActions = document.createElement('div'); idActions.className = 'pin-actions';
+      const idTitle = document.createElement('h3'); idTitle.textContent = '按具体 ID 常显';
+      idActions.append(idTitle, action('勾选筛选结果', () => batchPinIds(true)), action('取消筛选结果', () => batchPinIds(false)),
+        action('清空 ID', () => batchPinIds(false, true), '清空 ID 常显'));
+      pinSearch = document.createElement('input'); pinSearch.type = 'search'; pinSearch.className = 'pin-search';
+      pinSearch.placeholder = '搜索 ID、标签或比例，例如 id-3、[4,3]'; pinSearch.setAttribute('aria-label', '搜索常显 ID');
+      pinSearch.addEventListener('input', refreshPinsDialog);
+      const ids = document.createElement('div'); ids.id = '__selected_visibility_pin_ids'; ids.className = 'pin-ids';
+      ids.dataset.pinMarquee = 'id';
+      ids.setAttribute('role', 'group'); ids.setAttribute('aria-label', '本任务常显 ID');
+      idSection.append(idActions, pinSearch, ids); body.appendChild(idSection);
+      const footer = document.createElement('div'); footer.className = 'pin-footer';
+      pinError = document.createElement('div'); pinError.setAttribute('role', 'alert');
+      const bottom = document.createElement('div'); bottom.className = 'pin-actions'; bottom.style.marginBottom = '0';
+      const status = document.createElement('span'); status.setAttribute('role', 'status');
+      const done = action('完成', closePinsDialog, '完成常显设置'); done.className = 'pin-done';
+      bottom.append(status, done); footer.append(pinError, bottom);
+      pinsDialog.append(header, body, footer);
+      pinsDialog.addEventListener('pointerdown', startPinMarquee);
+      for (const name of ['pointerdown', 'mousedown', 'click', 'dblclick']) pinsDialog.addEventListener(name, event => event.stopPropagation());
+      pinsDialog.addEventListener('cancel', event => { event.preventDefault(); closePinsDialog(); });
+      pinsDialog.addEventListener('close', () => { cancelPinMarquee(); if (pinPreviousFocus?.isConnected) pinPreviousFocus.focus(); });
+      document.body.appendChild(pinsDialog);
+    }
+
+    function openPinsDialog() {
+      if (!pinsDialog?.isConnected) buildPinsDialog();
+      if (pinsDialog.open) return;
+      pinPreviousFocus = document.activeElement;
+      pinSearch.value = ''; pinError.textContent = '';
+      pinsDialog.showModal(); refreshPinsDialog(); pinSearch.focus();
+    }
+
+    // 按钮获焦时也阻断业务快捷键；空格仍由原生复选框和按钮处理。
+    window.addEventListener('keydown', event => {
+      if (!pinsDialog?.isConnected || !pinsDialog.open) return;
+      event.stopImmediatePropagation();
+      if (event.isComposing || event.keyCode === 229) return;
+      if (event.key === 'Escape') { event.preventDefault(); if (!cancelPinMarquee()) closePinsDialog(); }
+      else if (event.key === 'Enter' && event.target === pinRatioInput) { event.preventDefault(); addPinRatio(); }
+      else if (event.key === 'Enter' && event.target === pinTextInput) { event.preventDefault(); addPinText(); }
+    }, true);
 
     function rememberRegion(region, ann) {
       revealedRegion = region; revealAnnotation = ann;
@@ -518,6 +1047,11 @@
           toolbarNode.addEventListener(type, event => event.stopPropagation());
         }
         toolbarNode.append(label, button);
+        const pins = document.createElement('button'); pins.type = 'button'; pins.textContent = '常显设置';
+        pins.setAttribute('aria-label', '常显设置'); pins.id = '__selected_visibility_pins_btn';
+        pins.style.cssText = 'height:24px;padding:0 9px;border:1px solid #d5deea;border-radius:4px;background:#fff;color:#526780;font:inherit;cursor:pointer;white-space:nowrap';
+        pins.addEventListener('click', event => { event.preventDefault(); event.stopPropagation(); openPinsDialog(); });
+        toolbarNode.appendChild(pins);
         for (const [direction, name, text] of [[-1, '上一个 ID', '← 上一 ID'], [1, '下一个 ID', '下一 ID →']]) {
           const nav = document.createElement('button'); nav.type = 'button'; nav.textContent = text;
           nav.setAttribute('aria-label', name); nav.title = direction < 0 ? '上一个 ID（A）' : '下一个 ID（D）';
@@ -554,8 +1088,8 @@
       if (toolbarNode.hidden !== inactive) toolbarNode.hidden = inactive;
       const button = toolbarNode.querySelector(`#${BUTTON_ID}`);
       const text = `选中隐藏：${enabled ? '开' : '关'}`;
-      const title = enabled ? '人物-1、人物-2始终显示；点击哪个框就显示哪个，并隐藏前一个框。点击关闭后显示全部框。' :
-        '已关闭自动隐藏。点击开启后保留人物和当前框。';
+      const title = enabled ? '保留常显设置中的人物、比例、文本标签和 ID；当前点击的框额外显示。点击关闭后显示全部框。' :
+        '已关闭自动隐藏。点击开启后保留常显框和当前框。';
       if (button.textContent !== text) button.textContent = text;
       if (button.title !== title) button.title = title;
       if (button.getAttribute('aria-pressed') !== String(enabled)) {
@@ -577,9 +1111,13 @@
 
     function sync() {
       if (running) return;
+      if (pinDrag && (!pinDrag.dialog.isConnected || !pinDrag.dialog.open)) cancelPinMarquee();
+      const ann = annotation();
+      syncPinContext(ann);
       mountButton();
+      refreshPinsDialog();
       if (!enabled && !restoreAll && !pendingReveal) { result = 'off'; return; }
-      const ann = annotation(), regions = regionsFor(ann);
+      const regions = regionsFor(ann);
       if (!regions) { result = 'waiting-model'; return; }
       syncSelection(ann, regions);
       // 绘制过程由原生编辑器持有，不改变画框时的可见性或选择。
@@ -593,7 +1131,7 @@
               region.isDrawing || region.incomplete === true) continue;
           // 过滤关闭时，只打开本次点击的框，保留其他框的原生眼睛状态。
           if (!enabled && !restoreAll && region !== revealedRegion) continue;
-          const hidden = enabled && !isPerson(region) && region !== revealedRegion;
+          const hidden = enabled && !isPinned(region) && region !== revealedRegion;
           if (region.hidden === hidden) continue;
           if (failed.has(region) || typeof region.hidden !== 'boolean' || typeof region.toggleHidden !== 'function') {
             skipped++;
@@ -625,7 +1163,7 @@
       pendingReveal = false;
       try { localStorage.setItem(STORAGE_KEY, String(enabled)); } catch (e) {}
       sync();
-      showToast(enabled ? '选中隐藏已开启：保留人物和当前框' : '选中隐藏已关闭：恢复显示全部框', 1800);
+      showToast(enabled ? '选中隐藏已开启：保留常显框和当前框' : '选中隐藏已关闭：恢复显示全部框', 1800);
       return enabled;
     }
 
@@ -664,16 +1202,18 @@
     }
 
     window.__SELECTED_VISIBILITY = {
-      version: '1.2.1', setEnabled,
+      version: '1.3.0', setEnabled,
       refresh: sync,
+      openPinsSettings: openPinsDialog,
       next: () => navigate(1), prev: () => navigate(-1), setRatio,
-      state() { return { enabled, result, ratio: selectedRatio }; },
+      state() { syncPinContext(annotation()); return { enabled, result, ratio: selectedRatio,
+        pins: { keepPeople, ratios: [...pinnedRatios], ids: [...pinnedIds] } }; },
     };
     // 保留旧调试名称，方便已有页面工具读取状态；不依赖该工具集。
     window.__PERSON_VISIBILITY = window.__SELECTED_VISIBILITY;
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
     else start();
-    console.log('[选中隐藏] v1.2.1 已加载：跟随新框与画布选择，原生撤回重做');
+    console.log('[选中隐藏] v1.3.0 已加载：批量常显比例与任务 ID，跟随新框及原生撤回重做');
   })();
   // END SHARED SELECTED VISIBILITY
 
@@ -3658,7 +4198,7 @@
 
     load();
     window.__LS_SHORTCUTS = {
-      version: '3.18.4', open: openSettings, scan: scanPage,
+      version: '3.19.1', open: openSettings, scan: scanPage,
       hint: id => bindings()[id] || '',
       state: () => ({ bindings: bindings(), defaults: { ...defaults }, overrides: { ...overrides },
         pageActions: Array.from(pageActions.values(), ({ id, label, page, matches, available }) => ({ id, label, group: page.group, matches, available })) }),
@@ -3667,5 +4207,5 @@
     else start();
   })();
 
-  console.log('[LabelStudio 工具集] v3.18.4 已加载');
+  console.log('[LabelStudio 工具集] v3.19.1 已加载');
 })();
