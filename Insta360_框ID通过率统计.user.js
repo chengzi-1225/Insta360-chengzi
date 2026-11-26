@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Insta360 框ID通过率统计
 // @namespace    local.insta360.region-pass-rate
-// @version      1.5.0
+// @version      1.5.1
 // @description  统计数据统一入口：项目ID、进度周报、历史通过率和按标注员合并评论。
 // @match        https://label.insta360.com/*
 // @homepageURL  https://github.com/chengzi-1225/Insta360-chengzi
@@ -17,7 +17,7 @@
 (function () {
 'use strict';
 if (window.top !== window.self || document.documentElement.hasAttribute('data-i360-stats-loaded')) return;
-document.documentElement.setAttribute('data-i360-stats-loaded', '2.0.0');
+document.documentElement.setAttribute('data-i360-stats-loaded', '2.0.1');
 const Core = (() => {
 const DEFAULT_ORIGIN = 'https://label.insta360.com';
 const FIELD_NAMES = ['url', 'reviewer', 'annotator', 'result', 'reason', 'comment', 'ratio', 'image', 'attachment'];
@@ -1641,9 +1641,6 @@ function mountReviewTools(container, callbacks = {}) {
   let panel;
   let launcher;
   let panelOpen = false;
-  let panelSize = null;
-  let panelMaximized = false;
-  let panelDrag = null;
   let view = 'page';
   let listSignature = '';
   let statistics = null;
@@ -2353,40 +2350,10 @@ function mountReviewTools(container, callbacks = {}) {
     if (changed) saveState();
   }
 
-  function positionPanel() {
+  function updatePanelLayout() {
     if (!panel || !panelOpen) return;
-    const bottom = launcher && launcher.isConnected ? launcher.getBoundingClientRect().bottom : 84;
-    const top = panelMaximized || launcher?.classList.contains('is-floating') ? 18 : Math.min(Math.max(18, Math.ceil(bottom + 8)), Math.max(18, window.innerHeight - 278));
-    const availableWidth = Math.max(1, window.innerWidth - 36);
-    const availableHeight = Math.max(1, window.innerHeight - top - 18);
-    const width = Math.min(availableWidth, panelMaximized ? availableWidth : panelSize ? panelSize.width : 1240);
-    const height = Math.min(availableHeight, panelMaximized ? availableHeight : panelSize ? panelSize.height : 820);
-    const preferredLeft = !panelMaximized && panelSize ? panelSize.left : (window.innerWidth - width) / 2;
-    const left = Math.max(18, Math.min(preferredLeft, window.innerWidth - width - 18));
-    for (const [key, value] of Object.entries({top, left, width, height})) {
-      const cssValue = Math.round(value) + 'px';
-      if (panel.style[key] !== cssValue) panel.style[key] = cssValue;
-    }
+    const width = panel.getBoundingClientRect().width || panel.parentElement?.clientWidth || window.innerWidth - 36;
     panel.classList.toggle('is-compact', width < 820);
-    const maximize = panel.querySelector('[data-action="maximize"]');
-    maximize.textContent = panelMaximized ? '还原' : '最大化';
-    maximize.setAttribute('aria-pressed', String(panelMaximized));
-    const handle = panel.querySelector('[data-panel-resize]');
-    handle.hidden = panelMaximized;
-    handle.setAttribute('aria-valuetext', `${Math.round(width)} × ${Math.round(height)} 像素`);
-  }
-
-  function resizePanel(width, height, left) {
-    const bounds = panel.getBoundingClientRect();
-    const maxWidth = Math.max(1, window.innerWidth - 36);
-    const maxHeight = Math.max(1, window.innerHeight - bounds.top - 18);
-    panelSize = {
-      width: Math.min(maxWidth, Math.max(Math.min(560, maxWidth), width)),
-      height: Math.min(maxHeight, Math.max(Math.min(360, maxHeight), height)),
-      left,
-    };
-    panelMaximized = false;
-    positionPanel();
   }
 
   function applyPanelVisibility() {
@@ -2396,7 +2363,7 @@ function mountReviewTools(container, callbacks = {}) {
       if (launcher.getAttribute('aria-expanded') !== expanded) launcher.setAttribute('aria-expanded', expanded);
       launcher.classList.toggle('is-open', panelOpen);
     }
-    positionPanel();
+    updatePanelLayout();
   }
 
   function setPanelOpen(open, returnFocus = false) {
@@ -2409,7 +2376,12 @@ function mountReviewTools(container, callbacks = {}) {
   function mountLauncher() {
     const header = document.querySelector('.ls-projects-page__title-container');
     const toolbar = header && header.querySelector('.ovw-toolbar');
-    const host = toolbar || header && header.querySelector('.ls-projects-page__filter-container') || header || document.body;
+    const host = toolbar || header && header.querySelector('.ls-projects-page__filter-container') || header;
+    if (!host) {
+      launcher?.remove();
+      setPanelOpen(false);
+      return;
+    }
     if (!launcher) {
       launcher = document.createElement('button');
       launcher.id = LAUNCHER_ID;
@@ -2426,7 +2398,6 @@ function mountReviewTools(container, callbacks = {}) {
         if (launcher.isConnected) setPanelOpen(!panelOpen);
       });
     }
-    launcher.classList.toggle('is-floating', host === document.body);
     // 页面重挂可能留下无事件的 DOM 副本，始终复用持有事件的唯一按钮。
     document.querySelectorAll('#' + LAUNCHER_ID).forEach(element => {
       if (element !== launcher) element.remove();
@@ -2438,6 +2409,7 @@ function mountReviewTools(container, callbacks = {}) {
       const popover = toolbar && [...toolbar.children].find(element => element.classList.contains('ovw-toolbar__panel'));
       host.insertBefore(launcher, popover || null);
     }
+    if (header.nextElementSibling !== panel) header.after(panel);
     applyPanelVisibility();
   }
 
@@ -2455,12 +2427,11 @@ function mountReviewTools(container, callbacks = {}) {
         #${LAUNCHER_ID}{display:inline-flex;align-items:center;justify-content:center;gap:6px;flex-shrink:0;height:32px;padding:0 12px;margin-left:8px;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:rgba(0,0,0,.88);cursor:pointer;font:13px/1 system-ui,sans-serif;white-space:nowrap}
         #${LAUNCHER_ID}:hover,#${LAUNCHER_ID}.is-open{color:#1677ff;border-color:#1677ff;background:#f6faff}
         #${LAUNCHER_ID}:focus-visible{outline:2px solid #1677ff;outline-offset:2px}
-        #${LAUNCHER_ID}.is-floating{position:fixed;right:22px;bottom:156px;z-index:2147482999;box-shadow:0 3px 16px #16362e22}
-        #${PANEL_ID}{position:fixed;left:18px;top:92px;z-index:2147483000;display:flex;flex-direction:column;width:1000px;height:780px;max-width:calc(100vw - 36px);max-height:calc(100vh - 36px);overflow:hidden;box-sizing:border-box;padding:20px;background:#fff;color:#1e293b;border:1px solid #cbd5e1;border-radius:12px;box-shadow:0 10px 40px #0f172a30;font:14px/1.5 system-ui,sans-serif;text-align:left;color-scheme:light}
+        #${PANEL_ID}{position:relative;display:flex;flex-direction:column;flex-basis:100%;grid-column:1/-1;align-self:stretch;width:100%;min-width:0;margin:16px 0;overflow:hidden;box-sizing:border-box;padding:20px;background:#fff;color:#1e293b;border:1px solid #cbd5e1;border-radius:12px;font:14px/1.5 system-ui,sans-serif;text-align:left;color-scheme:light}
         #${PANEL_ID}[hidden]{display:none!important}
         #${PANEL_ID} *{box-sizing:border-box}
         #${PANEL_ID} strong{font-size:18px} #${PANEL_ID} p{margin:5px 0 9px}
-        #${PANEL_ID} .stats-panel-body{display:grid;grid-template-columns:290px minmax(0,1fr);gap:20px;flex:1;min-height:0;margin-top:16px}
+        #${PANEL_ID} .stats-panel-body{display:grid;grid-template-columns:290px minmax(0,1fr);gap:20px;flex:0 0 auto;height:min(660px,74vh);min-height:0;margin-top:16px}
         #${PANEL_ID} .stats-project-column{display:flex;flex-direction:column;min-height:0;min-width:0}
         #${PANEL_ID} .stats-result-column{min-height:0;min-width:0;overflow:auto;overscroll-behavior:contain;padding-left:20px;border-left:1px solid #e2e8f0}
         #${PANEL_ID} .dashboard-nav{position:sticky;top:0;background:#fff;z-index:4;padding-bottom:12px}
@@ -2479,10 +2450,6 @@ function mountReviewTools(container, callbacks = {}) {
         #${PANEL_ID} [data-project-input]{height:64px;border:1px solid #cbd5e1;border-radius:6px;padding:7px}
         #${PANEL_ID} [data-action="import"]{margin-top:6px;padding:6px 9px;color:#1d4ed8}
         #${PANEL_ID} .stats-panel-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-shrink:0;padding-top:12px;margin-top:12px;border-top:1px solid #e2e8f0;color:#64748b;font-size:12px}
-        #${PANEL_ID} .stats-panel-footer>span{flex-shrink:0;white-space:nowrap}
-        #${PANEL_ID} [data-panel-resize]{position:absolute;right:0;bottom:0;width:24px;height:24px;padding:0;border:0;border-radius:0 0 10px 0;background:transparent;cursor:nwse-resize;touch-action:none}
-        #${PANEL_ID} [data-panel-resize]::after{content:'';position:absolute;right:5px;bottom:5px;width:10px;height:10px;background:repeating-linear-gradient(135deg,transparent 0 3px,#94a3b8 3px 4px)}
-        #${PANEL_ID}.is-resizing{user-select:none}
         #${PANEL_ID} .id-buttons{display:grid;grid-template-columns:1fr 1fr;gap:7px}
         #${PANEL_ID} button{margin:0;padding:7px 5px;border:1px solid #cbd5e1;border-radius:6px;color:#1e293b;background:#f8fafc;cursor:pointer;font:inherit}
         #${PANEL_ID} [data-action="stats"]{flex:1;background:#2563eb;border-color:#2563eb;color:#fff;font-weight:600;padding:10px}
@@ -2491,8 +2458,6 @@ function mountReviewTools(container, callbacks = {}) {
         #${PANEL_ID} button:focus-visible,#${PANEL_ID} input:focus-visible{outline:2px solid #2563eb;outline-offset:2px}
         #${PANEL_ID} .stats-panel-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-shrink:0;padding-bottom:16px;border-bottom:1px solid #e2e8f0}
         #${PANEL_ID} .stats-window-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
-        #${PANEL_ID} [data-action="maximize"]{padding:5px 10px;font-size:12px}
-        #${PANEL_ID} [data-action="reset-size"]{padding:0;border:0;background:transparent;color:#2563eb;font-size:12px;margin-right:12px}
         #${PANEL_ID} [data-action="close"]{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border-color:transparent;background:transparent;color:#64748b;font-size:22px;line-height:1}
         #${PANEL_ID} .id-tabs{display:flex;gap:4px;border-bottom:1px solid #e2e8f0;flex-shrink:0}
         #${PANEL_ID} .id-tabs button{flex:1;background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;padding:9px 4px;color:#64748b}
@@ -2543,18 +2508,17 @@ function mountReviewTools(container, callbacks = {}) {
         #${PANEL_ID} .id-tools{margin-top:16px;color:#64748b;font-size:12px}
         #${PANEL_ID} .id-tools .id-buttons{margin-top:8px}
         #${PANEL_ID}.is-compact{padding:14px}
-        #${PANEL_ID}.is-compact .stats-panel-body{display:flex;flex-direction:column;overflow:auto;gap:16px}
+        #${PANEL_ID}.is-compact .stats-panel-body{display:flex;flex-direction:column;height:auto;overflow:visible;gap:16px}
         #${PANEL_ID}.is-compact .stats-project-column{min-height:0;height:auto;flex-shrink:0}
         #${PANEL_ID}.is-compact [data-project-list]{flex:0 0 170px;min-height:170px}
         #${PANEL_ID}.is-compact .stats-result-column{min-height:auto;overflow:visible;padding:0;border:0;flex-shrink:0}
         #${PANEL_ID}.is-compact .stats-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
         #${PANEL_ID}.is-compact .stats-grid b{font-size:20px}
-        #${PANEL_ID}.is-compact .stats-panel-footer .stats-size-help{display:none}
         @media(max-width:480px){#${PANEL_ID} .stats-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important}#${PANEL_ID} .stats-subtitle{font-size:12px}#${PANEL_ID} strong{font-size:16px}#${PANEL_ID} .stats-window-actions{gap:4px}}
         #${PANEL_ID} [data-status]{color:#475569;font-size:12px;margin:0;min-width:0;overflow-wrap:anywhere}
         #${PANEL_ID} summary{cursor:pointer;color:#475569} #${PANEL_ID} textarea{box-sizing:border-box;width:100%;height:76px;margin-top:6px;resize:vertical;font:12px/1.5 monospace}
       </style>
-      <div class="stats-panel-header"><div><strong>项目统计数据</strong><p class="stats-subtitle">选择一次项目，查看进度、历史通过率与全部评论</p></div><div class="stats-window-actions"><button type="button" data-action="maximize" aria-pressed="false">最大化</button><button type="button" data-action="close" aria-label="关闭项目统计面板" title="关闭（Esc），保留选择和结果">×</button></div></div>
+      <div class="stats-panel-header"><div><strong>项目统计数据</strong><p class="stats-subtitle">选择一次项目，查看进度、历史通过率与全部评论</p></div><div class="stats-window-actions"><button type="button" data-action="close" aria-label="关闭项目统计面板" title="收起（Esc），保留选择和结果">×</button></div></div>
       <div class="stats-panel-body"><div class="stats-project-column"><p data-count></p>
       <div class="id-tabs" role="tablist" aria-label="项目清单范围">
         <button type="button" role="tab" data-action="tab-page">本页项目</button>
@@ -2586,8 +2550,7 @@ function mountReviewTools(container, callbacks = {}) {
       </div>
       <details data-id-detail><summary>查看 / 手动复制 ID</summary><textarea readonly aria-label="项目 ID 复制结果"></textarea></details></details>
       </div></div>
-      <div class="stats-panel-footer"><p data-status role="status">勾选需要的项目，再点「统计所选项目」。</p><span><span class="stats-size-help">拖动右下角调整大小 · </span><button type="button" data-action="reset-size">恢复默认大小</button></span></div>
-      <button type="button" data-panel-resize aria-label="调整面板大小" title="拖动调整大小；方向键每次调整 40 像素"></button>`;
+      <div class="stats-panel-footer"><p data-status role="status">勾选需要的项目，再点「统计所选项目」。</p></div>`;
     const mountedPanel = panel;
     reviewTools = mountReviewTools(panel.querySelector('[data-review-tools]'), {
       onClose: () => { if (panel === mountedPanel) setPanelOpen(false, true); },
@@ -2607,23 +2570,6 @@ function mountReviewTools(container, callbacks = {}) {
         const next = modes[(modes.indexOf(toolView) + (event.key === 'ArrowRight' ? 1 : 2)) % 3];
         setToolView(next); panel.querySelector(`[data-action="view-${next}"]`).focus(); event.preventDefault();
       }
-    });
-    panel.querySelector('[data-panel-resize]').addEventListener('pointerdown', event => {
-      if (event.button !== 0 || panelMaximized) return;
-      const bounds = panel.getBoundingClientRect();
-      panelDrag = {pointerId: event.pointerId, x: event.clientX, y: event.clientY,
-        width: bounds.width, height: bounds.height, left: bounds.left};
-      try { event.currentTarget.setPointerCapture(event.pointerId); } catch (_) { /* 合成事件没有活动指针。 */ }
-      panel.classList.add('is-resizing');
-      event.preventDefault();
-    });
-    panel.querySelector('[data-panel-resize]').addEventListener('keydown', event => {
-      const directions = {ArrowRight: [40, 0], ArrowLeft: [-40, 0], ArrowDown: [0, 40], ArrowUp: [0, -40]};
-      const delta = directions[event.key];
-      if (!delta) return;
-      const bounds = panel.getBoundingClientRect();
-      resizePanel(bounds.width + delta[0], bounds.height + delta[1], bounds.left);
-      event.preventDefault();
     });
     panel.addEventListener('change', event => {
       if (event.target.matches('[data-weekly-date]')) {
@@ -2646,8 +2592,6 @@ function mountReviewTools(container, callbacks = {}) {
       const button = event.target.closest('button[data-action]');
       if (!button) return;
       if (button.dataset.action === 'close') { setPanelOpen(false, true); return; }
-      if (button.dataset.action === 'maximize') { panelMaximized = !panelMaximized; positionPanel(); return; }
-      if (button.dataset.action === 'reset-size') { panelSize = null; panelMaximized = false; positionPanel(); return; }
       if (button.dataset.action.startsWith('view-')) { setToolView(button.dataset.action.slice(5)); return; }
       if (button.dataset.action === 'export-all') { exportAll(); return; }
       if (button.dataset.action === 'stop-all') {
@@ -2770,20 +2714,7 @@ function mountReviewTools(container, callbacks = {}) {
   observer.observe(document.body, {subtree: true, childList: true,
     attributes: true, attributeFilter: ['style', 'class', 'hidden', 'href', 'data-project-id']});
   window.addEventListener('popstate', refresh);
-  window.addEventListener('resize', positionPanel);
-  window.addEventListener('scroll', positionPanel, {passive: true});
-  document.addEventListener('pointermove', event => {
-    if (!panelDrag || event.pointerId !== panelDrag.pointerId) return;
-    resizePanel(panelDrag.width + event.clientX - panelDrag.x,
-      panelDrag.height + event.clientY - panelDrag.y, panelDrag.left);
-  });
-  const stopResize = event => {
-    if (!panelDrag || event.pointerId !== panelDrag.pointerId) return;
-    panelDrag = null;
-    if (panel) panel.classList.remove('is-resizing');
-  };
-  document.addEventListener('pointerup', stopResize);
-  document.addEventListener('pointercancel', stopResize);
+  window.addEventListener('resize', updatePanelLayout);
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape' && panelOpen) {
       setPanelOpen(false, true);
