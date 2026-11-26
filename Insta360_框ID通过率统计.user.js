@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Insta360 框ID通过率统计
 // @namespace    local.insta360.region-pass-rate
-// @version      1.3.2
-// @description  读取项目包历史审核记录，按时间和标注员统计通过率并导出Excel明细。
+// @version      1.4.0
+// @description  统计项目历史通过率，读取全部评论并按项目、标注员合并导出Excel。
 // @match        https://label.insta360.com/*
 // @homepageURL  https://github.com/chengzi-1225/Insta360-chengzi
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/Insta360_框ID通过率统计.user.js
@@ -860,6 +860,508 @@ function workbookBytes(sheets) {
 
 return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, parseProjectIds, extractCurrentProjectCards, classifyHistoryStatus, filterHistoryRows, aggregateHistory, fetchHistoryPaged, collectProjectHistory, workbookBytes};
 })();
+const Comments = (() => {
+const COMMENT_DEFAULT_ORIGIN = 'https://label.insta360.com';
+
+function commentAbortError() {
+  const error = new Error('已停止读取');
+  error.name = 'AbortError';
+  return error;
+}
+
+function commentCheckAbort(signal, error) {
+  if (signal?.aborted || error?.name === 'AbortError') throw commentAbortError();
+}
+
+function commentOrigin(origin) {
+  let url;
+  try { url = new URL(origin || COMMENT_DEFAULT_ORIGIN); } catch { throw new Error('当前网站地址格式不正确'); }
+  if (!/^https?:$/.test(url.protocol) || url.username || url.password) throw new Error('当前网站必须使用有效的 HTTP 同源地址');
+  return url.origin;
+}
+
+function commentSafeURL(value, base, origin, kind) {
+  let url;
+  try { url = new URL(value, base); } catch { throw new Error(`${kind}分页地址格式不正确`); }
+  if (url.origin !== origin || !/^https?:$/.test(url.protocol)) throw new Error(`${kind}分页地址必须属于当前同源网站`);
+  if (url.username || url.password) throw new Error(`${kind}分页地址不能包含登录凭据`);
+  url.hash = '';
+  return url;
+}
+
+function commentRequest(url, { requestJSON, signal }) {
+  commentCheckAbort(signal);
+  if (typeof requestJSON !== 'function') return Promise.reject(new TypeError('requestJSON must be a function'));
+  return new Promise((resolve, reject) => {
+    const abort = () => { cleanup(); reject(commentAbortError()); };
+    const cleanup = () => signal?.removeEventListener('abort', abort);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted) { abort(); return; }
+    Promise.resolve().then(() => {
+      commentCheckAbort(signal);
+      return requestJSON(url, { signal });
+    }).then(value => {
+      cleanup();
+      if (signal?.aborted) reject(commentAbortError());
+      else resolve(value);
+    }, error => {
+      cleanup();
+      reject(signal?.aborted || error?.name === 'AbortError' ? commentAbortError() : error);
+    });
+  });
+}
+
+function commentPositiveId(value) {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value > 0 ? String(value) : '';
+  return typeof value === 'string' && /^[1-9]\d*$/.test(value) ? value : '';
+}
+
+function commentReferenceId(value) {
+  return commentPositiveId(value && typeof value === 'object' ? value.id : value);
+}
+
+function commentText(value) {
+  if (value == null) return '';
+  if (typeof value === 'object') return JSON.stringify(value);
+  return String(value);
+}
+
+function commentMessage(error) {
+  return error?.message || String(error || '未知错误');
+}
+
+function parseProjectIds(text) {
+  const values = String(text ?? '').trim().split(/[,，\s]+/).filter(Boolean);
+  if (!values.length || values.some(value => !commentPositiveId(value))) throw new Error('项目 ID 必须是正整数，可用英文逗号、中文逗号或空白分隔');
+  return [...new Set(values)];
+}
+
+/**
+ * Read documented array/results/comments/tasks pages. On incomplete reads the
+ * rejected error carries partialRows, which callers can retain as partial data.
+ */
+async function fetchPagedRows(url, { requestJSON, origin = COMMENT_DEFAULT_ORIGIN, signal, kind = '记录', onPage } = {}) {
+  commentCheckAbort(signal);
+  const currentOrigin = commentOrigin(origin);
+  const rows = [], ids = new Set(), visited = new Set();
+  let next = url, base = `${currentOrigin}/`, expectedCount = null, page = 0;
+  try {
+    while (next) {
+      commentCheckAbort(signal);
+      const address = commentSafeURL(next, base, currentOrigin, kind);
+      const canonical = new URL(address);
+      canonical.searchParams.sort();
+      if (visited.has(canonical.href)) throw new Error(`${kind}分页地址重复，未能完整读取`);
+      if (page >= 10000) throw new Error(`${kind}分页超过安全上限，未能完整读取`);
+      visited.add(canonical.href);
+      const data = await commentRequest(address.href, { requestJSON, signal });
+      commentCheckAbort(signal);
+      let batch, following = null;
+      if (Array.isArray(data)) batch = data;
+      else if (data && typeof data === 'object') {
+        const keys = ['results', 'comments', 'tasks'].filter(key => Object.hasOwn(data, key));
+        if (keys.length !== 1 || !Array.isArray(data[keys[0]])) throw new Error(`${kind}接口分页结果格式不正确`);
+        batch = data[keys[0]];
+        if (Object.hasOwn(data, 'count')) {
+          if (typeof data.count !== 'number' || !Number.isSafeInteger(data.count) || data.count < 0) throw new Error(`${kind}分页数量 count 格式不正确`);
+          if (expectedCount !== null && expectedCount !== data.count) throw new Error(`${kind}分页总数量发生变化，未能确认完整性`);
+          expectedCount = data.count;
+        }
+        following = data.next;
+        if (following != null && typeof following !== 'string') throw new Error(`${kind}下一页地址格式不正确`);
+      } else throw new Error(`${kind}接口返回格式不正确`);
+      if (batch.some(row => !row || typeof row !== 'object' || Array.isArray(row))) throw new Error(`${kind}页结果必须是对象数组，接口格式不正确`);
+      for (const row of batch) {
+        const id = row.id;
+        const hasId = (typeof id === 'string' && id !== '') || (typeof id === 'number' && Number.isFinite(id));
+        if (hasId) {
+          const key = String(id);
+          if (ids.has(key)) continue;
+          ids.add(key);
+        }
+        rows.push(row);
+      }
+      page++;
+      onPage?.({ page, url: address.href, count: rows.length, total: expectedCount, pageCount: batch.length });
+      commentCheckAbort(signal);
+      if (expectedCount !== null && rows.length > expectedCount) throw new Error(`${kind}唯一记录数量 ${rows.length} 超过 count ${expectedCount}，未能确认完整性`);
+      next = following || null;
+      base = address.href;
+      if (!next && expectedCount !== null && rows.length !== expectedCount) throw new Error(`${kind}唯一记录数量 ${rows.length} 与 count ${expectedCount} 不一致或缺少下一页，未能完整读取`);
+    }
+    return rows;
+  } catch (error) {
+    commentCheckAbort(signal, error);
+    const failure = new Error(commentMessage(error));
+    failure.partialRows = rows.slice();
+    throw failure;
+  }
+}
+
+function commentName(value) {
+  const text = String(value ?? '').replace(/\s+/g, ' ').trim();
+  return /[\u3400-\u9fff]/.test(text) ? text.replace(/\s/g, '') : text;
+}
+
+function commentCreatedName(value) {
+  return commentName(String(value ?? '').replace(/[^\s,，]+@[^\s,，]+/g, ' ').replace(/[,，]/g, ' ').split(/\s+/).filter(part => part && !/^\d+$/.test(part)).join(' '));
+}
+
+function commentUserName(value, users, createdUsername) {
+  if (value && typeof value === 'object') {
+    const full = commentName(`${value.first_name || ''} ${value.last_name || ''}`);
+    if (full) return full;
+    if (value.username) return commentName(value.username);
+    const fallback = commentCreatedName(createdUsername);
+    if (fallback) return fallback;
+    return users.get(String(value.id)) || commentText(value.id);
+  }
+  const fallback = commentCreatedName(createdUsername);
+  if (fallback) return fallback;
+  return users.get(String(value)) || commentName(value);
+}
+
+function commentTime(value) {
+  const time = Date.parse(value || '');
+  return Number.isFinite(time) ? time : 0;
+}
+
+function commentCompareId(a, b) {
+  const left = String(a ?? ''), right = String(b ?? '');
+  if (/^\d+$/.test(left) && /^\d+$/.test(right)) {
+    const l = left.replace(/^0+(?=\d)/, ''), r = right.replace(/^0+(?=\d)/, '');
+    return l.length - r.length || (l < r ? -1 : l > r ? 1 : 0);
+  }
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function commentCompare(a, b) {
+  return commentTime(a.created_at) - commentTime(b.created_at) || commentCompareId(a.id, b.id);
+}
+
+function commentLatest(records, updated = false) {
+  return records.filter(value => value && typeof value === 'object').reduce((latest, value) => {
+    if (!latest) return value;
+    const time = item => updated ? commentTime(item.updated_at) || commentTime(item.created_at) : commentTime(item.created_at);
+    return time(value) > time(latest) || (time(value) === time(latest) && commentCompareId(value.id, latest.id) > 0) ? value : latest;
+  }, null);
+}
+
+function commentFileName(task, origin) {
+  const data = task?.data || {};
+  const values = [data.filename, data.file_name, data.image, data.video, data.audio, task?.filename, task?.file_name, task?.image, task?.file_url, task?.url];
+  for (const value of values) {
+    if (typeof value !== 'string' || !value) continue;
+    let name;
+    try { name = new URL(value, origin).pathname.split('/').pop(); }
+    catch { name = value.split(/[\\/]/).pop()?.split(/[?#]/)[0]; }
+    if (name) { try { return decodeURIComponent(name); } catch { return name; } }
+  }
+  return '';
+}
+
+function commentImages(images, origin) {
+  if (images == null) return '';
+  return (Array.isArray(images) ? images : [images]).map(value => {
+    if (typeof value !== 'string') return commentText(value);
+    try { return new URL(value, origin).href; } catch { return value; }
+  }).join('\n');
+}
+
+function commentBoolean(value) {
+  return value === true || value === 1 || value === 'true' || value === '1';
+}
+
+async function collectCommentProjects(projectIds, { origin = COMMENT_DEFAULT_ORIGIN, requestJSON, signal, onProgress, concurrency = 3 } = {}) {
+  commentCheckAbort(signal);
+  if (!Array.isArray(projectIds) || !projectIds.length || projectIds.some(id => !commentPositiveId(id))) throw new Error('项目 ID 必须是正整数数组且不能为空');
+  const projects = [...new Set(projectIds.map(String))];
+  const currentOrigin = commentOrigin(origin);
+  if (typeof requestJSON !== 'function') throw new TypeError('requestJSON must be a function');
+  const workers = Math.max(1, Math.min(3, Number.isFinite(concurrency) ? Math.floor(concurrency) : 3));
+  const summaries = [], comments = [], failures = [], warnings = [], users = new Map();
+  let commentCount = 0;
+  const progress = (phase, projectId, done, total, message) => {
+    commentCheckAbort(signal);
+    onProgress?.({ phase, projectId, done, total, commentCount, message });
+    commentCheckAbort(signal);
+  };
+  progress('users', '', 0, projects.length, '正在读取用户姓名');
+  let userRows = [];
+  try {
+    userRows = await fetchPagedRows(`${currentOrigin}/api/users/?page_size=500`, { requestJSON, origin: currentOrigin, signal, kind: '用户' });
+  } catch (error) {
+    commentCheckAbort(signal, error);
+    userRows = error.partialRows || [];
+    warnings.push(`用户表读取失败，部分姓名可能显示为 ID：${commentMessage(error)}`);
+  }
+  for (const user of userRows) {
+    if (user.id != null) users.set(String(user.id), commentUserName(user, new Map()) || String(user.id));
+  }
+
+  async function readTask(raw, projectId) {
+    commentCheckAbort(signal);
+    const taskId = commentPositiveId(raw.id);
+    const pageUrl = `${currentOrigin}/workspaces/all/projects/${projectId}/data?task=${encodeURIComponent(taskId)}`;
+    let detail = raw, detailFailure = '', commentFailure = '', list = [];
+    try {
+      const result = await commentRequest(`${currentOrigin}/api/tasks/${taskId}/`, { requestJSON, signal });
+      if (!result || typeof result !== 'object' || Array.isArray(result)) throw new Error('任务详情格式不正确');
+      if (commentPositiveId(result.id) !== taskId || commentReferenceId(result.project) !== projectId ||
+          (result.project_id != null && commentReferenceId(result.project_id) !== projectId)) throw new Error('任务详情的项目或任务 ID 与请求不一致');
+      detail = result;
+    } catch (error) {
+      commentCheckAbort(signal, error);
+      detailFailure = `任务详情读取失败：${commentMessage(error)}`;
+    }
+    // Keep the detail and comments failures independent while limiting the
+    // total number of in-flight API tasks to the configured worker count.
+    try {
+      list = await fetchPagedRows(`${currentOrigin}/api/comments/?task=${encodeURIComponent(taskId)}`, { requestJSON, origin: currentOrigin, signal, kind: '评论' });
+    } catch (error) {
+      commentCheckAbort(signal, error);
+      list = error.partialRows || [];
+      commentFailure = `评论读取失败：${commentMessage(error)}`;
+    }
+    commentCheckAbort(signal);
+    const validComments = [];
+    for (const value of list) {
+      if ((value.task != null && commentReferenceId(value.task) !== taskId) ||
+          (value.project != null && commentReferenceId(value.project) !== projectId)) {
+        const message = '评论的项目或任务 ID 与请求不一致';
+        if (!commentFailure.includes(message)) commentFailure += `${commentFailure ? '；' : ''}评论读取失败：${message}`;
+      } else validComments.push(value);
+    }
+    validComments.sort(commentCompare);
+    const allAnnotations = Array.isArray(detail.annotations) ? detail.annotations.filter(value => value && typeof value === 'object') : [];
+    const annotations = allAnnotations.filter(value => !commentBoolean(value.was_cancelled) && !commentBoolean(value.is_draft));
+    const annotation = commentLatest(annotations, true);
+    const reviewer = commentLatest(Array.isArray(detail.reviews) ? detail.reviews : []);
+    const annotatorName = commentUserName(annotation?.completed_by, users, annotation?.created_username);
+    const reviewerName = commentUserName(reviewer?.created_by, users, reviewer?.created_username);
+    const feedback = detail.feedback;
+    const reviewText = commentText(reviewer?.comment || (feedback && typeof feedback === 'object' ? feedback.text ?? feedback.comment : feedback));
+    const file = commentFileName(detail, currentOrigin) || commentFileName(raw, currentOrigin);
+    const shared = { 项目ID: projectId, 任务ID: taskId, 文件名称: file, 任务页面链接: pageUrl, 标注员: annotatorName, 标注员ID: commentReferenceId(annotation?.completed_by), 审核员: reviewerName };
+    const taskComments = validComments.map(value => {
+      const linked = value.annotation == null ? annotation : allAnnotations.find(item => commentReferenceId(item.id) === commentReferenceId(value.annotation));
+      return {
+      ...shared,
+      标注员: commentUserName(linked?.completed_by, users, linked?.created_username),
+      标注员ID: commentReferenceId(linked?.completed_by),
+      评论ID: value.id ?? '',
+      评论文字: commentText(value.text),
+      评论图片: commentImages(value.images, currentOrigin),
+      评论人: commentUserName(value.created_by, users, value.created_username),
+      评论时间: commentText(value.created_at),
+      修改时间: commentText(value.updated_at),
+      是否已解决: commentBoolean(value.is_resolved) ? '是' : '否',
+      标注ID: value.annotation && typeof value.annotation === 'object' ? value.annotation.id ?? commentText(value.annotation) : value.annotation ?? '',
+      };
+    });
+    const summary = {
+      ...shared,
+      最新审核评论: reviewText,
+      任务状态: commentText(detail.state ?? raw.state),
+      最新评论文字: commentText(validComments.at(-1)?.text),
+      全部评论文字: validComments.map(value => commentText(value.text)).join('\n\n'),
+      评论条数: commentFailure ? null : validComments.length,
+      评论读取状态: commentFailure ? `${commentFailure}${validComments.length ? `；已保留 ${validComments.length} 条部分评论` : ''}` : '成功',
+      详情读取状态: detailFailure || '成功',
+    };
+    const failure = detailFailure || commentFailure ? { 项目ID: projectId, 任务ID: taskId, 说明: [detailFailure, commentFailure].filter(Boolean).join('；') } : null;
+    return { summary, comments: taskComments, failure };
+  }
+
+  for (const projectId of projects) {
+    commentCheckAbort(signal);
+    progress('tasks', projectId, 0, 0, `正在读取项目 ${projectId} 的全部任务`);
+    let tasks = [];
+    try {
+      tasks = await fetchPagedRows(`${currentOrigin}/api/tasks/?project=${encodeURIComponent(projectId)}&page_size=200`, {
+        requestJSON, origin: currentOrigin, signal, kind: '任务',
+        onPage: page => progress('tasks', projectId, page.count, page.total ?? page.count, `项目 ${projectId}：已读取 ${page.count} 个任务`),
+      });
+    } catch (error) {
+      commentCheckAbort(signal, error);
+      tasks = error.partialRows || [];
+      failures.push({ 项目ID: projectId, 任务ID: '', 说明: `任务列表读取失败：${commentMessage(error)}` });
+    }
+    const validTasks = [];
+    for (const task of tasks) {
+      const id = commentPositiveId(task.id);
+      const listedProject = task.project_id ?? task.project;
+      if (!id || commentReferenceId(listedProject) !== projectId || (task.project != null && commentReferenceId(task.project) !== projectId)) {
+        failures.push({ 项目ID: projectId, 任务ID: commentText(task.id), 说明: !id ? '任务列表包含无效的任务 ID，必须是正整数' : '任务列表的项目 ID 与请求不一致' });
+      } else validTasks.push(task);
+    }
+    let cursor = 0, done = 0;
+    const result = new Array(validTasks.length);
+    async function worker() {
+      while (cursor < validTasks.length) {
+        commentCheckAbort(signal);
+        const index = cursor++;
+        const item = await readTask(validTasks[index], projectId);
+        commentCheckAbort(signal);
+        result[index] = item;
+        done++;
+        commentCount += item.comments.length;
+        progress('task', projectId, done, validTasks.length, `项目 ${projectId}：已读取 ${done} / ${validTasks.length} 个任务，已收集 ${commentCount} 条评论`);
+      }
+    }
+    await Promise.all(Array.from({ length: Math.min(workers, validTasks.length) }, () => worker()));
+    commentCheckAbort(signal);
+    for (const item of result) {
+      summaries.push(item.summary);
+      comments.push(...item.comments);
+      if (item.failure) failures.push(item.failure);
+    }
+    progress('project', projectId, done, validTasks.length, `项目 ${projectId} 读取结束：${done} 个任务`);
+  }
+  comments.sort((a, b) => commentTime(a.评论时间) - commentTime(b.评论时间) || commentCompareId(a.评论ID, b.评论ID) || projects.indexOf(a.项目ID) - projects.indexOf(b.项目ID) || commentCompareId(a.任务ID, b.任务ID));
+  const complete = failures.length === 0;
+  progress('complete', '', summaries.length, summaries.length, complete ? '全部项目评论读取完成' : '读取结束，存在未完整读取的数据');
+  return { projects, summaries, comments, failures, warnings, complete };
+}
+
+const COMMENT_GROUP_HEADERS = ['项目ID', '项目名称', '标注员', '涉及任务数', '已读评论数', '内容分段', '合并评论', '任务链接', '读取状态', '标注员ID'];
+const COMMENT_DETAIL_HEADERS = ['项目ID', '任务ID', '文件名称', '任务页面链接', '标注员', '审核员', '评论ID', '评论文字', '评论人', '评论时间', '修改时间', '是否已解决', '标注ID', '评论图片', '标注员ID'];
+const COMMENT_TASK_HEADERS = ['项目ID', '任务ID', '文件名称', '任务页面链接', '标注员', '审核员', '最新审核评论', '任务状态', '最新评论文字', '全部评论文字', '评论条数', '评论读取状态', '详情读取状态', '标注员ID'];
+
+function groupText(value) { return String(value ?? ''); }
+function groupName(row) { return groupText(row.标注员).replace(/\s+/g, ' ').trim(); }
+function groupAccountId(row) {
+  const value = groupText(row.标注员ID || (/^[1-9]\d*$/.test(groupName(row)) ? groupName(row) : ''));
+  return /^[1-9]\d*$/.test(value) ? value : '';
+}
+function groupPerson(row, aliases = new Map()) {
+  const name = groupName(row);
+  const matches = aliases.get(JSON.stringify([groupText(row.项目ID), name]));
+  const id = groupAccountId(row) || (matches?.size === 1 ? [...matches][0] : '');
+  if (id) return { name: !name || name === '未识别人员' || /^[1-9]\d*$/.test(name) ? `用户ID ${id}` : name, id, key: `id:${id}`, unknown: false };
+  if (!name || name === '未识别人员') return { name: `未识别人员（任务 ${row.任务ID}）`, id: '', key: `unknown:${row.任务ID}`, unknown: true };
+  if (matches?.size > 1) return { name: `${name}（任务 ${row.任务ID}，ID待核对）`, id: '', key: `ambiguous:${row.任务ID}:${name}`, unknown: true };
+  return { name, id: '', key: `name:${name}`, unknown: false };
+}
+function groupTime(row) { return Date.parse(row.评论时间 || '') || 0; }
+function compareComments(a, b) {
+  return groupTime(a) - groupTime(b) || groupText(a.评论ID).localeCompare(groupText(b.评论ID), 'en', { numeric: true }) || groupText(a.任务ID).localeCompare(groupText(b.任务ID), 'en', { numeric: true });
+}
+function taskProblem(row) {
+  return ['评论读取状态', '详情读取状态'].some(key => row[key] && row[key] !== '成功');
+}
+function commentBlock(row) {
+  return [
+    `任务 ${row.任务ID} · 评论 ${row.评论ID}`,
+    row.文件名称 && `文件：${row.文件名称}`,
+    row.评论时间 && `时间：${row.评论时间}`,
+    row.评论人 && `评论人：${row.评论人}`,
+    row.是否已解决 && `已解决：${row.是否已解决}`,
+    row.评论文字 || (row.评论图片 ? '（图片评论）' : '（无文字）'),
+    row.评论图片 && `图片：${row.评论图片}`,
+  ].filter(Boolean).join('\n');
+}
+
+function groupProjectComments(output, projectRows = []) {
+  const names = new Map(projectRows.map(row => [groupText(row.project_id), groupText(row.project_name)]));
+  const groups = new Map();
+  const aliases = new Map();
+  for (const row of [...output.summaries, ...output.comments]) {
+    const id = groupAccountId(row), name = groupName(row);
+    if (!id || !name || name === '未识别人员') continue;
+    const key = JSON.stringify([groupText(row.项目ID), name]);
+    if (!aliases.has(key)) aliases.set(key, new Set());
+    aliases.get(key).add(id);
+  }
+  const summaries = new Map(output.summaries.map(row => [JSON.stringify([groupText(row.项目ID), groupText(row.任务ID)]), row]));
+  function ensure(row) {
+    const person = groupPerson(row, aliases);
+    const key = JSON.stringify([groupText(row.项目ID), person.key]);
+    if (!groups.has(key)) {
+      groups.set(key, { project_id: groupText(row.项目ID), project_name: names.get(groupText(row.项目ID)) || '', annotator: person.name, annotator_id: person.id, tasks: new Set(), urls: new Set(), comments: [], incomplete: person.unknown });
+    }
+    const group = groups.get(key);
+    if (/^用户ID \d+$/.test(group.annotator) && !/^用户ID \d+$/.test(person.name)) group.annotator = person.name;
+    group.tasks.add(groupText(row.任务ID));
+    if (row.任务页面链接) group.urls.add(groupText(row.任务页面链接));
+    const summary = summaries.get(JSON.stringify([groupText(row.项目ID), groupText(row.任务ID)]));
+    if (summary && taskProblem(summary)) group.incomplete = true;
+    return group;
+  }
+  for (const row of output.summaries) ensure(row);
+  for (const row of output.comments) ensure(row).comments.push(row);
+  const displayCounts = new Map();
+  for (const group of groups.values()) {
+    const key = JSON.stringify([group.project_id, group.annotator]);
+    displayCounts.set(key, (displayCounts.get(key) || 0) + 1);
+  }
+  const projectOrder = new Map(output.projects.map((value, index) => [groupText(value), index]));
+  return [...groups.values()].map(group => ({
+    project_id: group.project_id, project_name: group.project_name, annotator_id: group.annotator_id,
+    annotator: displayCounts.get(JSON.stringify([group.project_id, group.annotator])) > 1 && group.annotator_id ? `${group.annotator}（ID ${group.annotator_id}）` : group.annotator,
+    task_count: group.tasks.size, comment_count: group.comments.length,
+    merged_comments: [...group.comments].sort(compareComments).map(commentBlock).join('\n\n'),
+    task_urls: [...group.urls].join('\n'), status: group.incomplete ? '待核对（姓名或读取不完整）' : '已读取',
+  })).sort((a, b) => (projectOrder.get(a.project_id) ?? Infinity) - (projectOrder.get(b.project_id) ?? Infinity) || a.annotator.localeCompare(b.annotator, 'zh-CN'));
+}
+
+// Excel limits a cell to 32,767 characters. Keep room for labels and never split a surrogate pair.
+function commentCellParts(value) {
+  if (typeof value !== 'string') return [value];
+  const parts = [];
+  for (let start = 0; start < value.length;) {
+    let end = Math.min(start + 30000, value.length);
+    if (end < value.length && /[\ud800-\udbff]/.test(value[end - 1])) end--;
+    parts.push(value.slice(start, end));
+    start = end;
+  }
+  return parts.length ? parts : [''];
+}
+
+function commentGroupTable(groups) {
+  const rows = [];
+  for (const group of groups) {
+    const content = commentCellParts(group.merged_comments), urls = commentCellParts(group.task_urls);
+    const total = Math.max(content.length, urls.length);
+    for (let index = 0; index < total; index++) rows.push([
+      group.project_id, group.project_name, group.annotator, index ? null : group.task_count, index ? null : group.comment_count,
+      `${index + 1}/${total}`, content[index] || '', urls[index] || '', group.status, group.annotator_id || '',
+    ]);
+  }
+  return { headers: COMMENT_GROUP_HEADERS.slice(), rows };
+}
+
+function detailRows(records, headers) {
+  return records.flatMap(record => {
+    const parts = headers.map(key => commentCellParts(record[key] ?? ''));
+    const count = Math.max(...parts.map(value => value.length));
+    return Array.from({ length: count }, (_, index) => parts.map(value => value.length > 1 ? value[index] ?? '' : value[0]));
+  });
+}
+
+function commentProjectSheets(output, projectRows = []) {
+  const groups = groupProjectComments(output, projectRows);
+  const sheets = [];
+  for (const project of output.projects) {
+    const id = groupText(project);
+    sheets.push({ name: `项目${id}_标注员汇总`, ...commentGroupTable(groups.filter(row => row.project_id === id)), widths: [12, 26, 20, 14, 14, 12, 90, 65, 30, 14] });
+    const comments = output.comments.filter(row => groupText(row.项目ID) === id).sort((a, b) => groupPerson(a).name.localeCompare(groupPerson(b).name, 'zh-CN') || compareComments(a, b));
+    sheets.push({ name: `项目${id}_评论明细`, headers: COMMENT_DETAIL_HEADERS.slice(), rows: detailRows(comments, COMMENT_DETAIL_HEADERS), widths: [12, 14, 28, 62, 18, 18, 14, 70, 18, 26, 26, 12, 14, 65, 14] });
+  }
+  sheets.push({ name: '任务汇总', headers: COMMENT_TASK_HEADERS.slice(), rows: detailRows(output.summaries, COMMENT_TASK_HEADERS) });
+  const notes = [
+    ['导出口径', '', '各项目分别建表，优先按标注员账号ID合并；无ID时按姓名匹配，重名无法确认及未知标注员按任务分开保留。评论为全部时间，不使用历史审核日期筛选。'],
+    ['长内容', '', '长于单元格容量的内容分行保留；标注员汇总的任务数和评论数只在首段显示。'],
+    ...output.failures.map(row => [row.项目ID || '', row.任务ID || '', row.说明 || '读取失败']),
+    ...output.warnings.map(row => ['', '', typeof row === 'string' ? row : row.message || row.说明 || '用户姓名读取不完整']),
+    ...groups.filter(row => row.status !== '已读取').map(row => [row.project_id, '', `${row.annotator}：${row.status}`]),
+  ];
+  sheets.push({ name: '读取状态', headers: ['项目ID', '任务ID', '说明'], rows: detailRows(notes.map(row => ({ 项目ID: row[0], 任务ID: row[1], 说明: row[2] })), ['项目ID', '任务ID', '说明']), widths: [16, 16, 90] });
+  return sheets;
+}
+
+return {parseProjectIds, fetchPagedRows, collectCommentProjects, groupProjectComments, commentGroupTable, commentProjectSheets};
+})();
 (function () {
   'use strict';
   if (window.top !== window.self || document.getElementById('i360-region-pass-host')) return;
@@ -892,29 +1394,36 @@ return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, parseProjectI
   root.append(css);
   const layout = document.createElement('div');
   layout.innerHTML = `
-    <button id="launcher" type="button">历史通过率</button>
+    <button id="launcher" type="button">通过率 / 评论导出</button>
     <div id="backdrop" hidden><section id="panel" role="dialog" aria-modal="true" aria-labelledby="title">
-      <header><div><h1 id="title">所选项目历史统计</h1><p>每次历史审核记录分别统计 · 支持按日期筛选 · 通过率 = 通过 ÷（通过 + 驳回）</p></div><button id="close" type="button" aria-label="收起统计面板">×</button></header>
+      <header><div><h1 id="title">项目通过率与全部评论</h1><p>通过率按历史记录统计 · 评论按项目和标注员合并导出</p></div><button id="close" type="button" aria-label="收起统计面板">×</button></header>
       <main>
         <label for="projectIds">1. 选择项目包</label>
         <textarea id="projectIds" spellcheck="false" placeholder="留空将读取当前页面显示的项目卡片；也可手动输入多个项目 ID，用空格、换行或逗号分隔"></textarea>
         <div class="toolbar"><button id="loadProjects" type="button">读取当前页面项目</button><button id="selectAll" type="button">全选项目</button><button id="clearAll" type="button">清除选择</button><span id="selectedCount" class="hint">已选 0 个项目</span></div>
         <div class="projectbar"><strong>项目列表</strong><span id="projectHint" class="hint">留空后读取当前页面项目包</span></div>
         <div id="projects" aria-live="polite"></div>
-        <div class="toolbar"><label class="date">开始日期 <input id="startDate" type="date"></label><label class="date">结束日期 <input id="endDate" type="date"></label><button id="start" class="primary" type="button">统计选中项目</button><button id="cancel" type="button" disabled>停止</button></div>
-        <div id="status" role="status" aria-live="polite">先登录标注平台，输入项目 ID 后读取项目列表。</div><progress id="progress" max="1" value="0" hidden></progress>
+        <div class="toolbar"><label class="date">历史开始日期 <input id="startDate" type="date"></label><label class="date">历史结束日期 <input id="endDate" type="date"></label><button id="start" class="primary" type="button" disabled>统计选中项目</button><button id="commentStart" type="button" disabled>读取全部评论</button><button id="cancel" type="button" disabled>停止</button></div>
+        <p id="commentHint" class="hint">评论读取所选项目的全部时间，不受上方日期限制；同一项目内按标注员合并，不同项目分表。可直接读取评论，无须先统计通过率。</p>
+        <div id="status" role="status" aria-live="polite">先读取当前页面项目，勾选后统计通过率或读取评论。</div><progress id="progress" max="1" value="0" hidden></progress>
         <section id="results" hidden>
           <div id="metrics"></div><div id="warning" class="warning" hidden></div>
           <div class="resultbar"><strong>2. 标注员汇总</strong><button id="copy" type="button">复制汇总表</button><button id="csv" type="button">导出汇总 CSV</button><button id="excel" class="primary" type="button">导出完整 Excel</button></div>
           <div class="tablewrap"><table><thead><tr><th>标注员</th><th>通过次数</th><th>驳回次数</th><th>审核次数</th><th>通过率</th><th>状态</th></tr></thead><tbody id="body"></tbody></table></div>
           <details id="notes"><summary>历史记录与待核对说明</summary><div class="detailsbody" id="details"></div></details>
         </section>
-        <div id="rules"><p>每一条历史通过或历史驳回记录都单独统计，同一任务多次审核不会去重。</p><p>日期按历史记录时间筛选，开始日期和结束日期都包含当天。无法识别的历史状态不计入通过率，并保留在明细说明中。</p><p>完整 Excel 包含标注员汇总、项目汇总、历史记录和待核对与口径。</p></div>
+        <section id="commentResults" hidden>
+          <div class="resultbar"><strong>评论 · 按项目与标注员汇总</strong><button id="commentCsv" type="button">导出合并评论 CSV</button><button id="commentExcel" class="primary" type="button">导出评论 Excel</button></div>
+          <p id="commentSummary" class="hint"></p><div id="commentWarning" class="warning" hidden></div>
+          <div class="tablewrap"><table><thead><tr><th>项目</th><th>标注员</th><th>涉及任务数</th><th>已读评论数</th><th>状态</th></tr></thead><tbody id="commentBody"></tbody></table></div>
+          <details><summary>评论读取说明</summary><div id="commentDetails" class="detailsbody"></div></details>
+        </section>
+        <div id="rules"><p>通过率 = 历史通过次数 ÷（历史通过次数 + 历史驳回次数）。每一条审核记录分别统计，同一任务多次审核不会去重。</p><p>日期按历史记录时间筛选，包含首尾日期。无法识别的历史状态不计入通过率，保留在明细说明中。</p><p>评论 Excel 每个项目各有标注员汇总、逐条评论明细，另附任务汇总和读取状态；已解决及图片评论也保留。优先按标注员账号 ID 合并，归属不明的按任务分开标记待核对。</p><p>两项读取均完成后，“导出完整 Excel”同时包含通过率和评论。长评论分行保留。</p></div>
       </main>
     </section></div>`;
   root.append(layout);
   const $ = id => root.getElementById(id);
-  let result = null, controller = null, lastFocus = null, copyTimer = 0, projectRows = [];
+  let result = null, commentResult = null, commentGroups = [], controller = null, working = false, lastFocus = null, copyTimer = 0, projectRows = [];
   const percent = value => typeof value === 'number' ? `${(value * 100).toFixed(2)}%` : '待核对';
   const cellValue = value => value === null || value === undefined ? '待核对' : String(value);
   const today = new Date();
@@ -934,7 +1443,7 @@ return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, parseProjectI
   function selectedIds() { return [...$('projects').querySelectorAll('input[type="checkbox"]:checked')].map(input => input.value); }
   function updateSelection() {
     const ids = selectedIds(); $('selectedCount').textContent = `已选 ${ids.length} 个项目`;
-    $('start').disabled = !ids.length || !!controller;
+    $('start').disabled = $('commentStart').disabled = !ids.length || working;
   }
   function renderProjects() {
     $('projects').replaceChildren();
@@ -944,7 +1453,7 @@ return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, parseProjectI
       const title = document.createElement('span'); title.className = 'project-title'; title.textContent = project.project_name || `项目 ${project.project_id}`;
       const id = document.createElement('span'); id.className = 'project-id'; id.textContent = `ID ${project.project_id}`;
       label.append(checkbox, title, id); $('projects').append(label);
-      checkbox.addEventListener('change', updateSelection);
+      checkbox.addEventListener('change', () => { invalidate(); updateSelection(); });
     }
     $('projectHint').textContent = projectRows.length ? `共 ${projectRows.length} 个项目` : '没有找到项目';
     updateSelection();
@@ -955,14 +1464,19 @@ return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, parseProjectI
     if ($('backdrop').hidden) return;
     if (event.key === 'Escape') { event.preventDefault(); hide(); }
   });
-  function invalidate() { result = null; $('results').hidden = true; if (!controller) $('status').textContent = '条件已更新，请重新统计。'; }
-  $('projectIds').addEventListener('input', invalidate); $('startDate').addEventListener('change', invalidate); $('endDate').addEventListener('change', invalidate);
+  function invalidateHistory() { result = null; $('results').hidden = true; }
+  function invalidateComments() { commentResult = null; commentGroups = []; $('commentResults').hidden = true; }
+  function invalidate() { invalidateHistory(); invalidateComments(); if (!working) $('status').textContent = '项目已更新，请重新读取。'; }
+  $('projectIds').addEventListener('input', () => { invalidate(); projectRows = []; renderProjects(); });
+  for (const id of ['startDate', 'endDate']) $(id).addEventListener('change', () => { invalidateHistory(); if (!working) $('status').textContent = '历史日期已更新，请重新统计通过率；已读取评论仍为全部时间。'; });
   function busy(value) {
-    for (const id of ['projectIds', 'loadProjects', 'selectAll', 'clearAll', 'start', 'startDate', 'endDate']) $(id).disabled = value;
-    $('cancel').disabled = !value; $('progress').hidden = !value;
+    working = value;
+    for (const id of ['projectIds', 'loadProjects', 'selectAll', 'clearAll', 'startDate', 'endDate']) $(id).disabled = value;
+    for (const input of $('projects').querySelectorAll('input')) input.disabled = value;
+    $('cancel').disabled = !controller; $('progress').hidden = !value; updateSelection();
   }
   $('loadProjects').addEventListener('click', async () => {
-    if (controller) return;
+    if (working) return;
     invalidate();
     const input = $('projectIds').value.trim();
     busy(true); $('status').textContent = input ? '正在读取项目…' : '正在读取当前页面项目…';
@@ -971,7 +1485,6 @@ return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, parseProjectI
         projectRows = Core.extractCurrentProjectCards(document, location.href);
         if (!projectRows.length) throw new Error('当前页面未找到项目包，请输入项目 ID。');
         $('projectIds').value = projectRows.map(project => project.project_id).join(',');
-        $('projectIds').dispatchEvent(new Event('input', { bubbles: true }));
         renderProjects();
         $('status').textContent = `已读取当前页面 ${projectRows.length} 个项目，请勾选后统计。`;
       } else {
@@ -985,22 +1498,61 @@ return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, parseProjectI
     } catch (error) { projectRows = []; renderProjects(); $('status').textContent = `项目读取失败：${error.message}`; }
     finally { busy(false); }
   });
-  $('selectAll').addEventListener('click', () => { for (const input of $('projects').querySelectorAll('input[type="checkbox"]')) input.checked = true; updateSelection(); });
-  $('clearAll').addEventListener('click', () => { for (const input of $('projects').querySelectorAll('input[type="checkbox"]')) input.checked = false; updateSelection(); });
+  $('selectAll').addEventListener('click', () => { for (const input of $('projects').querySelectorAll('input[type="checkbox"]')) input.checked = true; invalidate(); updateSelection(); });
+  $('clearAll').addEventListener('click', () => { for (const input of $('projects').querySelectorAll('input[type="checkbox"]')) input.checked = false; invalidate(); updateSelection(); });
   $('cancel').addEventListener('click', () => controller?.abort());
   $('start').addEventListener('click', async () => {
-    if (controller) return;
+    if (working) return;
     const ids = selectedIds();
     if (!ids.length) { $('status').textContent = '请先读取并勾选至少一个项目。'; return; }
     if ($('startDate').value && $('endDate').value && $('startDate').value > $('endDate').value) { $('status').textContent = '开始日期不能晚于结束日期。'; return; }
-    invalidate(); controller = new AbortController(); const signal = controller.signal; busy(true); $('progress').hidden = false; $('progress').removeAttribute('value');
+    invalidateHistory(); controller = new AbortController(); const signal = controller.signal; busy(true); $('progress').hidden = false; $('progress').removeAttribute('value');
     $('status').textContent = `正在读取 ${ids.length} 个项目的任务历史…`;
     try {
       result = await Core.collectProjectHistory(ids, { requestJSON, origin: location.origin, signal, start: $('startDate').value, end: $('endDate').value, onProgress: info => { if (info.phase === 'history') $('status').textContent = `项目 ${info.projectId}：已读取 ${info.done} / ${info.total} 个任务，发现 ${info.count || 0} 条审核记录…`; else if (info.phase === 'tasks') $('status').textContent = `项目 ${info.projectId}：正在读取任务列表…`; } });
       render(); $('status').textContent = result.complete ? `统计完成：${result.rows.length} 条历史审核记录。` : `读取结束：有 ${result.failures.length} 条待核对记录。`;
-    } catch (error) { invalidate(); $('status').textContent = signal.aborted ? '已停止，本次没有生成统计结果。' : `统计失败：${error.message}`; }
+    } catch (error) { invalidateHistory(); $('status').textContent = signal.aborted ? '已停止，本次没有生成统计结果。' : `统计失败：${error.message}`; }
     finally { controller = null; busy(false); }
   });
+  $('commentStart').addEventListener('click', async () => {
+    if (working) return;
+    const ids = selectedIds();
+    if (!ids.length) { $('status').textContent = '请先读取并勾选至少一个项目。'; return; }
+    invalidateComments(); controller = new AbortController(); const signal = controller.signal; busy(true); $('progress').removeAttribute('value');
+    $('status').textContent = `正在读取 ${ids.length} 个项目的全部评论…`;
+    try {
+      commentResult = await Comments.collectCommentProjects(ids, { requestJSON, origin: location.origin, signal, onProgress: info => {
+        $('status').textContent = info.message;
+        if (info.phase === 'task' && info.total) { $('progress').max = info.total; $('progress').value = info.done; }
+        else if (info.phase !== 'complete') $('progress').removeAttribute('value');
+      } });
+      commentGroups = Comments.groupProjectComments(commentResult, projectRows);
+      renderComments();
+      $('status').textContent = `${commentResult.complete ? '评论读取完成' : '评论读取结束（部分待核对）'}：${commentResult.projects.length} 个项目，${commentResult.comments.length} 条评论，${commentGroups.length} 组标注员。`;
+    } catch (error) {
+      invalidateComments(); $('status').textContent = signal.aborted ? '已停止，本次没有生成评论结果。' : `评论读取失败：${error.message}`;
+    } finally { controller = null; busy(false); }
+  });
+  function commentsNeedReview() { return !commentResult.complete || !!commentResult.warnings.length || commentGroups.some(row => row.status !== '已读取'); }
+  function renderComments() {
+    $('commentResults').hidden = false; $('commentBody').replaceChildren();
+    $('commentSummary').textContent = `${commentResult.projects.length} 个项目 · ${commentResult.summaries.length} 个任务 · ${commentGroups.length} 组标注员 · ${commentResult.comments.length} 条评论（全部时间）。${commentGroups.length > 200 ? '页面显示前 200 组，导出包含全部。' : ''}`;
+    for (const person of commentGroups.slice(0, 200)) {
+      const tr = document.createElement('tr');
+      for (const value of [`${person.project_name || '项目'}（${person.project_id}）`, person.annotator, person.task_count, person.comment_count, person.status]) {
+        const td = document.createElement('td'); td.textContent = String(value); tr.append(td);
+      }
+      $('commentBody').append(tr);
+    }
+    $('commentWarning').hidden = !commentsNeedReview();
+    $('commentWarning').textContent = '部分读取或姓名归属待核对；评论数为已成功读取的数量。导出保留已读评论及失败原因。';
+    const notes = [
+      ...commentResult.failures.map(row => `项目 ${row.项目ID}${row.任务ID ? ` / 任务 ${row.任务ID}` : ''}：${row.说明}`),
+      ...commentResult.warnings.map(row => typeof row === 'string' ? row : row.message || row.说明 || String(row)),
+      ...commentGroups.filter(row => row.status !== '已读取').map(row => `项目 ${row.project_id} / ${row.annotator}：${row.status}`),
+    ];
+    $('commentDetails').textContent = notes.join('\n') || '所选项目的全部评论已读取；同项目同标注员合并，跨项目分别保留。';
+  }
   function render() {
     $('results').hidden = false; $('metrics').replaceChildren(); $('body').replaceChildren();
     const metrics = [['选中项目', result.projects.length], ['历史通过', result.totals.pass_count], ['历史驳回', result.totals.reject_count], ['审核次数', result.totals.total_count], ['整体通过率', percent(result.totals.pass_rate)]];
@@ -1027,7 +1579,18 @@ return {taskIdentity, parseTable, calculate, toCSV, fetchTaskJSON, parseProjectI
       { name: '历史记录', headers: historyHeaders, rows: result.rows.map(row => [row.project_id, row.project_name, row.task_id, row.annotator, row.status, row.created_at || '', row.triggered_by?.first_name ? `${row.triggered_by.first_name}${row.triggered_by.last_name || ''}` : String(row.triggered_by ?? ''), row.state || row.previous_state || row.transition_name || '', row.task_url || '']) },
       { name: '待核对与口径', headers: ['类型', '项目ID', '任务ID', '标注员', '结果', '说明'], rows: issueRows },
     ];
-    try { save(Core.workbookBytes(sheets), `项目历史通过率_${dateStamp()}.xlsx`, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); } catch (error) { $('status').textContent = `导出失败：${error.message}`; }
+    if (commentResult) sheets.push(...Comments.commentProjectSheets(commentResult, projectRows));
+    try { save(Core.workbookBytes(sheets), `${commentResult ? '项目通过率与评论' : '项目历史通过率'}_${commentResult && commentsNeedReview() ? '待核对_' : ''}${dateStamp()}.xlsx`, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); } catch (error) { $('status').textContent = `导出失败：${error.message}`; }
+  });
+  $('commentCsv').addEventListener('click', () => {
+    if (!commentResult) return;
+    const table = Comments.commentGroupTable(commentGroups);
+    save(Core.toCSV(table.headers, table.rows), `项目标注员评论_${commentsNeedReview() ? '待核对_' : ''}${dateStamp()}.csv`, 'text/csv;charset=utf-8');
+  });
+  $('commentExcel').addEventListener('click', () => {
+    if (!commentResult) return;
+    try { save(Core.workbookBytes(Comments.commentProjectSheets(commentResult, projectRows)), `项目标注员评论_${commentsNeedReview() ? '待核对_' : ''}${dateStamp()}.xlsx`, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); }
+    catch (error) { $('status').textContent = `评论导出失败：${error.message}`; }
   });
 })();
 
