@@ -1,19 +1,23 @@
 // ==UserScript==
 // @name         Insta360 框ID通过率统计
 // @namespace    local.insta360.region-pass-rate
-// @version      1.4.0
-// @description  统计项目历史通过率，读取全部评论并按项目、标注员合并导出Excel。
+// @version      1.5.0
+// @description  统计数据统一入口：项目ID、进度周报、历史通过率和按标注员合并评论。
 // @match        https://label.insta360.com/*
 // @homepageURL  https://github.com/chengzi-1225/Insta360-chengzi
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/Insta360_框ID通过率统计.user.js
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/Insta360_框ID通过率统计.user.js
 // @grant        GM_setClipboard
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @run-at       document-idle
 // @noframes
 // ==/UserScript==
 
 (function () {
 'use strict';
+if (window.top !== window.self || document.documentElement.hasAttribute('data-i360-stats-loaded')) return;
+document.documentElement.setAttribute('data-i360-stats-loaded', '2.0.0');
 const Core = (() => {
 const DEFAULT_ORIGIN = 'https://label.insta360.com';
 const FIELD_NAMES = ['url', 'reviewer', 'annotator', 'result', 'reason', 'comment', 'ratio', 'image', 'attachment'];
@@ -1362,12 +1366,11 @@ function commentProjectSheets(output, projectRows = []) {
 
 return {parseProjectIds, fetchPagedRows, collectCommentProjects, groupProjectComments, commentGroupTable, commentProjectSheets};
 })();
-(function () {
-  'use strict';
-  if (window.top !== window.self || document.getElementById('i360-region-pass-host')) return;
+function mountReviewTools(container, callbacks = {}) {
+  if (!container) return;
   const host = document.createElement('div');
   host.id = 'i360-region-pass-host';
-  document.body.append(host);
+  container.append(host);
   const root = host.attachShadow({ mode: 'open' });
   const css = document.createElement('style');
   css.textContent = `
@@ -1398,12 +1401,16 @@ return {parseProjectIds, fetchPagedRows, collectCommentProjects, groupProjectCom
     <div id="backdrop" hidden><section id="panel" role="dialog" aria-modal="true" aria-labelledby="title">
       <header><div><h1 id="title">项目通过率与全部评论</h1><p>通过率按历史记录统计 · 评论按项目和标注员合并导出</p></div><button id="close" type="button" aria-label="收起统计面板">×</button></header>
       <main>
+        <div id="projectControls" hidden>
         <label for="projectIds">1. 选择项目包</label>
         <textarea id="projectIds" spellcheck="false" placeholder="留空将读取当前页面显示的项目卡片；也可手动输入多个项目 ID，用空格、换行或逗号分隔"></textarea>
         <div class="toolbar"><button id="loadProjects" type="button">读取当前页面项目</button><button id="selectAll" type="button">全选项目</button><button id="clearAll" type="button">清除选择</button><span id="selectedCount" class="hint">已选 0 个项目</span></div>
         <div class="projectbar"><strong>项目列表</strong><span id="projectHint" class="hint">留空后读取当前页面项目包</span></div>
         <div id="projects" aria-live="polite"></div>
-        <div class="toolbar"><label class="date">历史开始日期 <input id="startDate" type="date"></label><label class="date">历史结束日期 <input id="endDate" type="date"></label><button id="start" class="primary" type="button" disabled>统计选中项目</button><button id="commentStart" type="button" disabled>读取全部评论</button><button id="cancel" type="button" disabled>停止</button></div>
+        </div>
+        <div id="historyControls" class="toolbar"><label class="date">开始日期 <input id="startDate" type="date"></label><label class="date">结束日期 <input id="endDate" type="date"></label><button id="start" class="primary" type="button" disabled>读取历史通过率</button></div>
+        <div id="commentControls" class="toolbar"><button id="commentStart" class="primary" type="button" disabled>读取全部评论</button><span class="hint">按项目、标注员合并</span></div>
+        <div class="toolbar" id="readControls"><button id="cancel" type="button" disabled>停止当前读取</button></div>
         <p id="commentHint" class="hint">评论读取所选项目的全部时间，不受上方日期限制；同一项目内按标注员合并，不同项目分表。可直接读取评论，无须先统计通过率。</p>
         <div id="status" role="status" aria-live="polite">先读取当前页面项目，勾选后统计通过率或读取评论。</div><progress id="progress" max="1" value="0" hidden></progress>
         <section id="results" hidden>
@@ -1423,15 +1430,17 @@ return {parseProjectIds, fetchPagedRows, collectCommentProjects, groupProjectCom
     </section></div>`;
   root.append(layout);
   const $ = id => root.getElementById(id);
-  let result = null, commentResult = null, commentGroups = [], controller = null, working = false, lastFocus = null, copyTimer = 0, projectRows = [];
+  $('launcher').hidden = true; $('backdrop').hidden = false; $('panel').removeAttribute('role'); $('panel').removeAttribute('aria-modal');
+  css.textContent += `:host{display:block;min-width:0}#launcher,#panel>header{display:none}#backdrop{position:static;display:block;background:transparent;padding:0}#panel{width:100%;height:auto;overflow:visible;background:transparent;border-radius:0;box-shadow:none}main{padding:0;overflow:visible}#metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.metric strong{font-size:21px}.tablewrap{max-height:410px}#readControls{margin:0}#cancel:disabled{display:none}#rules{margin-top:16px}#rules p{margin:5px 0}:host([data-view="comments"]) #historyControls,:host([data-view="comments"]) #results,:host([data-view="history"]) #commentControls,:host([data-view="history"]) #commentHint,:host([data-view="history"]) #commentResults{display:none!important}@media(max-width:650px){.date{width:auto}.toolbar{gap:7px}#metrics{grid-template-columns:repeat(2,1fr)}}`;
+  host.dataset.view = 'history';
+  let result = null, commentResult = null, commentGroups = [], controller = null, working = false, externalBusy = false, scopeRevision = 0, scopeKey = '', copyTimer = 0, projectRows = [];
+  const setStatus = message => { $('status').textContent = message; callbacks.onStatus?.(message); };
   const percent = value => typeof value === 'number' ? `${(value * 100).toFixed(2)}%` : '待核对';
   const cellValue = value => value === null || value === undefined ? '待核对' : String(value);
   const today = new Date();
   const isoDate = date => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
   const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
   $('startDate').value = isoDate(monthStart); $('endDate').value = isoDate(today);
-  function show() { lastFocus = document.activeElement; $('backdrop').hidden = false; $('projectIds').focus(); }
-  function hide() { $('backdrop').hidden = true; (lastFocus?.isConnected ? lastFocus : $('launcher')).focus(); }
   function requestJSON(url, { signal } = {}) {
     return fetch(url, { method: 'GET', credentials: 'same-origin', headers: { Accept: 'application/json' }, cache: 'no-store', signal }).then(async response => {
       if (!response.ok) throw new Error(`HTTP ${response.status}：读取失败`);
@@ -1443,7 +1452,7 @@ return {parseProjectIds, fetchPagedRows, collectCommentProjects, groupProjectCom
   function selectedIds() { return [...$('projects').querySelectorAll('input[type="checkbox"]:checked')].map(input => input.value); }
   function updateSelection() {
     const ids = selectedIds(); $('selectedCount').textContent = `已选 ${ids.length} 个项目`;
-    $('start').disabled = $('commentStart').disabled = !ids.length || working;
+    $('start').disabled = $('commentStart').disabled = !ids.length || working || externalBusy;
   }
   function renderProjects() {
     $('projects').replaceChildren();
@@ -1458,79 +1467,80 @@ return {parseProjectIds, fetchPagedRows, collectCommentProjects, groupProjectCom
     $('projectHint').textContent = projectRows.length ? `共 ${projectRows.length} 个项目` : '没有找到项目';
     updateSelection();
   }
-  $('launcher').addEventListener('click', show); $('close').addEventListener('click', hide); $('backdrop').addEventListener('click', event => { if (event.target === $('backdrop')) hide(); });
   for (const type of ['keydown', 'keyup', 'keypress']) host.addEventListener(type, event => event.stopPropagation());
   root.addEventListener('keydown', event => {
-    if ($('backdrop').hidden) return;
-    if (event.key === 'Escape') { event.preventDefault(); hide(); }
+    if (event.key === 'Escape') { event.preventDefault(); callbacks.onClose?.(); }
   });
-  function invalidateHistory() { result = null; $('results').hidden = true; }
-  function invalidateComments() { commentResult = null; commentGroups = []; $('commentResults').hidden = true; }
-  function invalidate() { invalidateHistory(); invalidateComments(); if (!working) $('status').textContent = '项目已更新，请重新读取。'; }
+  function invalidateHistory() { result = null; $('results').hidden = true; callbacks.onChange?.(); }
+  function invalidateComments() { commentResult = null; commentGroups = []; $('commentResults').hidden = true; callbacks.onChange?.(); }
+  function invalidate() { invalidateHistory(); invalidateComments(); if (!working) setStatus('项目已更新，请重新读取。'); }
   $('projectIds').addEventListener('input', () => { invalidate(); projectRows = []; renderProjects(); });
-  for (const id of ['startDate', 'endDate']) $(id).addEventListener('change', () => { invalidateHistory(); if (!working) $('status').textContent = '历史日期已更新，请重新统计通过率；已读取评论仍为全部时间。'; });
+  for (const id of ['startDate', 'endDate']) $(id).addEventListener('change', () => { invalidateHistory(); if (!working) setStatus('历史日期已更新，请重新统计通过率；已读取评论仍为全部时间。'); });
   function busy(value) {
     working = value;
-    for (const id of ['projectIds', 'loadProjects', 'selectAll', 'clearAll', 'startDate', 'endDate']) $(id).disabled = value;
+    for (const id of ['projectIds', 'loadProjects', 'selectAll', 'clearAll', 'startDate', 'endDate']) $(id).disabled = value || externalBusy;
     for (const input of $('projects').querySelectorAll('input')) input.disabled = value;
     $('cancel').disabled = !controller; $('progress').hidden = !value; updateSelection();
+    callbacks.onBusy?.(value);
   }
   $('loadProjects').addEventListener('click', async () => {
-    if (working) return;
+    if (working || externalBusy) return;
     invalidate();
     const input = $('projectIds').value.trim();
-    busy(true); $('status').textContent = input ? '正在读取项目…' : '正在读取当前页面项目…';
+    busy(true); setStatus(input ? '正在读取项目…' : '正在读取当前页面项目…');
     try {
       if (!input) {
         projectRows = Core.extractCurrentProjectCards(document, location.href);
         if (!projectRows.length) throw new Error('当前页面未找到项目包，请输入项目 ID。');
         $('projectIds').value = projectRows.map(project => project.project_id).join(',');
         renderProjects();
-        $('status').textContent = `已读取当前页面 ${projectRows.length} 个项目，请勾选后统计。`;
+        setStatus(`已读取当前页面 ${projectRows.length} 个项目，请勾选后统计。`);
       } else {
         const ids = Core.parseProjectIds(input);
-        $('status').textContent = `正在读取 ${ids.length} 个项目…`;
+        setStatus(`正在读取 ${ids.length} 个项目…`);
         const rows = await Core.fetchHistoryPaged(`${location.origin}/api/projects/?ids=${ids.join(',')}&page_size=100`, { requestJSON, origin: location.origin, kind: '项目' });
         const map = new Map(rows.map(row => [String(row.id), { project_id: String(row.id), project_name: String(row.title ?? row.name ?? '') }]));
         projectRows = ids.map(id => map.get(id) || { project_id: id, project_name: '' }); renderProjects();
-        $('status').textContent = `已读取 ${projectRows.length} 个项目，请勾选后统计。`;
+        setStatus(`已读取 ${projectRows.length} 个项目，请勾选后统计。`);
       }
-    } catch (error) { projectRows = []; renderProjects(); $('status').textContent = `项目读取失败：${error.message}`; }
+    } catch (error) { projectRows = []; renderProjects(); setStatus(`项目读取失败：${error.message}`); }
     finally { busy(false); }
   });
   $('selectAll').addEventListener('click', () => { for (const input of $('projects').querySelectorAll('input[type="checkbox"]')) input.checked = true; invalidate(); updateSelection(); });
   $('clearAll').addEventListener('click', () => { for (const input of $('projects').querySelectorAll('input[type="checkbox"]')) input.checked = false; invalidate(); updateSelection(); });
   $('cancel').addEventListener('click', () => controller?.abort());
   $('start').addEventListener('click', async () => {
-    if (working) return;
+    if (working || externalBusy) return;
     const ids = selectedIds();
-    if (!ids.length) { $('status').textContent = '请先读取并勾选至少一个项目。'; return; }
-    if ($('startDate').value && $('endDate').value && $('startDate').value > $('endDate').value) { $('status').textContent = '开始日期不能晚于结束日期。'; return; }
-    invalidateHistory(); controller = new AbortController(); const signal = controller.signal; busy(true); $('progress').hidden = false; $('progress').removeAttribute('value');
-    $('status').textContent = `正在读取 ${ids.length} 个项目的任务历史…`;
+    if (!ids.length) { setStatus('请先读取并勾选至少一个项目。'); return; }
+    if ($('startDate').value && $('endDate').value && $('startDate').value > $('endDate').value) { setStatus('开始日期不能晚于结束日期。'); return; }
+    invalidateHistory(); controller = new AbortController(); const signal = controller.signal, revision = scopeRevision; busy(true); $('progress').hidden = false; $('progress').removeAttribute('value');
+    setStatus(`正在读取 ${ids.length} 个项目的任务历史…`);
     try {
-      result = await Core.collectProjectHistory(ids, { requestJSON, origin: location.origin, signal, start: $('startDate').value, end: $('endDate').value, onProgress: info => { if (info.phase === 'history') $('status').textContent = `项目 ${info.projectId}：已读取 ${info.done} / ${info.total} 个任务，发现 ${info.count || 0} 条审核记录…`; else if (info.phase === 'tasks') $('status').textContent = `项目 ${info.projectId}：正在读取任务列表…`; } });
-      render(); $('status').textContent = result.complete ? `统计完成：${result.rows.length} 条历史审核记录。` : `读取结束：有 ${result.failures.length} 条待核对记录。`;
-    } catch (error) { invalidateHistory(); $('status').textContent = signal.aborted ? '已停止，本次没有生成统计结果。' : `统计失败：${error.message}`; }
+      result = await Core.collectProjectHistory(ids, { requestJSON, origin: location.origin, signal, start: $('startDate').value, end: $('endDate').value, onProgress: info => { if (info.phase === 'history') setStatus(`项目 ${info.projectId}：已读取 ${info.done} / ${info.total} 个任务，发现 ${info.count || 0} 条审核记录…`); else if (info.phase === 'tasks') setStatus(`项目 ${info.projectId}：正在读取任务列表…`); } });
+      if (signal.aborted || revision !== scopeRevision) throw new Error('项目选择已更新');
+      render(); setStatus(result.complete ? `统计完成：${result.rows.length} 条历史审核记录。` : `读取结束：有 ${result.failures.length} 条待核对记录。`);
+    } catch (error) { invalidateHistory(); setStatus(signal.aborted ? '已停止，本次没有生成统计结果。' : `统计失败：${error.message}`); }
     finally { controller = null; busy(false); }
   });
   $('commentStart').addEventListener('click', async () => {
-    if (working) return;
+    if (working || externalBusy) return;
     const ids = selectedIds();
-    if (!ids.length) { $('status').textContent = '请先读取并勾选至少一个项目。'; return; }
-    invalidateComments(); controller = new AbortController(); const signal = controller.signal; busy(true); $('progress').removeAttribute('value');
-    $('status').textContent = `正在读取 ${ids.length} 个项目的全部评论…`;
+    if (!ids.length) { setStatus('请先读取并勾选至少一个项目。'); return; }
+    invalidateComments(); controller = new AbortController(); const signal = controller.signal, revision = scopeRevision; busy(true); $('progress').removeAttribute('value');
+    setStatus(`正在读取 ${ids.length} 个项目的全部评论…`);
     try {
       commentResult = await Comments.collectCommentProjects(ids, { requestJSON, origin: location.origin, signal, onProgress: info => {
-        $('status').textContent = info.message;
+        setStatus(info.message);
         if (info.phase === 'task' && info.total) { $('progress').max = info.total; $('progress').value = info.done; }
         else if (info.phase !== 'complete') $('progress').removeAttribute('value');
       } });
+      if (signal.aborted || revision !== scopeRevision) throw new Error('项目选择已更新');
       commentGroups = Comments.groupProjectComments(commentResult, projectRows);
       renderComments();
-      $('status').textContent = `${commentResult.complete ? '评论读取完成' : '评论读取结束（部分待核对）'}：${commentResult.projects.length} 个项目，${commentResult.comments.length} 条评论，${commentGroups.length} 组标注员。`;
+      setStatus(`${commentResult.complete ? '评论读取完成' : '评论读取结束（部分待核对）'}：${commentResult.projects.length} 个项目，${commentResult.comments.length} 条评论，${commentGroups.length} 组标注员。`);
     } catch (error) {
-      invalidateComments(); $('status').textContent = signal.aborted ? '已停止，本次没有生成评论结果。' : `评论读取失败：${error.message}`;
+      invalidateComments(); setStatus(signal.aborted ? '已停止，本次没有生成评论结果。' : `评论读取失败：${error.message}`);
     } finally { controller = null; busy(false); }
   });
   function commentsNeedReview() { return !commentResult.complete || !!commentResult.warnings.length || commentGroups.some(row => row.status !== '已读取'); }
@@ -1566,21 +1576,28 @@ return {parseProjectIds, fetchPagedRows, collectCommentProjects, groupProjectCom
   const summaryRows = formatted => result.people.map(person => [person.annotator, person.pass_count, person.reject_count, person.total_count, formatted ? percent(person.pass_rate) : person.pass_rate, '已核对']);
   function save(bytes, name, type) { const url = URL.createObjectURL(new Blob([bytes], { type })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = name; root.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000); }
   const dateStamp = () => new Date().toISOString().replace(/[-:]/g, '').slice(0, 15).replace('T', '_');
-  $('copy').addEventListener('click', async () => { if (!result) return; const text = [summaryHeaders, ...summaryRows(true)].map(row => row.map(value => String(value ?? '').replace(/[\t\r\n]/g, ' ')).join('\t')).join('\n'); try { if (typeof GM_setClipboard === 'function') GM_setClipboard(text, 'text'); else await navigator.clipboard.writeText(text); $('copy').textContent = '已复制'; clearTimeout(copyTimer); copyTimer = setTimeout(() => { $('copy').textContent = '复制汇总表'; }, 1600); } catch { $('status').textContent = '复制失败，请导出 CSV 或 Excel。'; } });
+  $('copy').addEventListener('click', async () => { if (!result) return; const text = [summaryHeaders, ...summaryRows(true)].map(row => row.map(value => String(value ?? '').replace(/[\t\r\n]/g, ' ')).join('\t')).join('\n'); try { if (typeof GM_setClipboard === 'function') GM_setClipboard(text, 'text'); else await navigator.clipboard.writeText(text); $('copy').textContent = '已复制'; clearTimeout(copyTimer); copyTimer = setTimeout(() => { $('copy').textContent = '复制汇总表'; }, 1600); } catch { setStatus('复制失败，请导出 CSV 或 Excel。'); } });
   $('csv').addEventListener('click', () => { if (result) save(Core.toCSV(summaryHeaders, summaryRows(true)), `项目历史通过率_${dateStamp()}.csv`, 'text/csv;charset=utf-8'); });
-  $('excel').addEventListener('click', () => {
-    if (!result) return;
+  function exportSheets() {
+    const sheets = [];
+    if (result) {
     const projectHeaders = ['项目ID', '项目名称', '通过次数', '驳回次数', '审核次数', '通过率'];
     const historyHeaders = ['项目ID', '项目名称', '任务ID', '标注员', '审核结果', '历史时间', '触发人', '原始状态', '任务链接'];
     const issueRows = [['统计口径', '', '', '', '', `通过率=历史通过次数÷（历史通过次数+历史驳回次数）；每次历史记录分别统计。`], ['时间范围', '', '', '', '', `${$('startDate').value || '不限'} 至 ${$('endDate').value || '不限'}（含首尾日期）`], ...result.failures.map(item => ['读取失败', item.project_id, item.task_id, '', '', item.message]), ...result.issues.map(item => ['待核对', '', '', '', '', item.message || String(item)])];
-    const sheets = [
+    sheets.push(
       { name: '标注员通过率', headers: summaryHeaders, rows: summaryRows(false), percentColumns: [4] },
       { name: '项目汇总', headers: projectHeaders, rows: result.projects.map(project => [project.project_id, project.project_name, project.pass_count, project.reject_count, project.total_count, project.pass_rate]), percentColumns: [5] },
       { name: '历史记录', headers: historyHeaders, rows: result.rows.map(row => [row.project_id, row.project_name, row.task_id, row.annotator, row.status, row.created_at || '', row.triggered_by?.first_name ? `${row.triggered_by.first_name}${row.triggered_by.last_name || ''}` : String(row.triggered_by ?? ''), row.state || row.previous_state || row.transition_name || '', row.task_url || '']) },
       { name: '待核对与口径', headers: ['类型', '项目ID', '任务ID', '标注员', '结果', '说明'], rows: issueRows },
-    ];
+    );
+    }
     if (commentResult) sheets.push(...Comments.commentProjectSheets(commentResult, projectRows));
-    try { save(Core.workbookBytes(sheets), `${commentResult ? '项目通过率与评论' : '项目历史通过率'}_${commentResult && commentsNeedReview() ? '待核对_' : ''}${dateStamp()}.xlsx`, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); } catch (error) { $('status').textContent = `导出失败：${error.message}`; }
+    return sheets;
+  }
+  $('excel').addEventListener('click', () => {
+    if (!result) return;
+    const sheets = exportSheets();
+    try { save(Core.workbookBytes(sheets), `${commentResult ? '项目通过率与评论' : '项目历史通过率'}_${commentResult && commentsNeedReview() ? '待核对_' : ''}${dateStamp()}.xlsx`, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); } catch (error) { setStatus(`导出失败：${error.message}`); }
   });
   $('commentCsv').addEventListener('click', () => {
     if (!commentResult) return;
@@ -1590,8 +1607,1191 @@ return {parseProjectIds, fetchPagedRows, collectCommentProjects, groupProjectCom
   $('commentExcel').addEventListener('click', () => {
     if (!commentResult) return;
     try { save(Core.workbookBytes(Comments.commentProjectSheets(commentResult, projectRows)), `项目标注员评论_${commentsNeedReview() ? '待核对_' : ''}${dateStamp()}.xlsx`, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'); }
-    catch (error) { $('status').textContent = `评论导出失败：${error.message}`; }
+    catch (error) { setStatus(`评论导出失败：${error.message}`); }
   });
+  return {
+    setProjects(rows, context = '') {
+      const key = JSON.stringify([context, rows.map(row => row.project_id)]);
+      if (key !== scopeKey) { scopeKey = key; scopeRevision++; controller?.abort(); invalidate(); }
+      projectRows = rows.map(row => ({ ...row })); renderProjects();
+    },
+    setView(mode) { host.dataset.view = mode === 'comments' ? 'comments' : 'history'; },
+    setExternalBusy(value) { externalBusy = value; for (const id of ['startDate', 'endDate']) $(id).disabled = working || value; updateSelection(); },
+    cancel() { controller?.abort(); },
+    dispose() { controller?.abort(); clearTimeout(copyTimer); host.remove(); },
+    isBusy() { return working; },
+    hasData() { return !!(result || commentResult); },
+    readState() { return { history: !!result, comments: !!commentResult, start: $('startDate').value, end: $('endDate').value }; },
+    needsReview() { return !!(result && !result.complete || commentResult && commentsNeedReview()); },
+    sheets: exportSheets,
+  };
+}
+
+(function () {
+  'use strict';
+  const PANEL_ID = 'insta360-id-copy-panel';
+  const LAUNCHER_ID = 'insta360-project-stats-launcher';
+  const STORE_KEY = 'insta360-collected-projects-v2';
+  const LEGACY_KEY = 'insta360-collected-project-ids-v1';
+  const SNAPSHOT_KEY = 'insta360-project-weekly-snapshots-v1';
+  const CARD_SELECTOR = '.ls-project-card, article[class*="project-card"], [data-project-id]';
+  let pageProjects = [];
+  let previousScope = '';
+  let refreshTimer;
+  let panel;
+  let launcher;
+  let panelOpen = false;
+  let panelSize = null;
+  let panelMaximized = false;
+  let panelDrag = null;
+  let view = 'page';
+  let listSignature = '';
+  let statistics = null;
+  let statisticsKey = '';
+  let weeklyDate = dateKey(new Date());
+  let historySignature = '';
+  let reviewTools = null;
+  let toolView = 'overview';
+  let projectSearch = '';
+
+  function workspacePath() { return location.pathname.match(/\/workspaces\/[^/]+\/projects/)?.[0] || location.pathname; }
+  function matchesSearch(project) { return `${project.name} ${project.id}`.toLocaleLowerCase().includes(projectSearch.trim().toLocaleLowerCase()); }
+  function parseInput(text) {
+    let value = String(text).trim();
+    const array = /^(?:idlist\s*=\s*)?\[([\s\S]*)\]$/i.exec(value);
+    if (array) value = array[1];
+    if (!value.trim()) throw apiError('请输入项目 ID 或项目链接。');
+    const ids = value.split(/[\s,，]+/).filter(Boolean).map(token => {
+      if (/^[1-9]\d*$/.test(token)) return token;
+      let url;
+      try { url = new URL(token, location.origin); } catch (_) { /* 下方统一提示。 */ }
+      const id = url?.origin === location.origin && url.pathname.match(/\/projects\/([1-9]\d*)(?:\/|$)/)?.[1];
+      if (!id) throw apiError('请只粘贴正整数项目 ID、项目链接或 idlist 列表。');
+      return id;
+    });
+    return validIds(ids);
+  }
+
+  function setToolView(mode) {
+    toolView = ['overview', 'history', 'comments'].includes(mode) ? mode : 'overview';
+    for (const viewName of ['overview', 'history', 'comments']) {
+      const tab = panel.querySelector(`[data-action="view-${viewName}"]`);
+      tab.setAttribute('aria-selected', String(toolView === viewName));
+      tab.tabIndex = toolView === viewName ? 0 : -1;
+    }
+    panel.querySelector('[data-overview]').hidden = toolView !== 'overview';
+    panel.querySelector('[data-review-tools]').hidden = toolView === 'overview';
+    reviewTools?.setView(toolView);
+  }
+
+  function updateDashboardActions() {
+    if (!panel) return;
+    const overviewBusy = !!statistics?.running, reviewBusy = !!reviewTools?.isBusy();
+    const busy = overviewBusy || reviewBusy;
+    const start = panel.querySelector('[data-action="stats"]');
+    if (start) start.disabled = busy || !selected(activeProjects()).length;
+    const stop = panel.querySelector('[data-action="stop-all"]');
+    if (stop) stop.hidden = !busy;
+    const exportButton = panel.querySelector('[data-action="export-all"]');
+    if (exportButton) exportButton.disabled = busy || !(statistics && !statistics.running || reviewTools?.hasData());
+    reviewTools?.setExternalBusy(overviewBusy);
+  }
+
+  function overviewSheets() {
+    if (!statistics || statistics.running) return [];
+    return [{ name: '项目进度', headers: ['项目ID', '项目名称', '总任务数', '已标注', '已审核（含驳回）', '审核通过', '审核驳回', '标注进度', '审核进度', '采集时间', '读取状态'], percentColumns: [7, 8],
+      rows: statistics.projects.map(project => {
+        const row = statistics.rows.get(project.id);
+        return [project.id, row?.name || displayName(project), row?.total ?? null, row?.done ?? null, row?.reviewed ?? null, row?.accepted ?? null, row?.rejected ?? null,
+          row && !row.error ? (row.total ? row.done / row.total : 0) : null,
+          row && !row.error && row.reviewed !== null ? (row.total ? row.reviewed / row.total : 0) : null,
+          statistics.collectedAt, !row ? '未查询' : row.error || row.reviewError || '成功'];
+      }) }];
+  }
+
+  function exportAll() {
+    if (statistics?.running || reviewTools?.isBusy()) return;
+    const sheets = [...overviewSheets(), ...(reviewTools?.sheets() || [])];
+    if (!sheets.length) { notify('请先读取项目进度、历史通过率或评论。'); return; }
+    const readState = reviewTools?.readState() || {};
+    sheets.push({ name: '本次导出范围', headers: ['功能', '读取状态', '说明'], rows: [
+      ['项目进度', statistics ? reportHeading(statistics, reportTotals(statistics)) : '未读取', '平台当前任务数量与进度；不是历史通过率。'],
+      ['历史通过率', readState.history ? '已读取' : '未读取', `${readState.start || '不限'} 至 ${readState.end || '不限'}；通过÷（通过+驳回），每次历史记录分别统计。`],
+      ['全部评论', readState.comments ? '已读取' : '未读取', '全部时间；不同项目分别建表，同项目按标注员合并。'],
+      ['所选项目', String(selected(activeProjects()).length), selected(activeProjects()).map(project => project.id).join(', ')],
+    ] });
+    const needsReview = reviewTools?.needsReview() || statistics && (() => { const totals = reportTotals(statistics); return statistics.reason || totals.failed || totals.pending || totals.reviewMissing; })();
+    try {
+      const bytes = Core.workbookBytes(sheets), url = URL.createObjectURL(new Blob([bytes], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+      const anchor = document.createElement('a'); anchor.href = url; anchor.download = `项目统计_${needsReview ? '待核对_' : ''}${dateKey(new Date())}.xlsx`;
+      panel.append(anchor); anchor.click(); anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 30000);
+      notify('已导出当前所选项目的已读数据，未读取的功能在导出范围表中说明。');
+    } catch (error) { notify('导出失败：' + error.message); }
+  }
+
+  function validIds(values) {
+    return [...new Set((Array.isArray(values) ? values : [])
+      .map(String).filter(id => /^[1-9]\d*$/.test(id)))];
+  }
+
+  function projectsOf(values) {
+    const unique = new Map();
+    for (const value of Array.isArray(values) ? values : []) {
+      const id = String(value && typeof value === 'object' ? value.id : value);
+      if (!/^[1-9]\d*$/.test(id)) continue;
+      const name = value && typeof value.name === 'string'
+        ? value.name.replace(/\s+/g, ' ').trim() : '';
+      if (!unique.has(id)) unique.set(id, {id, name});
+      else if (!unique.get(id).name && name) unique.get(id).name = name;
+    }
+    return [...unique.values()];
+  }
+
+  function readStorage(key, fallback) {
+    return typeof GM_getValue === 'function' ? GM_getValue(key, fallback)
+      : JSON.parse(sessionStorage.getItem(key) || JSON.stringify(fallback));
+  }
+
+  function loadState() {
+    try {
+      const saved = readStorage(STORE_KEY, null);
+      if (saved && typeof saved === 'object') {
+        return {projects: projectsOf(saved.projects), excluded: validIds(saved.excluded)};
+      }
+      return {projects: projectsOf(readStorage(LEGACY_KEY, [])), excluded: []};
+    } catch (_) { return {projects: [], excluded: []}; }
+  }
+
+  const state = loadState();
+
+  function saveState() {
+    if (typeof GM_setValue === 'function') GM_setValue(STORE_KEY, state);
+    else sessionStorage.setItem(STORE_KEY, JSON.stringify(state));
+  }
+
+  function isVisible(element) {
+    if (!element.getClientRects().length) return false;
+    for (let node = element; node instanceof Element; node = node.parentElement) {
+      const style = getComputedStyle(node);
+      if (node.hidden || style.display === 'none' || style.visibility === 'hidden'
+          || style.visibility === 'collapse' || style.opacity === '0') return false;
+    }
+    return true;
+  }
+
+  function idOf(element) {
+    const ownId = element.getAttribute('data-project-id');
+    if (/^[1-9]\d*$/.test(ownId || '')) return ownId;
+    const links = [];
+    const parent = element.closest('a[href]');
+    if (parent) links.push(parent);
+    links.push(...element.querySelectorAll('a[href]'));
+    for (const link of links) {
+      let url;
+      try { url = new URL(link.getAttribute('href'), location.href); } catch (_) { continue; }
+      if (url.origin !== location.origin) continue;
+      const match = url.pathname.match(/\/projects\/([1-9]\d*)(?:\/|$)/);
+      if (match) return match[1];
+    }
+    return '';
+  }
+
+  function nameOf(element) {
+    const selectors = ['.ls-project-card__title-text', '.ls-project-card__title',
+      '.ls-project-card__name', '[class*="project-card__title"]', 'h2', 'h3', 'h4'];
+    for (const selector of selectors) {
+      const title = element.querySelector(selector);
+      if (!title) continue;
+      const text = (title.getAttribute('title') || title.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text) return text;
+    }
+    return (element.getAttribute('data-project-name') || '').replace(/\s+/g, ' ').trim();
+  }
+
+  function readPageProjects() {
+    const cards = [...document.querySelectorAll(CARD_SELECTOR)];
+    const projects = projectsOf(cards.filter(isVisible).map(card => ({id: idOf(card), name: nameOf(card)})));
+    const current = location.pathname.match(/\/projects\/([1-9]\d*)(?:\/|$)/);
+    return projects.length || !current ? projects : [{ id: current[1], name: document.querySelector('.ls-project__title')?.textContent?.trim() || '' }];
+  }
+
+  function displayName(project) { return project.name || '未读取名称（请打开所在页）'; }
+  function selected(projects) {
+    const excluded = new Set(state.excluded);
+    return projects.filter(project => !excluded.has(project.id));
+  }
+  function activeProjects() { return view === 'page' ? pageProjects : state.projects; }
+  function formatted(ids) { return 'idlist = [' + ids.join(', ') + ']'; }
+
+  function selectionKey() {
+    return JSON.stringify([location.pathname + location.search, view,
+      selected(activeProjects()).map(project => project.id)]);
+  }
+
+  function clearStatistics() {
+    const previous = statistics;
+    statistics = null;
+    statisticsKey = '';
+    if (previous && previous.running) previous.controller.abort();
+    updateDashboardActions();
+  }
+
+  function apiError(message, options = {}) { return Object.assign(new Error(message), options); }
+
+  function countValue(value) {
+    const number = typeof value === 'number' ? value
+      : typeof value === 'string' && /^\d+$/.test(value) ? Number(value) : NaN;
+    return Number.isSafeInteger(number) && number >= 0 ? number : null;
+  }
+
+  function parseProjectSummary(body, id) {
+    const list = Array.isArray(body) ? body : body && Array.isArray(body.results) ? body.results : [body];
+    if (list.length !== 1 || !list[0] || String(list[0].id) !== String(id)) {
+      throw apiError('项目汇总 ID 不匹配或未返回唯一项目');
+    }
+    const data = list[0];
+    const total = countValue(data.task_number);
+    const done = countValue(data.num_tasks_with_annotations);
+    if (total === null) throw apiError('缺少有效字段 task_number');
+    if (done === null) throw apiError('缺少有效字段 num_tasks_with_annotations（已标注）');
+    if (done > total) throw apiError('已标注数大于总任务数，请检查项目数据');
+    let reviewed = countValue(data.reviewed_count);
+    const reviewError = reviewed === null || reviewed > total ? '缺少有效的 reviewed_count（已审核）' : '';
+    if (reviewError) reviewed = null;
+    const rejectKeys = ['review_rejected_count', 'review_reject_count', 'review_rejected', 'rejected_count'];
+    const rejectKey = rejectKeys.find(key => data[key] !== undefined && data[key] !== null);
+    let rejected = countValue(rejectKey ? data[rejectKey] : null);
+    if (reviewed === null || rejected === null || rejected > reviewed) rejected = null;
+    return {total, done, reviewed, rejected, accepted: rejected === null ? null : reviewed - rejected,
+      reviewError, name: typeof data.title === 'string' ? data.title.replace(/\s+/g, ' ').trim() : ''};
+  }
+
+  function dateKey(date) {
+    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  }
+
+  function validDate(value) {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const date = new Date(value + 'T12:00:00');
+    return Number.isFinite(date.getTime()) && dateKey(date) === value;
+  }
+
+  function scopeOf(snapshot) {
+    return JSON.stringify([snapshot.workspace, snapshot.rows.map(row => row.id).sort()]);
+  }
+
+  function loadSnapshots() {
+    try {
+      const items = readStorage(SNAPSHOT_KEY, []);
+      if (!Array.isArray(items)) return [];
+      return items.filter(item => item && item.schema === 1 && validDate(item.date)
+        && typeof item.workspace === 'string' && /^\/workspaces\/[^/]+\/projects\/?$/.test(item.workspace)
+        && typeof item.collectedAt === 'string' && Number.isFinite(Date.parse(item.collectedAt))
+        && Array.isArray(item.rows) && item.rows.length && validIds(item.rows.map(row => row && row.id)).length === item.rows.length
+        && item.rows.every(row => row && typeof row.id === 'string'
+          && ['total', 'done', 'reviewed'].every(key => typeof row[key] === 'number' && countValue(row[key]) !== null)
+          && row.done <= row.total && row.reviewed <= row.total));
+    } catch (_) { return []; }
+  }
+
+  function makeSnapshot(report, date) {
+    if (!validDate(date)) throw apiError('请选择有效的报告日期');
+    const totals = reportTotals(report);
+    if (report.running || report.reason || !totals.success || totals.failed || totals.pending) {
+      throw apiError('统计不完整，请查询全部项目后再保存快照');
+    }
+    if (totals.reviewMissing) throw apiError('审核数据不完整，暂不能保存完整快照');
+    return {schema: 1, date, workspace: report.workspace, scope: report.scope,
+      startedAt: report.startedAt, collectedAt: report.collectedAt,
+      rows: report.projects.map(project => {
+        const row = report.rows.get(project.id);
+        return {id: project.id, name: row.name || displayName(project), total: row.total, done: row.done,
+          reviewed: row.reviewed, accepted: row.accepted, rejected: row.rejected};
+      })};
+  }
+
+  function snapshotTotals(snapshot) {
+    return snapshot.rows.reduce((sum, row) => ({total: sum.total + row.total,
+      done: sum.done + row.done, reviewed: sum.reviewed + row.reviewed}), {total: 0, done: 0, reviewed: 0});
+  }
+
+  function compareSnapshot(current, history) {
+    const key = scopeOf(current);
+    const baseline = history.filter(item => item.date < current.date && scopeOf(item) === key)
+      .sort((a, b) => b.date.localeCompare(a.date) || b.collectedAt.localeCompare(a.collectedAt))[0];
+    if (!baseline) return null;
+    const now = snapshotTotals(current), previous = snapshotTotals(baseline);
+    return {baseline, total: now.total - previous.total, done: now.done - previous.done,
+      reviewed: now.reviewed - previous.reviewed};
+  }
+
+  function storeSnapshot(snapshot) {
+    const key = scopeOf(snapshot);
+    const items = loadSnapshots().filter(item => item.date !== snapshot.date || scopeOf(item) !== key);
+    items.push(snapshot);
+    if (typeof GM_setValue === 'function') GM_setValue(SNAPSHOT_KEY, items);
+    else sessionStorage.setItem(SNAPSHOT_KEY, JSON.stringify(items));
+  }
+
+  function signed(number) { return (number > 0 ? '+' : '') + number.toLocaleString('en-US'); }
+  function percent(count, total) { return count === null ? '—' : (total ? count / total * 100 : 0).toFixed(2) + '%'; }
+  function printable(value) { return value === null ? '—' : String(value); }
+  function collectionTime(report) {
+    return report.collectedAt ? new Date(report.collectedAt).toLocaleString('zh-CN', {hour12: false}) : '统计中';
+  }
+
+  function waitForRetry(ms, signal) {
+    return new Promise((resolve, reject) => {
+      const cancel = () => { clearTimeout(timer); reject(apiError('已取消', {cancelled: true})); };
+      const timer = setTimeout(() => { signal.removeEventListener('abort', cancel); resolve(); }, ms);
+      signal.addEventListener('abort', cancel, {once: true});
+      if (signal.aborted) { signal.removeEventListener('abort', cancel); cancel(); }
+    });
+  }
+
+  async function projectData(id, signal) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (signal.aborted) throw apiError('已取消', {cancelled: true});
+      const controller = new AbortController();
+      const cancel = () => controller.abort();
+      signal.addEventListener('abort', cancel, {once: true});
+      let timedOut = false;
+      const timer = setTimeout(() => { timedOut = true; controller.abort(); }, 20000);
+      try {
+        const response = await fetch('/api/projects?ids=' + encodeURIComponent(id) + '&page_size=1', {
+          method: 'GET', credentials: 'same-origin', headers: {Accept: 'application/json'},
+          signal: controller.signal, cache: 'no-store',
+        });
+        if (response.status === 401 || response.redirected) {
+          throw apiError('登录已失效，请刷新页面并重新登录后再统计。', {auth: true});
+        }
+        if (!response.ok) {
+          throw apiError('HTTP ' + response.status + (response.status === 403 ? '，无权访问该项目' : ''),
+            {retryable: [429, 500, 502, 503, 504].includes(response.status)});
+        }
+        if (!/json/i.test(response.headers.get('content-type') || '')) {
+          throw apiError('接口未返回项目数据，请检查登录状态后重试。', {auth: true});
+        }
+        return parseProjectSummary(await response.json(), id);
+      } catch (error) {
+        if (signal.aborted) throw apiError('已取消', {cancelled: true});
+        if (timedOut) error = apiError('请求超时（20 秒）', {retryable: true});
+        else if (error instanceof TypeError) error = apiError('网络连接失败', {retryable: true});
+        else if (error instanceof SyntaxError) error = apiError('接口返回的数据无法解析');
+        if (!error.retryable || attempt === 2) throw error;
+      } finally {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', cancel);
+      }
+      await waitForRetry(500 * (2 ** attempt), signal);
+    }
+  }
+
+  function reportTotals(report) {
+    const rows = [...report.rows.values()];
+    const success = rows.filter(row => !row.error);
+    const total = success.reduce((sum, row) => sum + row.total, 0);
+    const done = success.reduce((sum, row) => sum + row.done, 0);
+    const reviews = success.filter(row => row.reviewed !== null);
+    const reviewMissing = success.length - reviews.length;
+    const reviewed = reviewMissing ? null : reviews.reduce((sum, row) => sum + row.reviewed, 0);
+    const accepted = success.some(row => row.accepted === null) ? null : success.reduce((sum, row) => sum + row.accepted, 0);
+    const rejected = success.some(row => row.rejected === null) ? null : success.reduce((sum, row) => sum + row.rejected, 0);
+    return {total, done, remain: total - done, progress: total ? done / total * 100 : 0,
+      reviewed, accepted, rejected, reviewMissing, reviewProgress: reviewed === null ? null : total ? reviewed / total * 100 : 0,
+      success: success.length, failed: rows.length - success.length,
+      pending: report.projects.length - rows.length};
+  }
+
+  function reportHeading(report, totals) {
+    if (report.running) return `正在统计 ${report.rows.size}/${report.projects.length} 个项目`;
+    if (report.reason) return `部分汇总 · ${report.reason}`;
+    return totals.failed || totals.pending || totals.reviewMissing ? '部分汇总（请核对缺失数据）' : '统计完成';
+  }
+
+  function reportText(report) {
+    const totals = reportTotals(report);
+    const date = report.date || weeklyDate;
+    const lines = [`项目周报 · ${date}`, reportHeading(report, totals), `采集时间: ${collectionTime(report)}`,
+      `范围: ${report.scope}勾选的 ${report.projects.length} 个项目`,
+      `成功 ${totals.success} 个，失败 ${totals.failed} 个，未查询 ${totals.pending} 个`];
+    if (totals.success) {
+      lines.push(`总任务数: ${totals.total} | 已标注: ${totals.done} | 未标注: ${totals.remain}`);
+      lines.push(`已审核（含驳回）: ${printable(totals.reviewed)} | 审核通过: ${printable(totals.accepted)} | 审核驳回: ${printable(totals.rejected)}`);
+      lines.push(`标注进度: ${totals.progress.toFixed(2)}% | 审核进度: ${percent(totals.reviewed, totals.total)}`);
+      if (totals.reviewMissing) lines.push(`审核字段缺失或无效: ${totals.reviewMissing} 个项目，审核汇总显示 —。`);
+    }
+    else lines.push('未取得有效项目数据，没有可用的汇总结果。');
+    try {
+      const comparison = compareSnapshot(makeSnapshot(report, date), loadSnapshots());
+      if (comparison) lines.push(`较 ${comparison.baseline.date} 净变化: 总任务 ${signed(comparison.total)}，已标注 ${signed(comparison.done)}，已审核 ${signed(comparison.reviewed)}（同一组项目）`);
+      else lines.push('暂无同一组项目的更早快照；保存本期快照作为后续对比基准。');
+    } catch (_) { lines.push('数据不完整，暂不计算快照净变化。'); }
+    lines.push('口径：已审核含通过与驳回；两类进度均以总任务数为分母。报告日期不改变实际采集时点，净变化不等于处理工作量。');
+    lines.push('');
+    for (const project of report.projects) {
+      const row = report.rows.get(project.id);
+      const name = row && row.name || displayName(project);
+      const detail = !row ? '未查询' : row.error ? '失败: ' + row.error
+        : `总任务数: ${row.total}, 已标注: ${row.done}, 已审核（含驳回）: ${printable(row.reviewed)}, 审核通过: ${printable(row.accepted)}, 审核驳回: ${printable(row.rejected)}, 标注进度: ${percent(row.done, row.total)}, 审核进度: ${percent(row.reviewed, row.total)}`;
+      lines.push(`${name} | ID ${project.id} | ${detail}`);
+    }
+    return lines.join('\n');
+  }
+
+  function renderStatistics() {
+    const report = statistics;
+    const container = panel.querySelector('[data-statistics]');
+    panel.querySelector('[data-action="stats"]').disabled = Boolean(report && report.running);
+    panel.querySelector('[data-action="stats"]').textContent = report && report.running
+      ? `统计中 ${report.rows.size}/${report.projects.length}…` : `统计所选项目（${selected(activeProjects()).length}）`;
+    panel.querySelector('[data-action="stop"]').hidden = !report || !report.running;
+    panel.classList.toggle('has-statistics', Boolean(report));
+    if (!report) {
+      if (container.childElementCount) container.replaceChildren();
+      container.hidden = true;
+    } else {
+      container.hidden = false;
+      if (!container.childElementCount) {
+        container.innerHTML = `<div data-stats-summary aria-label="项目统计汇总">
+          <div class="stats-heading" data-stats-heading></div><p data-stats-note></p>
+          <button type="button" data-action="copy-report">复制周报</button>
+          <div class="stats-grid"><div><span>总任务数</span><b data-metric="total"></b></div><div><span>已标注</span><b data-metric="done"></b></div><div><span title="包含通过与驳回">已审核</span><b data-metric="reviewed"></b></div><div><span>未标注</span><b data-metric="remain"></b></div><div><span>标注进度</span><b data-metric="progress"></b></div><div><span>审核进度</span><b data-metric="reviewProgress"></b></div></div>
+          <p class="stats-help" data-review-detail></p>
+          <span class="stats-help">标注进度</span><progress max="100" value="0" aria-label="所选项目总进度"></progress>
+          <span class="stats-help">审核进度（含驳回）</span><progress data-review-progress max="100" value="0" aria-label="所选项目审核进度"></progress>
+          <p class="stats-help" data-stats-help></p>
+          <details data-report-detail><summary>查看 / 手动复制统计报告</summary><textarea readonly aria-label="项目统计报告"></textarea></details>
+        </div>`;
+      }
+      const totals = reportTotals(report);
+      const summary = container.querySelector('[data-stats-summary]');
+      summary.dataset.phase = report.running ? 'running' : 'complete';
+      summary.classList.toggle('is-partial', Boolean(report.reason || totals.failed));
+      const set = (selector, text) => {
+        const element = summary.querySelector(selector);
+        if (element.textContent !== text) element.textContent = text;
+      };
+      set('[data-stats-heading]', reportHeading(report, totals));
+      set('[data-stats-note]', `${report.scope}勾选 ${report.projects.length} 个 · 成功 ${totals.success} · 失败 ${totals.failed} · ${report.running ? '待完成' : '未查询'} ${totals.pending}${totals.reviewMissing ? ` · 审核未知 ${totals.reviewMissing}` : ''}`);
+      for (const field of ['total', 'done', 'remain', 'progress', 'reviewed', 'reviewProgress']) {
+        const value = totals[field] === null ? '—' : ['progress', 'reviewProgress'].includes(field) ? totals[field].toFixed(2) + '%'
+          : totals[field].toLocaleString('en-US');
+        set(`[data-metric="${field}"]`, totals.success ? value : '—');
+      }
+      set('[data-review-detail]', `审核通过 ${totals.success ? printable(totals.accepted) : '—'} · 审核驳回 ${totals.success ? printable(totals.rejected) : '—'}`);
+      const progress = summary.querySelector('progress');
+      progress.value = totals.progress;
+      const reviewProgress = summary.querySelector('[data-review-progress]');
+      if (totals.reviewProgress === null) reviewProgress.removeAttribute('value');
+      else reviewProgress.value = totals.reviewProgress;
+      set('[data-stats-help]', report.running ? '正在读取，数字会随请求完成更新。'
+        : !totals.success ? '没有可用汇总，请查看项目行中的失败原因或重新统计。'
+        : totals.failed || totals.pending || totals.reviewMissing ? '部分数据不完整；审核未知不计为零，暂不能保存完整快照。'
+        : '标注与审核进度均除以总任务数；审核包含通过和驳回。');
+      summary.querySelector('[data-action="copy-report"]').disabled = report.running;
+      const reportArea = summary.querySelector('textarea');
+      const text = reportText(report);
+      if (reportArea.value !== text) reportArea.value = text;
+    }
+    for (const element of panel.querySelectorAll('[data-project-row]')) {
+      const row = report && report.rows.get(element.dataset.projectRow);
+      const included = report && report.projects.some(project => project.id === element.dataset.projectRow);
+      const text = !included ? '' : !row ? report.running ? '等待统计…' : '未查询'
+        : row.error ? '失败: ' + row.error : `总数 ${row.total} · 已标注 ${row.done}（${percent(row.done, row.total)}） · 已审核 ${printable(row.reviewed)}（${percent(row.reviewed, row.total)}）${row.reviewError ? ' · 审核字段缺失或无效' : ''}`;
+      const target = element.querySelector('[data-project-stats]');
+      if (target.textContent !== text) target.textContent = text;
+      target.hidden = !text;
+      target.classList.toggle('has-error', Boolean(row && row.error));
+    }
+    renderWeekly();
+    updateDashboardActions();
+  }
+
+  function scopeHistory() {
+    const workspace = workspacePath();
+    const rows = selected(activeProjects()).map(project => ({id: project.id}));
+    const key = scopeOf({workspace, rows});
+    return loadSnapshots().filter(item => scopeOf(item) === key)
+      .sort((a, b) => b.date.localeCompare(a.date));
+  }
+
+  function snapshotReport(snapshot) {
+    return {...snapshot, projects: snapshot.rows.map(row => ({id: row.id, name: row.name})),
+      rows: new Map(snapshot.rows.map(row => [row.id, row])), running: false, reason: ''};
+  }
+
+  function renderWeekly() {
+    const save = panel.querySelector('[data-action="save-snapshot"]');
+    const comparison = panel.querySelector('[data-weekly-comparison]');
+    let message = '每周五选好项目后统计，再保存本期快照。首次保存作为后续对比基准。';
+    save.disabled = true;
+    if (statistics && !statistics.running) {
+      try {
+        const current = makeSnapshot(statistics, weeklyDate);
+        save.disabled = false;
+        const change = compareSnapshot(current, loadSnapshots());
+        message = change ? `较 ${change.baseline.date} 净变化：标注 ${signed(change.done)} · 审核 ${signed(change.reviewed)} · 总任务 ${signed(change.total)}`
+          : '暂无同一组项目的更早快照。保存本期，作为后续对比基准。';
+      } catch (error) { message = error.message; }
+    }
+    if (comparison.textContent !== message) comparison.textContent = message;
+    const history = scopeHistory();
+    const signature = JSON.stringify(history);
+    if (signature !== historySignature) {
+      historySignature = signature;
+      const select = panel.querySelector('[data-history-select]');
+      const previous = select.value;
+      select.replaceChildren();
+      const placeholder = document.createElement('option');
+      placeholder.value = '';
+      placeholder.textContent = history.length ? '选择日期查看已存快照' : '此组项目尚无快照';
+      select.append(placeholder);
+      for (const snapshot of history) {
+        const option = document.createElement('option');
+        option.value = snapshot.date;
+        option.textContent = `${snapshot.date} · ${snapshot.rows.length} 个项目`;
+        select.append(option);
+      }
+      select.value = history.some(item => item.date === previous) ? previous : '';
+      updateHistoryPreview();
+    }
+  }
+
+  function updateHistoryPreview() {
+    const date = panel.querySelector('[data-history-select]').value;
+    const snapshot = scopeHistory().find(item => item.date === date);
+    const preview = panel.querySelector('[aria-label="历史快照报告"]');
+    preview.hidden = !snapshot;
+    preview.value = snapshot ? reportText(snapshotReport(snapshot)) : '';
+  }
+
+  function saveWeeklySnapshot() {
+    try {
+      if (!statistics) throw apiError('请先统计当前项目');
+      const snapshot = makeSnapshot(statistics, weeklyDate);
+      storeSnapshot(snapshot);
+      renderWeekly();
+      notify(`已保存 ${weeklyDate} 本期快照（${snapshot.rows.length} 个项目）；同日期、同一组项目再次保存会更新。`);
+    } catch (error) { notify('快照未保存：' + error.message); }
+  }
+
+  async function startStatistics() {
+    if (statistics?.running || reviewTools?.isBusy()) return;
+    syncProjects();
+    const projects = selected(activeProjects()).map(project => ({...project}));
+    clearStatistics();
+    if (!projects.length) { render(); notify('请先勾选需要统计的项目。'); return; }
+    const report = {key: selectionKey(), scope: view === 'page' ? '本页项目' : '累计项目',
+      date: weeklyDate, workspace: workspacePath(), startedAt: new Date().toISOString(), collectedAt: '',
+      projects, rows: new Map(), running: true, controller: new AbortController(), reason: ''};
+    statistics = report;
+    statisticsKey = report.key;
+    let next = 0;
+    notify(`正在统计${report.scope}中勾选的 ${projects.length} 个项目…`);
+    renderStatistics();
+    async function worker() {
+      while (statistics === report && !report.controller.signal.aborted && next < projects.length) {
+        const project = projects[next++];
+        try {
+          const row = await projectData(project.id, report.controller.signal);
+          if (statistics !== report || report.controller.signal.aborted) return;
+          report.rows.set(project.id, row);
+        } catch (error) {
+          if (statistics !== report || report.controller.signal.aborted) return;
+          report.rows.set(project.id, {error: error.message});
+          if (error.auth) { report.reason = '登录状态失效'; report.controller.abort(); }
+        }
+        if (statistics === report) renderStatistics();
+      }
+    }
+    await Promise.all([worker(), worker()]);
+    if (statistics !== report) return;
+    if (report.key !== selectionKey()) { clearStatistics(); render(); return; }
+    report.running = false;
+    report.collectedAt = new Date().toISOString();
+    renderStatistics();
+    const totals = reportTotals(report);
+    notify(`${reportHeading(report, totals)}：成功 ${totals.success}/${projects.length} 个项目。`);
+  }
+
+  async function copyReport() {
+    if (!statistics || statistics.running) return;
+    const text = reportText(statistics);
+    try {
+      if (typeof GM_setClipboard === 'function') GM_setClipboard(text, 'text');
+      else await navigator.clipboard.writeText(text);
+      notify('已复制本期周报：含项目明细、两类进度及可用的快照净变化。');
+    } catch (_) {
+      panel.querySelector('[data-report-detail]').open = true;
+      const textarea = panel.querySelector('[aria-label="项目统计报告"]');
+      textarea.focus();
+      textarea.select();
+      notify('自动复制失败，统计报告已选中，请按 Ctrl+C / Command+C。');
+    }
+  }
+
+  function notify(message) {
+    const status = panel.querySelector('[data-status]');
+    if (status.textContent !== message) status.textContent = message;
+  }
+
+  function render() {
+    if (statistics && statisticsKey !== selectionKey()) clearStatistics();
+    const projects = activeProjects();
+    const kept = selected(projects);
+    const text = `${view === 'page' ? '本页' : '累计'} ${projects.length} 个 · 保留 ${kept.length} 个 · 已剔除 ${projects.length - kept.length} 个`;
+    const count = panel.querySelector('[data-count]');
+    if (count.textContent !== text) count.textContent = text;
+    for (const mode of ['page', 'saved']) {
+      const tab = panel.querySelector(`[data-action="tab-${mode}"]`);
+      const label = `${mode === 'page' ? '本页项目' : '累计项目'} (${mode === 'page' ? pageProjects.length : state.projects.length})`;
+      if (tab.textContent !== label) tab.textContent = label;
+      tab.setAttribute('aria-selected', String(mode === view));
+    }
+    const list = panel.querySelector('[data-project-list]');
+    const signature = JSON.stringify([view, projects]);
+    if (signature !== listSignature) {
+      listSignature = signature;
+      const scrollTop = list.scrollTop;
+      const fragment = document.createDocumentFragment();
+      for (const project of projects) {
+        const row = document.createElement('div');
+        row.className = 'id-row';
+        row.dataset.projectRow = project.id;
+        const label = document.createElement('label');
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.dataset.selectId = project.id;
+        checkbox.setAttribute('aria-label', `保留 ${displayName(project)}，ID ${project.id}`);
+        const info = document.createElement('span');
+        info.className = 'id-info';
+        const name = document.createElement('span');
+        name.className = 'id-name';
+        name.textContent = displayName(project);
+        const id = document.createElement('span');
+        id.className = 'id-number';
+        id.textContent = `ID ${project.id}`;
+        const stats = document.createElement('span');
+        stats.dataset.projectStats = '';
+        stats.hidden = true;
+        info.append(name, id, stats);
+        label.append(checkbox, info);
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.dataset.action = 'exclude';
+        button.dataset.project = project.id;
+        row.append(label, button);
+        fragment.appendChild(row);
+      }
+      if (!projects.length) {
+        const empty = document.createElement('p');
+        empty.className = 'id-empty';
+        empty.textContent = view === 'page' ? '等待项目卡片加载。' : '还没有累计项目，先勾选本页项目，再点「累计本页」。';
+        fragment.appendChild(empty);
+      }
+      list.replaceChildren(fragment);
+      list.scrollTop = scrollTop;
+    }
+    const excluded = new Set(state.excluded);
+    for (const row of list.querySelectorAll('[data-project-row]')) {
+      const project = projects.find(project => project.id === row.dataset.projectRow);
+      row.hidden = !matchesSearch(project);
+      const isExcluded = excluded.has(row.dataset.projectRow);
+      row.classList.toggle('is-excluded', isExcluded);
+      row.querySelector('input').checked = !isExcluded;
+      const button = row.querySelector('button');
+      const label = isExcluded ? '恢复' : '剔除';
+      if (button.textContent !== label) button.textContent = label;
+      button.setAttribute('aria-label', `${label}项目 ${row.dataset.projectRow}`);
+    }
+    const textarea = panel.querySelector('[aria-label="项目 ID 复制结果"]');
+    const result = formatted(kept.map(project => project.id));
+    if (textarea.value !== result) textarea.value = result;
+    const matched = projects.filter(matchesSearch).length;
+    panel.querySelector('[data-search-note]').textContent = projectSearch.trim() ? `显示 ${matched} / ${projects.length} 个；共选中 ${kept.length} 个（含搜索外项目）` : `已选 ${kept.length} 个项目，三个功能共用此范围`;
+    const noMatch = panel.querySelector('[data-no-match]'); noMatch.hidden = !projects.length || matched > 0;
+    reviewTools?.setProjects(kept.map(project => ({project_id: project.id, project_name: project.name})), selectionKey());
+    renderStatistics();
+  }
+
+  async function copy(ids, label) {
+    if (!ids.length) { notify('没有勾选项目，请先勾选需要的项目；累计清单为空时先累计本页。'); return; }
+    const text = formatted(ids);
+    panel.querySelector('[aria-label="项目 ID 复制结果"]').value = text;
+    try {
+      if (typeof GM_setClipboard === 'function') GM_setClipboard(text, 'text');
+      else await navigator.clipboard.writeText(text);
+      notify(`已复制${label} ${ids.length} 个项目 ID。`);
+    } catch (_) {
+      panel.querySelector('[data-id-detail]').open = true;
+      const textarea = panel.querySelector('[aria-label="项目 ID 复制结果"]');
+      textarea.focus();
+      textarea.select();
+      notify('自动复制失败，ID 已选中，请按 Ctrl+C / Command+C。');
+    }
+  }
+
+  function setSelected(id, keep) {
+    const excluded = new Set(state.excluded);
+    if (keep) excluded.delete(id);
+    else excluded.add(id);
+    state.excluded = [...excluded];
+    saveState();
+  }
+
+  function syncProjects() {
+    pageProjects = readPageProjects();
+    const names = new Map(pageProjects.filter(project => project.name).map(project => [project.id, project.name]));
+    let changed = false;
+    state.projects = state.projects.map(project => {
+      const name = names.get(project.id);
+      if (!name || name === project.name) return project;
+      changed = true;
+      return {id: project.id, name};
+    });
+    if (changed) saveState();
+  }
+
+  function positionPanel() {
+    if (!panel || !panelOpen) return;
+    const bottom = launcher && launcher.isConnected ? launcher.getBoundingClientRect().bottom : 84;
+    const top = panelMaximized || launcher?.classList.contains('is-floating') ? 18 : Math.min(Math.max(18, Math.ceil(bottom + 8)), Math.max(18, window.innerHeight - 278));
+    const availableWidth = Math.max(1, window.innerWidth - 36);
+    const availableHeight = Math.max(1, window.innerHeight - top - 18);
+    const width = Math.min(availableWidth, panelMaximized ? availableWidth : panelSize ? panelSize.width : 1240);
+    const height = Math.min(availableHeight, panelMaximized ? availableHeight : panelSize ? panelSize.height : 820);
+    const preferredLeft = !panelMaximized && panelSize ? panelSize.left : (window.innerWidth - width) / 2;
+    const left = Math.max(18, Math.min(preferredLeft, window.innerWidth - width - 18));
+    for (const [key, value] of Object.entries({top, left, width, height})) {
+      const cssValue = Math.round(value) + 'px';
+      if (panel.style[key] !== cssValue) panel.style[key] = cssValue;
+    }
+    panel.classList.toggle('is-compact', width < 820);
+    const maximize = panel.querySelector('[data-action="maximize"]');
+    maximize.textContent = panelMaximized ? '还原' : '最大化';
+    maximize.setAttribute('aria-pressed', String(panelMaximized));
+    const handle = panel.querySelector('[data-panel-resize]');
+    handle.hidden = panelMaximized;
+    handle.setAttribute('aria-valuetext', `${Math.round(width)} × ${Math.round(height)} 像素`);
+  }
+
+  function resizePanel(width, height, left) {
+    const bounds = panel.getBoundingClientRect();
+    const maxWidth = Math.max(1, window.innerWidth - 36);
+    const maxHeight = Math.max(1, window.innerHeight - bounds.top - 18);
+    panelSize = {
+      width: Math.min(maxWidth, Math.max(Math.min(560, maxWidth), width)),
+      height: Math.min(maxHeight, Math.max(Math.min(360, maxHeight), height)),
+      left,
+    };
+    panelMaximized = false;
+    positionPanel();
+  }
+
+  function applyPanelVisibility() {
+    if (panel && panel.hidden !== !panelOpen) panel.hidden = !panelOpen;
+    if (launcher) {
+      const expanded = String(panelOpen);
+      if (launcher.getAttribute('aria-expanded') !== expanded) launcher.setAttribute('aria-expanded', expanded);
+      launcher.classList.toggle('is-open', panelOpen);
+    }
+    positionPanel();
+  }
+
+  function setPanelOpen(open, returnFocus = false) {
+    panelOpen = open;
+    applyPanelVisibility();
+    if (open) panel.querySelector('[data-action="close"]').focus({preventScroll: true});
+    else if (returnFocus && launcher && launcher.isConnected) launcher.focus({preventScroll: true});
+  }
+
+  function mountLauncher() {
+    const header = document.querySelector('.ls-projects-page__title-container');
+    const toolbar = header && header.querySelector('.ovw-toolbar');
+    const host = toolbar || header && header.querySelector('.ls-projects-page__filter-container') || header || document.body;
+    if (!launcher) {
+      launcher = document.createElement('button');
+      launcher.id = LAUNCHER_ID;
+      launcher.type = 'button';
+      launcher.className = 'ovw-toolbar__btn';
+      launcher.title = '打开项目进度、历史通过率与全部评论';
+      launcher.setAttribute('aria-controls', PANEL_ID);
+      launcher.setAttribute('aria-expanded', 'false');
+      launcher.innerHTML = '<svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" d="M2 2v12h12M5 10V7m4 3V4m4 6V6"/></svg><span>统计数据</span>';
+      launcher.addEventListener('click', event => {
+        event.preventDefault();
+        event.stopPropagation();
+        refresh();
+        if (launcher.isConnected) setPanelOpen(!panelOpen);
+      });
+    }
+    launcher.classList.toggle('is-floating', host === document.body);
+    // 页面重挂可能留下无事件的 DOM 副本，始终复用持有事件的唯一按钮。
+    document.querySelectorAll('#' + LAUNCHER_ID).forEach(element => {
+      if (element !== launcher) element.remove();
+    });
+    const hiddenButton = toolbar && toolbar.querySelector('[data-suite-tool="hidden-cards"]');
+    if (hiddenButton && hiddenButton.parentElement === host) {
+      if (hiddenButton.nextElementSibling !== launcher) hiddenButton.after(launcher);
+    } else if (launcher.parentElement !== host) {
+      const popover = toolbar && [...toolbar.children].find(element => element.classList.contains('ovw-toolbar__panel'));
+      host.insertBefore(launcher, popover || null);
+    }
+    applyPanelVisibility();
+  }
+
+  function createPanel() {
+    reviewTools?.dispose(); reviewTools = null;
+    listSignature = '';
+    historySignature = '';
+    panel = document.createElement('section');
+    panel.id = PANEL_ID;
+    panel.dataset.i360Combined = 'true';
+    panel.hidden = !panelOpen;
+    panel.setAttribute('aria-label', '项目统计数据');
+    panel.innerHTML = `
+      <style>
+        #${LAUNCHER_ID}{display:inline-flex;align-items:center;justify-content:center;gap:6px;flex-shrink:0;height:32px;padding:0 12px;margin-left:8px;border:1px solid #d9d9d9;border-radius:6px;background:#fff;color:rgba(0,0,0,.88);cursor:pointer;font:13px/1 system-ui,sans-serif;white-space:nowrap}
+        #${LAUNCHER_ID}:hover,#${LAUNCHER_ID}.is-open{color:#1677ff;border-color:#1677ff;background:#f6faff}
+        #${LAUNCHER_ID}:focus-visible{outline:2px solid #1677ff;outline-offset:2px}
+        #${LAUNCHER_ID}.is-floating{position:fixed;right:22px;bottom:156px;z-index:2147482999;box-shadow:0 3px 16px #16362e22}
+        #${PANEL_ID}{position:fixed;left:18px;top:92px;z-index:2147483000;display:flex;flex-direction:column;width:1000px;height:780px;max-width:calc(100vw - 36px);max-height:calc(100vh - 36px);overflow:hidden;box-sizing:border-box;padding:20px;background:#fff;color:#1e293b;border:1px solid #cbd5e1;border-radius:12px;box-shadow:0 10px 40px #0f172a30;font:14px/1.5 system-ui,sans-serif;text-align:left;color-scheme:light}
+        #${PANEL_ID}[hidden]{display:none!important}
+        #${PANEL_ID} *{box-sizing:border-box}
+        #${PANEL_ID} strong{font-size:18px} #${PANEL_ID} p{margin:5px 0 9px}
+        #${PANEL_ID} .stats-panel-body{display:grid;grid-template-columns:290px minmax(0,1fr);gap:20px;flex:1;min-height:0;margin-top:16px}
+        #${PANEL_ID} .stats-project-column{display:flex;flex-direction:column;min-height:0;min-width:0}
+        #${PANEL_ID} .stats-result-column{min-height:0;min-width:0;overflow:auto;overscroll-behavior:contain;padding-left:20px;border-left:1px solid #e2e8f0}
+        #${PANEL_ID} .dashboard-nav{position:sticky;top:0;background:#fff;z-index:4;padding-bottom:12px}
+        #${PANEL_ID} .dashboard-exports{display:flex;justify-content:flex-end;gap:8px;margin-bottom:12px}
+        #${PANEL_ID} [data-action="export-all"]{background:#2563eb;border-color:#2563eb;color:#fff;padding:8px 13px}
+        #${PANEL_ID} [data-action="stop-all"]{color:#b45309;border-color:#e8cfa8;background:#fffaf0;padding:8px 13px}
+        #${PANEL_ID} .tool-tabs{display:flex;gap:6px;border-bottom:1px solid #e2e8f0}
+        #${PANEL_ID} .tool-tabs button{flex:1;border:0;border-bottom:3px solid transparent;background:#fff;border-radius:5px 5px 0 0;padding:10px 8px;white-space:nowrap}
+        #${PANEL_ID} .tool-tabs button[aria-selected="true"]{background:#eff6ff;color:#1d4ed8;border-bottom-color:#2563eb;font-weight:600}
+        #${PANEL_ID} [data-project-search]{width:100%;border:1px solid #cbd5e1;border-radius:7px;min-height:36px;padding:7px 10px;margin:10px 0 0;font:inherit;background:#fff;color:#1e293b}
+        #${PANEL_ID} [data-search-note]{font-size:12px;color:#64748b;margin:8px 0}
+        #${PANEL_ID} [data-no-match]{color:#b45309;font-size:12px;margin:6px 0}
+        #${PANEL_ID} .collection-actions{display:flex;gap:7px;margin-top:10px;flex-wrap:wrap}
+        #${PANEL_ID} .collection-actions button{flex:1;padding:7px 8px;white-space:nowrap}
+        #${PANEL_ID} .manual-input{font-size:12px;color:#64748b;margin-top:10px}
+        #${PANEL_ID} [data-project-input]{height:64px;border:1px solid #cbd5e1;border-radius:6px;padding:7px}
+        #${PANEL_ID} [data-action="import"]{margin-top:6px;padding:6px 9px;color:#1d4ed8}
+        #${PANEL_ID} .stats-panel-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-shrink:0;padding-top:12px;margin-top:12px;border-top:1px solid #e2e8f0;color:#64748b;font-size:12px}
+        #${PANEL_ID} .stats-panel-footer>span{flex-shrink:0;white-space:nowrap}
+        #${PANEL_ID} [data-panel-resize]{position:absolute;right:0;bottom:0;width:24px;height:24px;padding:0;border:0;border-radius:0 0 10px 0;background:transparent;cursor:nwse-resize;touch-action:none}
+        #${PANEL_ID} [data-panel-resize]::after{content:'';position:absolute;right:5px;bottom:5px;width:10px;height:10px;background:repeating-linear-gradient(135deg,transparent 0 3px,#94a3b8 3px 4px)}
+        #${PANEL_ID}.is-resizing{user-select:none}
+        #${PANEL_ID} .id-buttons{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+        #${PANEL_ID} button{margin:0;padding:7px 5px;border:1px solid #cbd5e1;border-radius:6px;color:#1e293b;background:#f8fafc;cursor:pointer;font:inherit}
+        #${PANEL_ID} [data-action="stats"]{flex:1;background:#2563eb;border-color:#2563eb;color:#fff;font-weight:600;padding:10px}
+        #${PANEL_ID} button:disabled{opacity:.55;cursor:default}
+        #${PANEL_ID} button:hover{filter:brightness(.95)}
+        #${PANEL_ID} button:focus-visible,#${PANEL_ID} input:focus-visible{outline:2px solid #2563eb;outline-offset:2px}
+        #${PANEL_ID} .stats-panel-header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-shrink:0;padding-bottom:16px;border-bottom:1px solid #e2e8f0}
+        #${PANEL_ID} .stats-window-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
+        #${PANEL_ID} [data-action="maximize"]{padding:5px 10px;font-size:12px}
+        #${PANEL_ID} [data-action="reset-size"]{padding:0;border:0;background:transparent;color:#2563eb;font-size:12px;margin-right:12px}
+        #${PANEL_ID} [data-action="close"]{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;padding:0;border-color:transparent;background:transparent;color:#64748b;font-size:22px;line-height:1}
+        #${PANEL_ID} .id-tabs{display:flex;gap:4px;border-bottom:1px solid #e2e8f0;flex-shrink:0}
+        #${PANEL_ID} .id-tabs button{flex:1;background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;padding:9px 4px;color:#64748b}
+        #${PANEL_ID} .id-tabs button[aria-selected="true"]{border-bottom-color:#2563eb;color:#1d4ed8;font-weight:600}
+        #${PANEL_ID} .id-selection-tools{display:flex;align-items:center;gap:12px;padding:12px 0;color:#64748b;font-size:12px;flex-shrink:0}
+        #${PANEL_ID} .id-selection-tools button{border:0;background:transparent;padding:0;color:#2563eb;font-size:12px}
+        #${PANEL_ID} [data-project-list]{flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;border:1px solid #e2e8f0;border-radius:8px}
+        #${PANEL_ID} .id-row{display:flex;align-items:center;gap:10px;padding:14px 12px;border-bottom:1px solid #f1f5f9;background:#fff}
+        #${PANEL_ID} .id-row:last-child{border-bottom:0}
+        #${PANEL_ID} .id-row label{display:flex;gap:9px;align-items:flex-start;flex:1;min-width:0;cursor:pointer;margin:0;padding:0;font:inherit;color:inherit}
+        #${PANEL_ID} .id-row input{flex:0 0 15px;width:15px;height:15px;margin:3px 0 0;accent-color:#2563eb}
+        #${PANEL_ID} .id-info{display:block;min-width:0}
+        #${PANEL_ID} .id-name{display:block;font-weight:500;overflow-wrap:anywhere;white-space:normal}
+        #${PANEL_ID} .id-number{display:block;margin-top:3px;font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#64748b}
+        #${PANEL_ID} [data-project-stats]{display:block;margin-top:5px;font-size:12px;color:#2563eb;overflow-wrap:anywhere}
+        #${PANEL_ID} [hidden]{display:none!important}
+        #${PANEL_ID} [data-project-stats].has-error{color:#b45309}
+        #${PANEL_ID} .id-row button{flex:0 0 auto;padding:3px 7px;font-size:12px;background:transparent;color:#64748b;border-color:#e2e8f0}
+        #${PANEL_ID} .id-row.is-excluded{background:#f8fafc}
+        #${PANEL_ID} .is-excluded .id-name{color:#94a3b8;text-decoration:line-through}
+        #${PANEL_ID} .is-excluded .id-number::after{content:' · 已剔除';font-family:system-ui,sans-serif}
+        #${PANEL_ID} .is-excluded button{color:#2563eb}
+        #${PANEL_ID} .id-empty{padding:16px 12px;color:#64748b}
+        #${PANEL_ID} .stats-actions{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 16px}
+        #${PANEL_ID} .weekly-tools{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 10px;font-size:12px}
+        #${PANEL_ID} .weekly-tools label{display:flex;align-items:center;gap:6px;margin:0;font:inherit;color:inherit}
+        #${PANEL_ID} .weekly-tools input{font:inherit;width:128px;min-height:30px;padding:3px 5px;border:1px solid #cbd5e1;border-radius:5px;background:white;color:#334155}
+        #${PANEL_ID} [data-action="save-snapshot"]{flex:1;min-width:92px;padding:6px;font-size:12px}
+        #${PANEL_ID} [data-weekly-comparison]{font-size:12px;margin:5px 0 0;color:#475569;overflow-wrap:anywhere}
+        #${PANEL_ID} [data-history-select]{display:block;width:100%;font:inherit;padding:7px;border:1px solid #cbd5e1;border-radius:5px;margin-top:8px;background:white;color:#334155}
+        #${PANEL_ID} .weekly-history{margin:12px 0;font-size:12px;color:#64748b}
+        #${PANEL_ID} [aria-label="历史快照报告"]{height:200px}
+        #${PANEL_ID} [data-action="stop"]{width:100%}
+        #${PANEL_ID} .stats-result-empty{padding:22px 16px;border:1px dashed #cbd5e1;border-radius:8px;background:#f8fafc;color:#64748b;font-size:13px}
+        #${PANEL_ID}.has-statistics .stats-result-empty{display:none}
+        #${PANEL_ID} [data-statistics]{border:1px solid #bfdbfe;border-radius:8px;background:#eff6ff;padding:16px;margin:0 0 12px}
+        #${PANEL_ID} .stats-heading{font-weight:600;color:#1e40af}
+        #${PANEL_ID} [data-stats-note],#${PANEL_ID} .stats-help{font-size:12px;color:#64748b}
+        #${PANEL_ID} .stats-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px 10px;margin:16px 0}
+        #${PANEL_ID} .stats-grid span{display:block;font-size:12px;color:#475569}
+        #${PANEL_ID} .stats-grid b{display:block;margin-top:3px;font:600 20px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace;color:#1e3a8a;overflow-wrap:anywhere}
+        #${PANEL_ID} progress{display:block;appearance:none;width:100%;height:6px;border:0;border-radius:6px;background:#dbeafe;margin:10px 0}
+        #${PANEL_ID} progress::-webkit-progress-bar{background:#dbeafe;border-radius:6px}
+        #${PANEL_ID} progress::-webkit-progress-value{background:#2563eb;border-radius:6px}
+        #${PANEL_ID} .is-partial .stats-heading{color:#b45309}
+        #${PANEL_ID} [data-action="copy-report"]{width:100%;background:white;color:#1d4ed8;border-color:#bfdbfe;margin:3px 0 8px}
+        #${PANEL_ID} .stats-subtitle{color:#64748b;font-size:13px;margin-bottom:0}
+        #${PANEL_ID} .id-tools{margin-top:16px;color:#64748b;font-size:12px}
+        #${PANEL_ID} .id-tools .id-buttons{margin-top:8px}
+        #${PANEL_ID}.is-compact{padding:14px}
+        #${PANEL_ID}.is-compact .stats-panel-body{display:flex;flex-direction:column;overflow:auto;gap:16px}
+        #${PANEL_ID}.is-compact .stats-project-column{min-height:0;height:auto;flex-shrink:0}
+        #${PANEL_ID}.is-compact [data-project-list]{flex:0 0 170px;min-height:170px}
+        #${PANEL_ID}.is-compact .stats-result-column{min-height:auto;overflow:visible;padding:0;border:0;flex-shrink:0}
+        #${PANEL_ID}.is-compact .stats-grid{grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+        #${PANEL_ID}.is-compact .stats-grid b{font-size:20px}
+        #${PANEL_ID}.is-compact .stats-panel-footer .stats-size-help{display:none}
+        @media(max-width:480px){#${PANEL_ID} .stats-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important}#${PANEL_ID} .stats-subtitle{font-size:12px}#${PANEL_ID} strong{font-size:16px}#${PANEL_ID} .stats-window-actions{gap:4px}}
+        #${PANEL_ID} [data-status]{color:#475569;font-size:12px;margin:0;min-width:0;overflow-wrap:anywhere}
+        #${PANEL_ID} summary{cursor:pointer;color:#475569} #${PANEL_ID} textarea{box-sizing:border-box;width:100%;height:76px;margin-top:6px;resize:vertical;font:12px/1.5 monospace}
+      </style>
+      <div class="stats-panel-header"><div><strong>项目统计数据</strong><p class="stats-subtitle">选择一次项目，查看进度、历史通过率与全部评论</p></div><div class="stats-window-actions"><button type="button" data-action="maximize" aria-pressed="false">最大化</button><button type="button" data-action="close" aria-label="关闭项目统计面板" title="关闭（Esc），保留选择和结果">×</button></div></div>
+      <div class="stats-panel-body"><div class="stats-project-column"><p data-count></p>
+      <div class="id-tabs" role="tablist" aria-label="项目清单范围">
+        <button type="button" role="tab" data-action="tab-page">本页项目</button>
+        <button type="button" role="tab" data-action="tab-saved">累计项目</button>
+      </div>
+      <input type="search" data-project-search aria-label="搜索项目名称或 ID" placeholder="搜索项目名称或 ID">
+      <p data-search-note></p>
+      <div class="id-selection-tools"><span>搜索结果</span><button type="button" data-action="select">全选</button><button type="button" data-action="none">全不选</button></div>
+      <div data-project-list role="group" aria-label="可选择的项目"></div>
+      <p data-no-match hidden>没有匹配的项目，清空搜索可查看全部。</p>
+      <div class="collection-actions"><button type="button" data-action="add" title="只累计本页勾选的项目">累计本页</button><button type="button" data-action="copy-selected">复制所选 ID</button></div>
+      <details class="manual-input"><summary>粘贴项目 ID / 链接</summary><textarea data-project-input aria-label="输入项目 ID 或项目链接" placeholder="10,20 或 idlist = [10, 20]"></textarea><button type="button" data-action="import">加入累计清单</button></details>
+      </div><div class="stats-result-column">
+      <div class="dashboard-nav"><div class="dashboard-exports"><button type="button" data-action="stop-all" hidden>停止当前读取</button><button type="button" data-action="export-all" disabled>导出已读数据 Excel</button></div><div class="tool-tabs" role="tablist" aria-label="统计功能"><button type="button" role="tab" data-action="view-overview">项目进度</button><button type="button" role="tab" data-action="view-history">历史通过率</button><button type="button" role="tab" data-action="view-comments">全部评论</button></div></div>
+      <div data-overview>
+      <div class="stats-actions"><button type="button" data-action="stats">统计所选项目</button><button type="button" data-action="stop" hidden style="display:none">停止统计</button></div>
+      <div class="weekly-tools"><label>报告日期<input type="date" data-weekly-date aria-label="本期报告日期"></label><button type="button" data-action="save-snapshot" disabled>保存本期快照</button></div>
+      <p class="stats-subtitle" data-weekly-comparison></p>
+      <div class="stats-result-empty">选好项目后点击「统计所选项目」，查看已标注、已审核及两类进度。保存本期快照，下周对比同一组项目。</div>
+      <div data-statistics hidden></div>
+      <details class="weekly-history"><summary>历史快照（当前这组项目）</summary><select data-history-select aria-label="查看历史快照日期"></select><textarea readonly hidden aria-label="历史快照报告"></textarea><p>快照仅保存在此浏览器的油猴存储中。报告日期不改变实际采集时间；快照差值表示净变化。</p></details>
+      </div>
+      <div data-review-tools hidden></div>
+      <details class="id-tools"><summary>复制格式 / 累计管理</summary>
+      <div class="id-buttons">
+        <button type="button" data-action="page">复制本页 ID</button>
+        <button type="button" data-action="all">复制累计 ID</button>
+        <button type="button" data-action="clear" title="开始新一组，清空累计项目及剔除记录">清空累计</button>
+      </div>
+      <details data-id-detail><summary>查看 / 手动复制 ID</summary><textarea readonly aria-label="项目 ID 复制结果"></textarea></details></details>
+      </div></div>
+      <div class="stats-panel-footer"><p data-status role="status">勾选需要的项目，再点「统计所选项目」。</p><span><span class="stats-size-help">拖动右下角调整大小 · </span><button type="button" data-action="reset-size">恢复默认大小</button></span></div>
+      <button type="button" data-panel-resize aria-label="调整面板大小" title="拖动调整大小；方向键每次调整 40 像素"></button>`;
+    const mountedPanel = panel;
+    reviewTools = mountReviewTools(panel.querySelector('[data-review-tools]'), {
+      onClose: () => { if (panel === mountedPanel) setPanelOpen(false, true); },
+      onStatus: message => { if (panel === mountedPanel) notify(message); },
+      onBusy: () => { if (panel === mountedPanel) updateDashboardActions(); },
+      onChange: () => { if (panel === mountedPanel) updateDashboardActions(); },
+    });
+    setToolView(toolView);
+    panel.querySelector('[data-weekly-date]').value = weeklyDate;
+    panel.querySelector('[data-project-search]').value = projectSearch;
+    panel.querySelector('[data-project-search]').addEventListener('input', event => { projectSearch = event.target.value; render(); });
+    for (const type of ['keydown', 'keyup', 'keypress']) panel.addEventListener(type, event => {
+      event.stopPropagation();
+      if (type === 'keydown' && event.key === 'Escape') { setPanelOpen(false, true); event.preventDefault(); }
+      if (type === 'keydown' && ['ArrowLeft', 'ArrowRight'].includes(event.key) && event.target.closest('.tool-tabs')) {
+        const modes = ['overview', 'history', 'comments'];
+        const next = modes[(modes.indexOf(toolView) + (event.key === 'ArrowRight' ? 1 : 2)) % 3];
+        setToolView(next); panel.querySelector(`[data-action="view-${next}"]`).focus(); event.preventDefault();
+      }
+    });
+    panel.querySelector('[data-panel-resize]').addEventListener('pointerdown', event => {
+      if (event.button !== 0 || panelMaximized) return;
+      const bounds = panel.getBoundingClientRect();
+      panelDrag = {pointerId: event.pointerId, x: event.clientX, y: event.clientY,
+        width: bounds.width, height: bounds.height, left: bounds.left};
+      try { event.currentTarget.setPointerCapture(event.pointerId); } catch (_) { /* 合成事件没有活动指针。 */ }
+      panel.classList.add('is-resizing');
+      event.preventDefault();
+    });
+    panel.querySelector('[data-panel-resize]').addEventListener('keydown', event => {
+      const directions = {ArrowRight: [40, 0], ArrowLeft: [-40, 0], ArrowDown: [0, 40], ArrowUp: [0, -40]};
+      const delta = directions[event.key];
+      if (!delta) return;
+      const bounds = panel.getBoundingClientRect();
+      resizePanel(bounds.width + delta[0], bounds.height + delta[1], bounds.left);
+      event.preventDefault();
+    });
+    panel.addEventListener('change', event => {
+      if (event.target.matches('[data-weekly-date]')) {
+        const date = event.target.value;
+        if (validDate(date)) { weeklyDate = date; if (statistics) statistics.date = date; renderStatistics(); }
+        else { event.target.value = weeklyDate; notify('请选择有效的报告日期。'); }
+        return;
+      }
+      if (event.target.matches('[data-history-select]')) { updateHistoryPreview(); return; }
+      const checkbox = event.target.closest('input[data-select-id]');
+      if (!checkbox) return;
+      clearStatistics();
+      try {
+        setSelected(checkbox.dataset.selectId, checkbox.checked);
+        notify(checkbox.checked ? '已恢复，请点击「统计所选项目」更新结果。' : '已剔除，请点击「统计所选项目」更新结果。');
+      } catch (_) { notify('选择仅在当前页面保留，保存失败；请先复制所需 ID。'); }
+      render();
+    });
+    panel.addEventListener('click', async event => {
+      const button = event.target.closest('button[data-action]');
+      if (!button) return;
+      if (button.dataset.action === 'close') { setPanelOpen(false, true); return; }
+      if (button.dataset.action === 'maximize') { panelMaximized = !panelMaximized; positionPanel(); return; }
+      if (button.dataset.action === 'reset-size') { panelSize = null; panelMaximized = false; positionPanel(); return; }
+      if (button.dataset.action.startsWith('view-')) { setToolView(button.dataset.action.slice(5)); return; }
+      if (button.dataset.action === 'export-all') { exportAll(); return; }
+      if (button.dataset.action === 'stop-all') {
+        if (statistics?.running) { statistics.reason = '已停止'; statistics.controller.abort(); }
+        reviewTools?.cancel(); return;
+      }
+      try {
+        syncProjects();
+        if (statistics && statisticsKey !== selectionKey()) {
+          clearStatistics();
+          render();
+          notify('所选范围已改变，请重新点击「统计所选项目」。');
+        }
+        if (button.dataset.action === 'stats') { await startStatistics(); return; }
+        if (button.dataset.action === 'stop') {
+          if (statistics && statistics.running) { statistics.reason = '已停止'; statistics.controller.abort(); }
+          return;
+        }
+        if (button.dataset.action === 'copy-report') { await copyReport(); return; }
+        if (button.dataset.action === 'save-snapshot') { saveWeeklySnapshot(); return; }
+        switch (button.dataset.action) {
+          case 'copy-selected': await copy(selected(activeProjects()).map(project => project.id), '所选'); break;
+          case 'import': {
+            const input = panel.querySelector('[data-project-input]');
+            const ids = parseInput(input.value);
+            const known = new Map(pageProjects.map(project => [project.id, project]));
+            state.projects = projectsOf([...state.projects, ...ids.map(id => known.get(id) || {id, name: ''})]);
+            state.excluded = state.excluded.filter(id => !ids.includes(id));
+            saveState(); view = 'saved'; projectSearch = ''; panel.querySelector('[data-project-search]').value = '';
+            notify(`已加入 ${ids.length} 个去重项目，当前使用累计清单。`); input.value = ''; break;
+          }
+          case 'tab-page': view = 'page'; break;
+          case 'tab-saved': view = 'saved'; break;
+          case 'exclude': {
+            clearStatistics();
+            const id = button.dataset.project;
+            const keep = state.excluded.includes(id);
+            setSelected(id, keep);
+            notify(keep ? '已恢复，请点击「统计所选项目」更新结果。' : '已剔除，请点击「统计所选项目」更新结果。');
+            break;
+          }
+          case 'select':
+          case 'none': {
+            clearStatistics();
+            const currentIds = new Set(activeProjects().filter(matchesSearch).map(project => project.id));
+            state.excluded = state.excluded.filter(id => !currentIds.has(id));
+            if (button.dataset.action === 'none') state.excluded = validIds([...state.excluded, ...currentIds]);
+            saveState();
+            notify(button.dataset.action === 'none' ? '当前清单已全部剔除，可勾选或点「恢复」。' : '当前清单已全部勾选。');
+            break;
+          }
+          case 'page':
+            view = 'page';
+            render();
+            await copy(selected(pageProjects).map(project => project.id), '本页');
+            break;
+          case 'add': {
+            const kept = selected(pageProjects);
+            if (!kept.length) { notify('没有勾选项目，请先勾选本页需要累计的项目。'); break; }
+            const before = state.projects.length;
+            state.projects = projectsOf([...state.projects, ...kept]);
+            saveState();
+            notify(`新增 ${state.projects.length - before} 个，累计保留 ${selected(state.projects).length} 个；剔除项不会重新加入。`);
+            break;
+          }
+          case 'all':
+            view = 'saved';
+            render();
+            await copy(selected(state.projects).map(project => project.id), '累计');
+            break;
+          case 'clear':
+            clearStatistics();
+            state.projects = [];
+            state.excluded = [];
+            saveState();
+            view = 'page';
+            notify('已清空累计和剔除记录，可以开始选择下一组项目。');
+            break;
+        }
+      } catch (error) { notify(error.message || '操作未完成，请重试；选择和累计保存失败时可先复制 ID。'); }
+      render();
+    });
+    document.body.appendChild(panel);
+  }
+
+  function refresh() {
+    const isProjectRoute = /\/workspaces\/[^/]+\/projects(?:\/|$)/.test(location.pathname);
+    if (!isProjectRoute) {
+      clearStatistics();
+      reviewTools?.setProjects([], 'outside');
+      panelOpen = false;
+      previousScope = '';
+      applyPanelVisibility();
+      if (launcher) launcher.remove();
+      return;
+    }
+    if (!panel || !panel.isConnected) createPanel();
+    mountLauncher();
+    applyPanelVisibility();
+    const scope = location.pathname + location.search;
+    if (scope !== previousScope) {
+      clearStatistics();
+      reviewTools?.setProjects([], scope);
+      previousScope = scope;
+      panel.querySelector('[aria-label="项目 ID 复制结果"]').value = '';
+      view = 'page';
+      notify('左侧勾选项目，再选择项目进度、历史通过率或全部评论。跨页可累计项目。');
+    }
+    try { syncProjects(); }
+    catch (_) { notify('项目已读取，名称或选择暂未保存；请先复制需要的 ID。'); }
+    render();
+  }
+
+  const observer = new MutationObserver(records => {
+    if (records.every(record => panel && panel.contains(record.target)
+      || launcher && launcher.contains(record.target))) return;
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(refresh, 150);
+  });
+  observer.observe(document.body, {subtree: true, childList: true,
+    attributes: true, attributeFilter: ['style', 'class', 'hidden', 'href', 'data-project-id']});
+  window.addEventListener('popstate', refresh);
+  window.addEventListener('resize', positionPanel);
+  window.addEventListener('scroll', positionPanel, {passive: true});
+  document.addEventListener('pointermove', event => {
+    if (!panelDrag || event.pointerId !== panelDrag.pointerId) return;
+    resizePanel(panelDrag.width + event.clientX - panelDrag.x,
+      panelDrag.height + event.clientY - panelDrag.y, panelDrag.left);
+  });
+  const stopResize = event => {
+    if (!panelDrag || event.pointerId !== panelDrag.pointerId) return;
+    panelDrag = null;
+    if (panel) panel.classList.remove('is-resizing');
+  };
+  document.addEventListener('pointerup', stopResize);
+  document.addEventListener('pointercancel', stopResize);
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && panelOpen) {
+      setPanelOpen(false, true);
+      event.preventDefault();
+    }
+  });
+  window.setInterval(refresh, 1000);
+  refresh();
 })();
 
 })();
