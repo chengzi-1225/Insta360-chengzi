@@ -2,8 +2,8 @@
 // @name         insta360-IDswitching
 // @namespace    local.ls.toolkit
 // @author       chengzi
-// @version      3.20.0
-// @description  显示 ID 倍率，同一比例按可调差值一键去重并保留最小倍率，可整批原生撤回；保留文本常显、框选与自定义快捷键。
+// @version      3.19.1
+// @description  批量常显比例、文本标签与当前任务 ID，支持拖动框选；保留空格视频播放、独立更新快捷键与标签同步开关。
 // @updateURL    https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
 // @downloadURL  https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/refs/heads/main/insta360-IDswitching.user.js
 // @match        *://label.insta360.com/*
@@ -211,7 +211,7 @@
         if (history && typeof history.onUpdate === 'function') disposeHistory = history.onUpdate(historyRestored);
       }
       if (!controls) return;
-      const busy = drawing(ann) || !!window.__CLEAR_TAGS?.isRunning() || !!window.__ZOOM_DEDUP?.isRunning();
+      const busy = drawing(ann) || !!(window.__CLEAR_TAGS && window.__CLEAR_TAGS.isRunning());
       for (const direction of ['undo', 'redo']) {
         const button = controls.querySelector(`[data-history-action="${direction}"]`);
         const disabled = busy || !can(history, direction);
@@ -220,7 +220,7 @@
     }
     function run(direction) {
       const ann = annotation(), history = ann && ann.history;
-      if (drawing(ann) || window.__CLEAR_TAGS?.isRunning() || window.__ZOOM_DEDUP?.isRunning() || !can(history, direction)) return false;
+      if (drawing(ann) || window.__CLEAR_TAGS && window.__CLEAR_TAGS.isRunning() || !can(history, direction)) return false;
       historyRestored();
       history[direction]();
       refresh();
@@ -1783,7 +1783,7 @@
 
     function getAvail() { return getAll().filter(matchMode); }
     function navigationBusy() {
-      return editing.drawing() || !!window.__CLEAR_TAGS?.isRunning() || !!window.__REGION_DELETE?.isRunning() || !!window.__ZOOM_DEDUP?.isRunning();
+      return editing.drawing() || !!window.__CLEAR_TAGS?.isRunning() || !!window.__REGION_DELETE?.isRunning();
     }
 
     function itemIdentity(item) {
@@ -2689,7 +2689,6 @@
 
     async function deletePerson(person) {
       if (person !== 1 && person !== 2) return;
-      if (window.__ZOOM_DEDUP?.isRunning()) { showToast('正在倍率去重，请稍候'); return; }
       if (batchRunning) { showToast('正在批量处理中…'); return; }
       batchRunning = true;
       activeDeletePerson = person;
@@ -2842,7 +2841,6 @@
 
     /* ---- 主流程：遍历所有 ID，逐个清空标签（保留框） ---- */
     async function clearAllTags() {
-      if (window.__ZOOM_DEDUP?.isRunning()) { showToast('正在倍率去重，请稍候'); return; }
       if (batchRunning) { showToast('正在清空中…'); return; }
       batchRunning = true;
       setBtnState('running', '清空中...');
@@ -2895,7 +2893,6 @@
 
     /* ---- 备选：一键删掉所有 region（会消失框） ---- */
     async function deleteAllRegions() {
-      if (window.__ZOOM_DEDUP?.isRunning()) { showToast('正在倍率去重，请稍候'); return; }
       const ann = getAnnotation();
       if (!ann || typeof ann.deleteAllRegions !== 'function') {
         showToast('deleteAllRegions 不可用');
@@ -3269,7 +3266,7 @@
     }
 
     function clearing() {
-      return !!window.__CLEAR_TAGS?.isRunning() || !!window.__ZOOM_DEDUP?.isRunning();
+      return !!(window.__CLEAR_TAGS && window.__CLEAR_TAGS.isRunning());
     }
 
     function sourceFor(target) {
@@ -3513,241 +3510,6 @@
     console.log('[标签同步] v3.16.2 已加载：默认关闭，开关位于快捷键设置');
   })();
 
-  // BEGIN ZOOM DEDUP
-  // 倍率只由原始像素几何计算，不随页面和画布缩放改变。
-  (function moduleZoomDedup() {
-    if (window.__ZOOM_DEDUP) return;
-    const KEY = 'ls_zoom_dedup_v1', LOCK = '__ls_zoom_dedup_history';
-    const TOKENS = /\[\s*(\d+(?:\.\d+)?)\s*[,，]\s*(\d+(?:\.\d+)?)\s*\]|(?:^|[^\dA-Za-z_.+\-−－:：/×,，])(\d+(?:\.\d+)?)\s*[:：/xX×]\s*(\d+(?:\.\d+)?)(?=$|[^\dA-Za-z_.:：/×,，])/g;
-    let threshold = 0.4, running = false, toolbar = null, timer = null, message = '';
-    const objectIds = new WeakMap(); let nextObjectId = 0;
-    const validThreshold = value => typeof value === 'number' && Number.isFinite(value) &&
-      value >= 0.1 && value <= 0.6 && Math.abs(value * 10 - Math.round(value * 10)) < 1e-9;
-    try {
-      const saved = JSON.parse(localStorage.getItem(KEY) || 'null');
-      if (saved?.version === 1 && validThreshold(saved.threshold)) threshold = saved.threshold;
-    } catch (e) {}
-    const readOnly = node => !!node && (node.readonly === true || node.locked === true ||
-      node.isReadOnly === true || typeof node.isReadOnly === 'function' && node.isReadOnly());
-    function labelsOf(region) {
-      const found = [];
-      const add = values => {
-        if (typeof values === 'string') found.push(values);
-        else if (values && typeof values[Symbol.iterator] === 'function') {
-          for (const value of values) if (typeof value === 'string') found.push(value);
-        }
-      };
-      add(region.labels); add(region.labeling?.mainValue);
-      if (region.labelings) for (const result of region.labelings) add(result.mainValue);
-      if (region.results) for (const result of region.results) {
-        if (/^(?:rectanglelabels|labels)$/.test(result.type || '')) {
-          add(result.mainValue); add(result.value?.rectanglelabels); add(result.value?.labels);
-        }
-      }
-      if (!found.length) add(region.labelName);
-      return [...new Set(found.map(text => text.trim()).filter(Boolean))];
-    }
-    function ratioOf(labels) {
-      const keys = new Set();
-      for (const label of labels) for (const match of label.matchAll(TOKENS)) {
-        const w = Number(match[1] || match[3]), h = Number(match[2] || match[4]);
-        if (!(w > 0 && h > 0 && w <= 1e9 && h <= 1e9)) continue;
-        let a = Math.round(w * 1e6), b = Math.round(h * 1e6), x = a, y = b;
-        if (!(a > 0 && b > 0)) continue;
-        while (y) { const remainder = x % y; x = y; y = remainder; }
-        keys.add(`${a / x}:${b / x}`);
-      }
-      return keys.size === 1 ? [...keys][0] : null;
-    }
-    function context(ann) {
-      let task = null;
-      for (const key of ['Htx', '__lsf', 'LS', 'labelStudio', '__store', 'lsf']) {
-        const store = window[key];
-        if ((store?.annotationStore?.selected || store?.annotationStore?.current) !== ann) continue;
-        task = store.task?.id ?? store.task?.pk ??
-          (['string', 'number'].includes(typeof store.task) ? store.task : null);
-        if (task != null) break;
-      }
-      return JSON.stringify([location.href, task ?? ann?.task?.id ?? ann?.task ?? null]);
-    }
-    function measure(region) {
-      if (!region || region.classification || region.type !== 'rectangleregion') return null;
-      try {
-        const serialized = typeof region.serialize === 'function' ? region.serialize() : null;
-        const box = serialized?.value || region;
-        const { width, height } = box;
-        if (![width, height].every(value => typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 100.001)) return null;
-        const object = region.object;
-        const frameIndex = region.item_index ?? serialized?.item_index ?? serialized?.value?.item_index ?? null;
-        const frame = frameIndex ?? 0;
-        const entity = typeof object?.findImageEntity === 'function' ? object.findImageEntity(frame ?? 0) : null;
-        const multi = object?.imageEntities && (object.imageEntities.size ?? object.imageEntities.length) > 1;
-        if (multi && frameIndex == null) return null;
-        const W = serialized?.original_width ?? entity?.naturalWidth ?? object?.naturalWidth;
-        const H = serialized?.original_height ?? entity?.naturalHeight ?? object?.naturalHeight;
-        if (![W, H].every(value => typeof value === 'number' && Number.isFinite(value) && value > 0)) return null;
-        const zoom = Math.hypot(W, H) / Math.hypot(width * W / 100, height * H / 100);
-        if (!(Number.isFinite(zoom) && zoom > 0)) return null;
-        let name = object?.name || serialized?.to_name;
-        if (!name && object && typeof object === 'object') {
-          if (!objectIds.has(object)) objectIds.set(object, ++nextObjectId);
-          name = `object:${objectIds.get(object)}`;
-        }
-        // 没有绑定图片身份的框可以显示倍率，但不能与其他框合并删除。
-        const source = entity?.src ?? object?.imageRef?.currentSrc ?? object?.imageRef?.src ?? object?.value ?? '';
-        const group = name ? JSON.stringify([String(name), frame, source, W, H]) : null;
-        return { zoom, group, signature: JSON.stringify([group, region.id ?? region.pid, box.x, box.y,
-          width, height, box.rotation ?? 0, serialized?.image_rotation ?? object?.rotation ?? 0, labelsOf(region)]) };
-      } catch (e) { return null; }
-    }
-    function plan() {
-      const ann = editing.annotation(), all = editing.regions(ann), groups = new Map(), rows = new Map();
-      for (const [index, region] of all.entries()) {
-        const measured = measure(region); rows.set(region, measured);
-        if (!measured?.group || readOnly(region) || region.isDrawing || region.incomplete ||
-            typeof region.deleteRegion !== 'function') continue;
-        const labels = labelsOf(region), ratio = ratioOf(labels);
-        if (!ratio || labels.some(label => /^(?:人物|主体|杂物)(?:$|[-_－:：\s])/.test(label))) continue;
-        const key = `${measured.group}|${ratio}`;
-        if (!groups.has(key)) groups.set(key, []);
-        groups.get(key).push({ region, ...measured, index });
-      }
-      const targets = [];
-      for (const group of groups.values()) {
-        group.sort((a, b) => a.zoom - b.zoom || a.index - b.index);
-        let keeper = null;
-        for (const item of group) {
-          if (!keeper || item.zoom - keeper.zoom > threshold + 1e-9) keeper = item;
-          else targets.push({ ...item, keeper });
-        }
-      }
-      let reason = '';
-      if (running || window.__CLEAR_TAGS?.isRunning() || window.__REGION_DELETE?.isRunning()) reason = '正在处理，请稍候';
-      else if (!ann) reason = '等待当前任务加载';
-      else if (readOnly(ann)) reason = '当前标注为只读';
-      else if (editing.drawing(ann) || ann.history?.isFrozen) reason = '完成当前绘制或调整后再去重';
-      else if (!ann.history || typeof ann.history.freeze !== 'function' || typeof ann.history.unfreeze !== 'function') reason = '当前页面不支持整批原生撤回';
-      else if (!targets.length) reason = '当前没有倍率相近的同一比例框';
-      return { ann, all, rows, targets, reason };
-    }
-    function setThreshold(value) {
-      if (!validThreshold(value) || running) return false;
-      try { localStorage.setItem(KEY, JSON.stringify({ version: 1, threshold: value })); }
-      catch (e) { message = '阈值保存失败，保留原设置'; refresh(); return false; }
-      threshold = value; message = ''; refresh(); return true;
-    }
-    async function run() {
-      const current = plan();
-      if (current.reason) { showToast(current.reason); return 0; }
-      const { ann, targets } = current, history = ann.history, route = context(ann);
-      let locked = false, deleted = 0, stopped = false, error = null;
-      running = true; message = '';
-      window.__OUTLINER?.rememberSelection?.(); window.__ANGLE_INHERIT?.pauseForHistory?.();
-      refresh();
-      try {
-        history.freeze(LOCK); locked = true;
-        for (const item of targets) {
-          const all = editing.regions(ann), kept = item.keeper;
-          if (editing.annotation() !== ann || context(ann) !== route || readOnly(ann) || editing.drawing(ann) ||
-              !all.includes(kept.region) || readOnly(kept.region) || measure(kept.region)?.signature !== kept.signature ||
-              !all.includes(item.region) || readOnly(item.region) || measure(item.region)?.signature !== item.signature) {
-            stopped = true; break;
-          }
-          await item.region.deleteRegion();
-          if (!editing.regions(ann).includes(item.region)) deleted++;
-          else { stopped = true; break; }
-        }
-      } catch (caught) { error = caught; }
-      finally {
-        try { if (locked) history.unfreeze(LOCK); }
-        catch (caught) { error ||= caught; }
-        finally { running = false; editing.refresh(); window.__SELECTED_VISIBILITY?.refresh(); }
-      }
-      message = deleted ? `已删除 ${deleted} 个框，保留各组最小倍率，可原生撤回${stopped || error ? '；操作已中止' : ''}` :
-        error || stopped ? '状态已变化或删除未完成，已停止' : '没有删除框';
-      if (error) console.warn('[倍率去重]', error);
-      showToast(message, 2400); refresh(); return deleted;
-    }
-    function regionForItem(item) {
-      for (let fiber = getReactFiber(item), depth = 0; fiber && depth < 40; fiber = fiber.return, depth++) {
-        const region = fiber.memoizedProps?.item;
-        if (region?.annotation) return region;
-      }
-      return null;
-    }
-    function refresh() {
-      const current = plan();
-      for (const item of document.querySelectorAll('.lsf-outliner-item')) {
-        if (item.closest('.lsf-panel-tabs__ghost-tab')) continue;
-        const region = regionForItem(item), measured = current.rows.get(region);
-        let badge = item.querySelector('.ls-zoom-badge');
-        if (!region || region.classification || region.type !== 'rectangleregion') { badge?.remove(); continue; }
-        if (!badge) {
-          badge = document.createElement('span'); badge.className = 'ls-zoom-badge';
-          const title = item.querySelector('.lsf-outliner-item__title');
-          if (title) title.after(badge); else (item.querySelector('.lsf-outliner-item__content') || item).appendChild(badge);
-        }
-        const text = measured ? `${measured.zoom.toFixed(2)}×` : '倍率未知';
-        if (badge.textContent !== text) badge.textContent = text;
-        const title = measured ? `倍率 ${text} · 原图对角线 / 框对角线` : '无法确认此框的原始图片尺寸或几何，跳过去重';
-        if (badge.title !== title) badge.title = title;
-      }
-      const mount = ensureOutlinerToolbar();
-      if (!mount) return;
-      if (!document.getElementById('__zoom_dedup_style')) {
-        const style = document.createElement('style'); style.id = '__zoom_dedup_style';
-        style.textContent = `.ls-zoom-badge{flex:0 0 auto;margin-left:5px;padding:1px 4px;border-radius:3px;background:#edf3f9;color:#5c7591;font:10px/1.5 ui-monospace,monospace;white-space:nowrap}
-          #__zoom_dedup_toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:7px;width:100%;min-width:0;padding-top:7px;border-top:1px solid #e5ebf3;color:#64748b}
-          #__zoom_dedup_toolbar select{max-width:100%;height:28px;padding:0 5px;border:1px solid #d5deea;border-radius:5px;background:#fff;color:#526780;font:inherit}
-          #__zoom_dedup_toolbar .zoom-note{width:100%;font-size:11px;line-height:1.5;overflow-wrap:anywhere}
-          #__zoom_dedup_run{margin-left:auto;padding:0 9px;border:1px solid #edc3c3;background:#fff7f7;color:#b94d4d;cursor:pointer}
-          #__zoom_dedup_toolbar:focus-within{outline-offset:2px}`;
-        (document.head || document.documentElement).appendChild(style);
-      }
-      if (!toolbar) {
-        toolbar = document.createElement('div'); toolbar.id = '__zoom_dedup_toolbar';
-        toolbar.setAttribute('role', 'group'); toolbar.setAttribute('aria-label', '倍率去重');
-        const label = document.createElement('label'); label.textContent = '倍率差 ≤ ';
-        const select = document.createElement('select'); select.setAttribute('aria-label', '倍率差阈值');
-        for (let n = 1; n <= 6; n++) {
-          const option = document.createElement('option'); option.value = (n / 10).toFixed(1); option.textContent = `${option.value}×`; select.appendChild(option);
-        }
-        select.addEventListener('change', () => setThreshold(Number(select.value))); label.appendChild(select);
-        const button = document.createElement('button'); button.type = 'button'; button.id = '__zoom_dedup_run';
-        button.setAttribute('aria-label', '一键倍率去重'); button.addEventListener('click', run);
-        button.addEventListener('mousedown', event => event.preventDefault());
-        const note = document.createElement('div'); note.className = 'zoom-note'; note.setAttribute('role', 'status');
-        toolbar.append(label, button, note);
-        for (const name of ['pointerdown', 'mousedown', 'click', 'dblclick']) toolbar.addEventListener(name, event => event.stopPropagation());
-      }
-      const clone = document.getElementById(toolbar.id);
-      if (clone && clone !== toolbar) clone.replaceWith(toolbar);
-      if (toolbar.parentElement !== mount.root) mount.root.appendChild(toolbar);
-      const select = toolbar.querySelector('select'), button = toolbar.querySelector('button');
-      if (select.value !== threshold.toFixed(1)) select.value = threshold.toFixed(1);
-      select.disabled = running;
-      const text = running ? '删除中…' : `一键去重${current.targets.length ? ` (${current.targets.length})` : ''}`;
-      if (button.textContent !== text) button.textContent = text;
-      button.disabled = !!current.reason;
-      const title = current.reason || `同一比例内保留最小倍率，删除 ${current.targets.length} 个相近框，可一次原生撤回`;
-      if (button.title !== title) button.title = title;
-      const note = toolbar.querySelector('.zoom-note');
-      const description = message || '同一比例保留最小倍率 · 整批可撤回';
-      if (note.textContent !== description) note.textContent = description;
-    }
-    function schedule() { if (timer == null) timer = setTimeout(() => { timer = null; refresh(); }, 100); }
-    window.__ZOOM_DEDUP = { run, refresh, setThreshold, isRunning: () => running,
-      state: () => { const current = plan(); return { threshold, count: current.targets.length, reason: current.reason, running }; } };
-    function start() {
-      refresh(); setInterval(refresh, 600);
-      document.addEventListener('click', schedule, true);
-      new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true });
-    }
-    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });
-    else start();
-  })();
-  // END ZOOM DEDUP
-
   // 原生删除：固定本次选择，整组放进一条编辑历史，不依赖列表序号或显隐缓存。
   (function moduleRegionDeletion() {
     if (window.__REGION_DELETE) return;
@@ -3762,7 +3524,7 @@
       const targets = (selected?.length ? Array.from(selected).filter(r => all.includes(r)) :
         editing.selectedRegions(ann, all)).filter(r => !r.classification);
       let reason = '';
-      if (running || window.__CLEAR_TAGS?.isRunning() || window.__ZOOM_DEDUP?.isRunning()) reason = '正在处理，请稍候';
+      if (running || window.__CLEAR_TAGS?.isRunning()) reason = '正在处理，请稍候';
       else if (!ann || !targets.length) reason = '先在列表或画布选中要删除的框';
       else if (readOnly(ann) || targets.some(readOnly)) reason = '选中项包含只读或锁定框';
       else if (editing.drawing(ann) || ann.history?.isFrozen) reason = '完成当前绘制或调整后再删除';
@@ -4417,7 +4179,7 @@
       if (action?.playback && !playback.matches.length) return;
       event.preventDefault(); event.stopImmediatePropagation();
       if (!action || event.repeat && !action.navigation) return;
-      if (window.__CLEAR_TAGS?.isRunning() || window.__ZOOM_DEDUP?.isRunning()) return;
+      if (window.__CLEAR_TAGS && window.__CLEAR_TAGS.isRunning()) return;
       if (action.playback) pageTargets.playPause(playback);
       else if (action.page) clickPage(action);
       else if (action.choice) clickChoice(action.choice);
@@ -4436,7 +4198,7 @@
 
     load();
     window.__LS_SHORTCUTS = {
-      version: '3.20.0', open: openSettings, scan: scanPage,
+      version: '3.19.1', open: openSettings, scan: scanPage,
       hint: id => bindings()[id] || '',
       state: () => ({ bindings: bindings(), defaults: { ...defaults }, overrides: { ...overrides },
         pageActions: Array.from(pageActions.values(), ({ id, label, page, matches, available }) => ({ id, label, group: page.group, matches, available })) }),
@@ -4445,5 +4207,5 @@
     else start();
   })();
 
-  console.log('[LabelStudio 工具集] v3.20.0 已加载');
+  console.log('[LabelStudio 工具集] v3.19.1 已加载');
 })();
