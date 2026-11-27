@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Label Studio 自动构图（以主体为中心）
 // @namespace    https://label.insta360.com/
-// @version      2.8.0
-// @description  一次点击识别并标注主体，轮廓识别与局部复检补足头手脚；多人去重可撤销，新比例框最高3.2x
+// @version      2.9.0
+// @description  自动识别或点选漏检主体直接标注，按需复检、同图复用提速；保留头手脚边界，新比例框最高3.2x
 // @author       chengzi
 // @match        https://label.insta360.com/*
 // @grant        none
@@ -35,6 +35,7 @@
  *  v2.6.5：批量写入等原生建框选择完成后，再点击首个新增比例，保留全部新增高亮。
  *  v2.7.0：增加点击识别主体，浏览器内检测人物或主要物体，主体框去重、定位和撤销。
  *  v2.8.0：改用实例轮廓模型，分块补漏和局部复检补足可见头手脚，保留原框边界。
+ *  v2.9.0：增加图片点选主体，局部放大补漏；自动识别按需复检，同图重复识别复用结果。
  * ===================================================================== */
 
 (function () {
@@ -556,7 +557,7 @@
 
   // 模型只下载到浏览器；检测和轮廓复检均在本机执行。
   const SubjectDetector = {
-    model: null, loading: null, scripts: new Map(),
+    model: null, loading: null, scripts: new Map(), cache: null,
     asset: {
       url: 'https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/models/subject-detection/yolo11s-seg-v1.onnx',
       bytes: 40636304, sha256: '8cfd200432a7235ed52e7b0a5d4d0c4a20d21356ba5527c467bc0c1fa0a91d73'
@@ -712,13 +713,13 @@
       if((x2-x1)*(y2-y1)>w*h*1.8)return raw;
       return [x1,y1,x2-x1,y2-y1];
     },
-    decode(outputs,tr,image) {
+    decode(outputs,tr,image,options={}) {
       const values=Object.values(outputs),det=values.find(o=>o?.dims?.length===3),proto=values.find(o=>o?.dims?.length===4);
       if(!det||!proto||det.dims[0]!==1||det.dims[1]!==116||!Number.isSafeInteger(det.dims[2])||det.dims[2]<1||det.dims[2]>20000||
         det.data.length!==116*det.dims[2]||proto.dims[0]!==1||proto.dims[1]!==32||proto.dims[2]!==160||proto.dims[3]!==160||proto.data.length!==32*160*160)throw new Error('主体模型输出张量不匹配');
       const count=det.dims[2],candidates=[];
       for(let i=0;i<count;i++){
-        let cls=-1,score=.34;
+        let cls=-1,score=options.targeted?.22:.34;
         for(let c=0;c<80;c++){const value=det.data[(4+c)*count+i];if(Number.isFinite(value)&&value>score&&value<=1){score=value;cls=c;}}
         if(cls<0)continue;
         const cx=det.data[i],cy=det.data[count+i],w=det.data[2*count+i],h=det.data[3*count+i];
@@ -744,13 +745,13 @@
       }
       return results;
     },
-    async infer(image,crop,model) {
+    async infer(image,crop,model,options={}) {
       const input=this.prepare(image,crop),ort=window.ort;
       let tensor,outputs;
       try {
         tensor=new ort.Tensor('float32',input.data,[1,3,640,640]);
         outputs=await model.run({[model.inputNames[0]]:tensor});
-        return this.decode(outputs,input.transform,image);
+        return this.decode(outputs,input.transform,image,options);
       }finally{tensor?.dispose?.();if(outputs)for(const value of Object.values(outputs))value.dispose?.();}
     },
     scanCrops(image) {
@@ -784,17 +785,70 @@
       }
       return result;
     },
-    async detect(image,progress=()=>{},guard=()=>{}) {
-      guard();const model=await this.getModel(progress);guard();
-      const crops=this.scanCrops(image),predictions=[];
+    cacheFor(image,options={}) {
+      if(!options.cacheKey)return null;
+      const key=String(options.cacheKey)+'|'+image.width+'x'+image.height;
+      if(this.cache?.key!==key)this.cache={key,predictions:null,points:[]};
+      return this.cache;
+    },
+    clone(predictions) {return predictions.map(p=>({...p,bbox:[...p.bbox]}));},
+    pointCrops(image,point) {
+      if(!(image.width>0&&image.height>0)||!point||![point.x,point.y].every(Number.isFinite)||point.x<0||point.x>1||point.y<0||point.y>1)throw new Error('点击位置或图片坐标无效');
+      const {width,height}=image,long=Math.max(width,height),result=[];
+      for(const fraction of [.35,.7,1]){
+        const side=Math.max(128,Math.ceil(long*fraction));
+        const w=Math.min(width,side),h=Math.min(height,side);
+        const x=Math.max(0,Math.min(width-w,Math.round(point.x*width-w/2))),y=Math.max(0,Math.min(height-h,Math.round(point.y*height-h/2)));
+        if(!result.some(c=>c.x===x&&c.y===y&&c.width===w&&c.height===h))result.push({x,y,width:w,height:h});
+      }
+      return result;
+    },
+    selectAt(predictions,image,point) {
+      const x=point.x*image.width,y=point.y*image.height;
+      let candidates=predictions.filter(p=>p?.bbox?.length===4&&p.bbox.every(Number.isFinite)&&Number.isFinite(p.score)&&p.score<=1&&p.score>=(p.class==='person'?.3:.5)).filter(p=>{
+        const [l,t,w,h]=p.bbox;return w>=4&&h>=4&&x>=l&&x<=l+w&&y>=t&&y<=t+h;
+      });
+      if(candidates.some(p=>p.class==='person'))candidates=candidates.filter(p=>p.class==='person');
+      const rank=p=>{const [l,t,w,h]=p.bbox;return p.score-.25*Math.hypot((x-l-w/2)/w,(y-t-h/2)/h);};
+      return candidates.sort((a,b)=>rank(b)-rank(a))[0]||null;
+    },
+    async detectAt(image,point,progress=()=>{},guard=()=>{},options={}) {
+      guard();const crops=this.pointCrops(image,point),cache=this.cacheFor(image,options);
+      const old=cache?.points.find(item=>Math.hypot((point.x-item.point.x)*image.width,(point.y-item.point.y)*image.height)<=Math.max(3,Math.min(image.width,image.height)*.008)&&this.selectAt([item.prediction],image,point));
+      if(old){guard();return this.clone([old.prediction]);}
+      const model=await this.getModel(progress);guard();
       for(let i=0;i<crops.length;i++){
-        guard();progress('正在识别主体 '+(i+1)+'/'+crops.length+'，随后复检头部与手脚…');
-        try{predictions.push(...await this.infer(image,crops[i],model));}
-        catch(e){guard();if(!i)throw e;}
+        guard();progress('正在识别点击附近的主体 '+(i+1)+'/'+crops.length+'…');
+        const predictions=await this.infer(image,crops[i],model,{targeted:true});guard();
+        const found=this.selectAt(predictions,image,point);
+        if(found){
+          if(cache){cache.points.push({point:{...point},prediction:this.clone([found])[0]});if(cache.points.length>8)cache.points.shift();}
+          return this.clone([found]);
+        }
+        await sleep(0);
+      }
+      return [];
+    },
+    async detect(image,progress=()=>{},guard=()=>{},options={}) {
+      guard();const cache=this.cacheFor(image,options);
+      if(cache?.predictions){guard();progress('正在复用当前图片的识别结果…');return this.clone(cache.predictions);}
+      const model=await this.getModel(progress);guard();
+      const full={x:0,y:0,width:image.width,height:image.height};
+      progress('正在识别当前图片的主体…');
+      const predictions=await this.infer(image,full,model);guard();
+      const peopleInFull=predictions.filter(p=>p.class==='person'&&p.score>=.45);
+      const ratio=Math.max(image.width,image.height)/Math.min(image.width,image.height);
+      const needsTiles=!peopleInFull.length||ratio>2.5||peopleInFull.some(p=>p.score<.65||p.bbox[3]/image.height<.1);
+      const crops=needsTiles?this.scanCrops(image).slice(1):[];
+      for(let i=0;i<crops.length;i++){
+        guard();progress('正在补查较小主体 '+(i+1)+'/'+crops.length+'…');
+        try{predictions.push(...await this.infer(image,crops[i],model));}catch(e){guard();}
         guard();await sleep(0);
       }
       let merged=this.merge(predictions,image);
-      const people=merged.filter(p=>p.class==='person'&&p.score>=.45).sort((a,b)=>b.bbox[2]*b.bbox[3]-a.bbox[2]*a.bbox[3]).slice(0,12);
+      const scale=640/Math.max(image.width,image.height);
+      const people=merged.filter(p=>p.class==='person'&&p.score>=.45&&p.bbox[2]*p.bbox[3]/(image.width*image.height)>=.0003&&
+        (p.score<.75||p.bbox[3]*scale<48||p.bbox[2]>p.bbox[3]*1.15)).sort((a,b)=>b.bbox[2]*b.bbox[3]-a.bbox[2]*a.bbox[3]).slice(0,6);
       for(let i=0;i<people.length;i++){
         const p=people[i],[x,y,w,h]=p.bbox,padX=Math.max(w*.65,image.width*.025),padY=Math.max(h*.35,image.height*.025);
         const l=Math.max(0,Math.floor(x-padX)),t=Math.max(0,Math.floor(y-padY)),r=Math.min(image.width,Math.ceil(x+w+padX)),b=Math.min(image.height,Math.ceil(y+h+padY));
@@ -805,24 +859,27 @@
         }catch(e){guard();/* 保留已经可靠检出的人，不因局部复检失败丢掉主体。 */}
         await sleep(0);guard();
       }
-      return this.merge(merged,image);
+      const result=this.merge(merged,image);guard();
+      if(cache)cache.predictions=this.clone(result);
+      return result;
     },
     same(a,b) {
       const intersection=Math.max(0,Math.min(a.x+a.w,b.x+b.w)-Math.max(a.x,b.x))*Math.max(0,Math.min(a.y+a.h,b.y+b.h)-Math.max(a.y,b.y));
       const aa=a.w*a.h,ba=b.w*b.h,small=Math.min(aa,ba),large=Math.max(aa,ba);
       return intersection/Math.max(aa+ba-intersection,1e-9)>=.75||(intersection/Math.max(small,1e-9)>=.92&&small/large>=.35);
     },
-    boxes(predictions,image) {
+    boxes(predictions,image,options={}) {
       if(!(image.width>0&&image.height>0)||!Array.isArray(predictions))return [];
       const clamp=(v,lo,hi)=>Math.max(lo,Math.min(hi,v));
       const valid=predictions.flatMap(p=>{
-        if(!Array.isArray(p?.bbox)||p.bbox.length!==4||!p.bbox.every(Number.isFinite)||!Number.isFinite(p.score)||p.score>1||p.score<(p.class==='person'?.45:.5)||typeof p.class!=='string')return [];
+        if(!Array.isArray(p?.bbox)||p.bbox.length!==4||!p.bbox.every(Number.isFinite)||!Number.isFinite(p.score)||p.score>1||p.score<(p.class==='person'?(options.targeted?.3:.45):.5)||typeof p.class!=='string')return [];
         const [x,y,w,h]=p.bbox;if(!(w>0&&h>0))return [];
         const x1=clamp(x,0,image.width),y1=clamp(y,0,image.height),x2=clamp(x+w,0,image.width),y2=clamp(y+h,0,image.height);
-        if(x2-x1<4||y2-y1<4||(x2-x1)*(y2-y1)/(image.width*image.height)<.0003)return [];
+        if(x2-x1<4||y2-y1<4||(x2-x1)*(y2-y1)/(image.width*image.height)<(options.targeted?.00003:.0003))return [];
         const left=clamp(x1-1,0,image.width),top=clamp(y1-1,0,image.height);
         return [{x:left/image.width*100,y:top/image.height*100,w:(clamp(x2+1,0,image.width)-left)/image.width*100,h:(clamp(y2+1,0,image.height)-top)/image.height*100,kind:p.class,score:p.score}];
       });
+      if(options.targeted)return valid.slice(0,1);
       const people=valid.filter(b=>b.kind==='person').sort((a,b)=>b.score-a.score);
       if(people.length){const result=[];for(const box of people)if(!result.some(old=>this.same(old,box)))result.push(box);return result.slice(0,20).sort((a,b)=>a.x-b.x||a.y-b.y);}
       return valid.filter(b=>b.score>=.75).sort((a,b)=>{
@@ -855,16 +912,95 @@
     } finally {clearTimeout(timer);}
   }
 
-  async function detectSubjects() {
+  const SubjectPicker = {
+    active:false,session:0,layer:null,timer:0,context:null,
+    current() {
+      const c=this.context;
+      try{return !!c&&LS.annotation()===c.annotation&&taskId()===c.task&&LS.imageSrc()===c.src&&
+        LS.imageSize().width===c.width&&LS.imageSize().height===c.height&&c.annotation.readonly!==true;}catch(e){return false;}
+    },
+    geometry() {
+      const control=LS.store()?.names?.get(LS.imageName()),entity=control?.findImageEntity?.(0);
+      const image=control?.imageRef?.isConnected?control.imageRef:LS._imgEl();
+      const target=image||previewTargets()[0]?.element;
+      if(!target)return null;
+      const bounds=target.getBoundingClientRect();
+      if(!(bounds.width>0&&bounds.height>0))return null;
+      const content=image?contentRect(image,bounds):bounds;
+      const stage=control?.stageRef?.content;
+      const clip=stage?.isConnected?stage.getBoundingClientRect():content;
+      let left=Math.max(0,content.left,clip.left),top=Math.max(0,content.top,clip.top);
+      let right=Math.min(innerWidth,content.left+content.width,clip.left+clip.width),bottom=Math.min(innerHeight,content.top+content.height,clip.top+clip.height);
+      const visited=new Set(),clips=value=>/^(auto|scroll|hidden|clip)$/.test(value);
+      for(const root of [target,stage])for(let node=root?.parentElement;node&&!visited.has(node);node=node.parentElement){
+        visited.add(node);const style=getComputedStyle(node),box=node.getBoundingClientRect();
+        if(clips(style.overflowX)){left=Math.max(left,box.left);right=Math.min(right,box.right);}
+        if(clips(style.overflowY)){top=Math.max(top,box.top);bottom=Math.min(bottom,box.bottom);}
+      }
+      if(right<=left||bottom<=top)return null;
+      const rotation=((Number(entity?.rotation)||0)%360+360)%360;
+      if(rotation%90!==0)return null;
+      return {left,top,width:right-left,height:bottom-top,point(clientX,clientY){
+        if(clientX<left||clientX>right||clientY<top||clientY>bottom)return null;
+        const u=(clientX-content.left)/content.width,v=(clientY-content.top)/content.height;
+        const point=rotation===90?{x:v,y:1-u}:rotation===180?{x:1-u,y:1-v}:rotation===270?{x:1-v,y:u}:{x:u,y:v};
+        return point.x>=0&&point.x<=1&&point.y>=0&&point.y<=1?point:null;
+      }};
+    },
+    syncButton() {
+      const button=panel?.querySelector('[data-act="point-subject"]');if(!button)return;
+      button.textContent=this.active?'退出点选':'点选识别';button.setAttribute('aria-pressed',String(this.active));
+      button.disabled=STATE.busy&&!this.active;
+    },
+    layout() {
+      if(!this.active)return;
+      if(!this.current()){this.stop();return;}
+      const g=this.geometry();
+      if(!g){if(this.layer)this.layer.style.display='none';return;}
+      Object.assign(this.layer.style,{display:'block',left:g.left+'px',top:g.top+'px',width:g.width+'px',height:g.height+'px'});
+    },
+    start() {
+      if(STATE.busy||this.active)return;
+      refreshSubjects();const annotation=LS.annotation();
+      if(!annotation||annotation.readonly===true||!LS.controlFor('subject_tool',annotation))return info('<span class="lsac-warn">请打开可编辑、带主体工具的图片任务。</span>',false);
+      try{
+        const size=LS.imageSize();if(!this.geometry())throw new Error('当前图片尚未就绪，请等待加载后重试');
+        this.context={annotation,task:taskId(),src:LS.imageSrc(),...size};this.active=true;this.session++;
+        clearTimeout(STATE.previewTimer);STATE.previewTimer=0;STATE.previewRevision++;clearPreview();
+        const layer=document.createElement('div');layer.className='lsac-subject-picker';layer.setAttribute('aria-label','点击图片中的主体进行识别');
+        const hint=document.createElement('span');hint.textContent='点一下要标注的人或物 · Esc 退出';layer.append(hint);
+        layer.addEventListener('pointerdown',event=>{
+          if(event.button!==0)return;event.preventDefault();event.stopPropagation();
+          if(!this.current()){this.stop();return;}
+          if(STATE.busy)return;
+          const point=this.geometry()?.point(event.clientX,event.clientY);
+          if(point)detectSubjects({point,pickerSession:this.session});
+        });
+        layer.addEventListener('click',event=>{event.preventDefault();event.stopPropagation();});
+        document.body.append(layer);this.layer=layer;this.layout();this.syncButton();
+        this.timer=setInterval(()=>this.layout(),160);
+        info('<span class="lsac-hint">在图片上点击漏检的人或物，识别后直接标注。可连续点选，Esc 退出。</span>',true);
+      }catch(e){this.stop();info('<span class="lsac-warn">'+esc(e.message||e)+'</span>',false);}
+    },
+    stop(notify=false) {
+      const wasActive=this.active;this.active=false;this.session++;this.context=null;
+      clearInterval(this.timer);this.timer=0;this.layer?.remove();this.layer=null;this.syncButton();
+      if(notify&&wasActive)info('<span class="lsac-hint">已退出点选识别。</span>',true);
+    }
+  };
+
+  async function detectSubjects(options={}) {
     if (STATE.busy) return;
+    const point=options?.point;
+    if(!point)SubjectPicker.stop();
     refreshSubjects();
     const an=LS.annotation();
     if (!an) return info('<span class="lsac-warn">先打开一个标注任务。</span>',false);
     if (an.readonly===true) return info('<span class="lsac-warn">当前任务只读，无法标注主体。</span>',false);
     if (!LS.controlFor('subject_tool',an)) return info('<span class="lsac-warn">当前项目没有主体标注工具 subject_tool。</span>',false);
     setBusy(true);
-    const button=panel.querySelector('[data-act="detect-subjects"]');
-    button.textContent='识别中…';
+    const button=panel.querySelector(point?'[data-act="point-subject"]':'[data-act="detect-subjects"]');
+    button.textContent=point&&SubjectPicker.active?'取消识别':'识别中…';
     clearTimeout(STATE.previewTimer);STATE.previewTimer=0;STATE.previewRevision++;clearPreview();
     try {
       const task=taskId(),src=LS.imageSrc(),signature=subjectSignature(an),size=LS.imageSize();
@@ -874,22 +1010,23 @@
         catch(e){return false;}
       };
       const guard=()=>{
+        if(options.pickerSession!=null&&(!SubjectPicker.active||SubjectPicker.session!==options.pickerSession))throw new Error('点选识别已取消，未写入主体');
         if(!current())throw new Error('图片或标注已切换，本次识别已停止');
         if(an.readonly===true)throw new Error('当前任务已变为只读，未写入主体');
         if(subjectSignature(an)!==signature)throw new Error('主体框已发生变化，请重新识别');
       };
       info('<span class="lsac-hint">正在读取当前原图…</span>',true);
       const image=await detectionImage();
-      if (!current()) throw new Error('图片或标注已切换，本次识别已停止');
-      const predictions=await SubjectDetector.detect(image,text=>{
+      guard();
+      const report=text=>{
         if (current()) info('<span class="lsac-hint">'+esc(text)+'</span>',true);
-      },guard);
-      if (!current()) throw new Error('图片或标注已切换，本次识别已停止');
-      if (an.readonly===true) throw new Error('当前任务已变为只读，未写入主体');
-      if (subjectSignature(an)!==signature) throw new Error('主体框已发生变化，请重新识别');
-      const boxes=SubjectDetector.boxes(predictions,image);
+      };
+      const cacheKey=JSON.stringify([task,src,size.width,size.height]);
+      const predictions=point?await SubjectDetector.detectAt(image,point,report,guard,{cacheKey}):await SubjectDetector.detect(image,report,guard,{cacheKey});
+      guard();
+      const boxes=SubjectDetector.boxes(predictions,image,{targeted:!!point});
       if (!boxes.length) {
-        info('<span class="lsac-warn">未识别到可靠主体，可手动画主体框。小人物、遮挡或不支持的物体可能漏检。</span>',false);return;
+        info('<span class="lsac-warn">'+(point?'点击处未识别到可靠边界，可换个位置点击或手动画主体框。':'未识别到可靠主体，可用「点选识别」点击漏检的人或物，也可手动画框。')+'</span>',false);return;
       }
       const old=LS.subjectEntries(an),created=[],failures=[];
       const targets=boxes.filter(box=>!old.some(previous=>SubjectDetector.same(previous,box)));
@@ -910,13 +1047,13 @@
         STATE.written=created;watchWrittenRows();syncWrittenRows();focusNewRegions(created);
         refreshCounts();
       }
-      const message=created.length?'已标注 '+created.length+' 个主体，可拖动微调，之后预览或写入比例。':'识别到的主体已有标注，未重复添加。';
+      const message=created.length?(point&&SubjectPicker.active?'已标注主体，可继续点选其他人或物，Esc 退出。':'已标注 '+created.length+' 个主体，可拖动微调，之后预览或写入比例。'):'识别到的主体已有标注，未重复添加。';
       info('<span class="'+(failures.length?'lsac-warn':'lsac-ok')+'">'+esc(message)+
         (failures.length?' 部分主体创建失败：'+esc(failures.join('；')):'')+'</span>',!failures.length);
     } catch(e) {
       info('<span class="lsac-warn">主体识别失败：'+esc(e.message||String(e))+'</span>',false);
     } finally {
-      button.textContent='识别主体';setBusy(false);
+      if(!point)button.textContent='识别主体';setBusy(false);SubjectPicker.syncButton();
     }
   }
 
@@ -3123,6 +3260,10 @@
   .lsac-btn:disabled{opacity:.45;cursor:not-allowed}
   .lsac-btn.primary{background:#1f883d;border-color:#1a7f37;color:#fff}
   .lsac-btn.primary:hover:not(:disabled){background:#1a7f37}
+  .lsac-detect-actions{display:inline-flex;gap:4px;align-items:center}
+  .lsac-detect[aria-pressed="true"]{background:#0969da;color:#fff;border-color:#0969da}
+  .lsac-subject-picker{position:fixed;z-index:2147482988;box-sizing:border-box;border:1px dashed #0969da;cursor:crosshair;touch-action:none;background:transparent}
+  .lsac-subject-picker>span{position:absolute;left:8px;bottom:8px;padding:5px 9px;border-radius:5px;background:rgba(9,105,218,.9);color:#fff;font:12px/1.5 system-ui,sans-serif;pointer-events:none}
   .lsac-btn.mini{flex:0 0 auto;padding:6px 9px;font-size:11px;font-weight:500;color:#57606a}
   .lsac-btn.danger{color:#cf222e;border-color:#f0b5b9;background:#fff}
   .lsac-btn.danger:hover{border-color:#cf222e}
@@ -3185,7 +3326,7 @@
       <div class="lsac-scroll">
       <div class="lsac-body" id="__ls_auto_compose_body" tabindex="0" aria-label="构图设置与结果">
         <div class="lsac-sec">
-          <span class="lsac-lbl"><span>构图主体 <span class="lsac-subject-count"></span></span><button class="lsac-detect" data-act="detect-subjects" title="识别后直接标注主体；人物优先，局部复检头手脚。首次需下载模型，可撤销">识别主体</button></span>
+          <span class="lsac-lbl"><span>构图主体 <span class="lsac-subject-count"></span></span><span class="lsac-detect-actions"><button class="lsac-detect" data-act="detect-subjects" title="自动识别并标注主体，同图重复识别复用结果">识别主体</button><button class="lsac-detect" data-act="point-subject" aria-pressed="false" title="在图片上点击漏检的人或物，局部识别后直接标注；Esc 退出">点选识别</button></span></span>
           <div class="lsac-subjects"></div>
           <div class="lsac-subject-actions">
             <button data-act="selected-subjects">用画布选中的主体</button>
@@ -3339,7 +3480,8 @@
     panel.querySelector('[data-act="preview"]').addEventListener('click', () => run('preview'));
     panel.querySelector('[data-act="apply"]').addEventListener('click', () => run('apply'));
     panel.querySelector('[data-act="undo"]').addEventListener('click', doUndo);
-    panel.querySelector('[data-act="detect-subjects"]').addEventListener('click', detectSubjects);
+    panel.querySelector('[data-act="detect-subjects"]').addEventListener('click', () => detectSubjects());
+    panel.querySelector('[data-act="point-subject"]').addEventListener('click', () => SubjectPicker.active?SubjectPicker.stop(true):SubjectPicker.start());
     panel.querySelector('[data-act="selected-subjects"]').addEventListener('click', () => {
       refreshSubjects();
       const ids = LS.selectedSubjectIds();
@@ -3428,6 +3570,9 @@
       e.preventDefault();
       setHidden(!STATE.hidden);
       return;
+    }
+    if (e.key === 'Escape' && SubjectPicker.active) {
+      e.preventDefault();e.stopImmediatePropagation();SubjectPicker.stop(true);return;
     }
     if (isTyping(e.target) || (e.target.closest && e.target.closest('[role="scrollbar"]'))) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
@@ -3609,11 +3754,11 @@
 
   /** 改任何设置后自动重算预览（关掉实时预览就什么都不做） */
   function scheduleAutoPreview(delay) {
-    if (!STATE.autoPreview || STATE.hidden) return;
+    if (!STATE.autoPreview || STATE.hidden || SubjectPicker.active) return;
     if (STATE.previewTimer) clearTimeout(STATE.previewTimer);
     STATE.previewTimer = setTimeout(() => {
       STATE.previewTimer = 0;
-      if (!STATE.autoPreview || STATE.busy) return;
+      if (!STATE.autoPreview || STATE.busy || SubjectPicker.active) return;
       run('preview', { auto: true });
     }, delay == null ? 320 : delay);
   }
@@ -3739,6 +3884,7 @@
   function refreshSubjects() {
     const an = LS.annotation();
     if (STATE.annotation !== an || STATE.taskId !== taskId()) {
+      SubjectPicker.stop();
       STATE.annotation = an;
       STATE.taskId = taskId();
       STATE.subjectSignature = null;
@@ -3886,6 +4032,7 @@
   }
 
   function setHidden(v) {
+    if(v)SubjectPicker.stop();
     STATE.hidden = !!v;
     if (!panel) return;
     panel.style.display = STATE.hidden ? 'none' : 'flex';
@@ -4122,6 +4269,7 @@
     if (!panel) return;
     panel.querySelectorAll('button, input').forEach(btn => {
       if (['hide', 'collapse'].includes(btn.dataset.act) || btn.classList.contains('lsac-auto')) return;
+      if(btn.dataset.act==='point-subject'&&SubjectPicker.active)return;
       btn.disabled = b;
     });
   }
@@ -4151,6 +4299,7 @@
 
   async function run(action, opts) {
     if (STATE.busy) return;
+    SubjectPicker.stop();
     const options = opts || {};
     // 写入方式：显式传入 > 上一次预览时用的 > 当前设置。
     // 关键点：预览里显示「覆盖同比例」，回车写入就必须也是覆盖，
@@ -4986,7 +5135,7 @@
     if (panel) return;
     panel = buildPanel();
     window.__LS_AUTO_COMPOSE__ = {
-      panel, run, fillOne, focusNewRegions, doUndo, detectSubjects, SubjectDetector, setStrategy, setCollapsed, clearPreview,
+      panel, run, fillOne, focusNewRegions, doUndo, detectSubjects, SubjectDetector, SubjectPicker, setStrategy, setCollapsed, clearPreview,
       applyPanelSize, refreshCounts, assessCompleteness,
       LS, STATE, ComposeCore, SceneAnalyze: window.SceneAnalyze,
       ASPECT_DEFS, STRATEGIES, cropRectToTarget, previewTargets, contentRect
@@ -4999,6 +5148,7 @@
     watchAnnotation();
     document.addEventListener('click', selectOutlinerSubject, true);
     window.addEventListener('pagehide', clearWrittenHighlights);
+    window.addEventListener('pagehide', () => SubjectPicker.stop());
   }
 
   /** SPA 内切换任务时，标注会整个换掉 —— 轮询 region 签名，变了就刷新角标 */
