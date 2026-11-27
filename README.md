@@ -3,15 +3,15 @@
 涉及多个场景整合
 
 <!-- id-switching:start -->
-## ID 切换 v3.19.1
+## ID 切换 v3.20.0
 
-[安装 / 更新](https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/insta360-IDswitching.user.js) · [使用说明](docs/id-switching.md) · [常显与框选演示（下载后打开）](docs/demos/insta360-always-visible.html) · [视频演示（下载后打开）](docs/demos/insta360-id-switch.html) · [TXT 备份](docs/downloads/insta360-IDswitching-3.19.1.txt)
+[安装 / 更新](https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/insta360-IDswitching.user.js) · [使用说明](docs/id-switching.md) · [倍率、常显与框选演示（下载后打开）](docs/demos/insta360-always-visible.html) · [视频演示（下载后打开）](docs/demos/insta360-id-switch.html) · [TXT 备份](docs/downloads/insta360-IDswitching-3.20.0.txt)
 
-新增 **常显设置**：可多选比例、具体 ID，并添加“主体”“杂物”等文本标签。文本支持“完整标签”与“包含文字”匹配，比例和文本刷新后保留；具体 ID 只用于当前任务。
+新增 **ID 倍率显示与一键去重**：倍率差可选 0.1～0.6×，默认 0.4×；同一图片与帧、同一比例内保留最小倍率，例如 1.60×、2.00× 保留 1.60×。按保留值比较，避免连锁删除；按钮显示待删数量，一次原生撤回恢复整批框及标签。
 
-三类列表均支持鼠标拖动框选。从未勾选项开始批量勾选，从已勾选项开始批量取消；Alt 拖动强制取消，Esc 取消本次拖动。保留人物-1、人物-2默认常显、当前框显示和搜索后批量选择。
+保留 **批量常显**：多选比例和具体 ID，添加“主体”“杂物”等文本，支持完整或包含匹配与拖动框选。比例和文本刷新后保留，具体 ID 仅用于当前任务。保留人物默认常显、A / D 导航、S 循环比例、空格播放暂停、独立更新快捷键和标签同步开关。
 
-保留空格播放暂停视频、A / D 导航、S 循环比例、独立的数值与任务更新快捷键、标签同步开关（默认关闭）和原生删框撤回。已通过语法及 Chrome 浏览器检查；演示内嵌当前脚本，使用本地示例。实际业务页面尚未登录验证。
+12 项倍率逻辑测试、7 组真实编辑器倍率与撤回检查、26 组常显框选场景和 13 组播放更新回归通过；两份演示内嵌当前脚本。实际业务项目尚未登录验证。
 <!-- id-switching:end -->
 
 ## 审核与评论帧工具箱 1.0.8
