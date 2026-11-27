@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Label Studio 自动构图（以主体为中心）
 // @namespace    https://label.insta360.com/
-// @version      2.9.1
-// @description  点选主体直接标注，提前准备模型并复用局部结果提速；自动识别保留头手脚边界，新比例框最高3.2x
+// @version      2.10.0
+// @description  显示比例框倍率，按差值一键清理并保留最小倍率，可撤销；保留点选主体、自动构图与3.2x上限
 // @author       chengzi
 // @match        https://label.insta360.com/*
 // @grant        none
@@ -37,6 +37,7 @@
  *  v2.8.0：改用实例轮廓模型，分块补漏和局部复检补足可见头手脚，保留原框边界。
  *  v2.9.0：增加图片点选主体，局部放大补漏；自动识别按需复检，同图重复识别复用结果。
  *  v2.9.1：有效图片后台准备点选模型，连续点选复用可靠局部候选，减少点击后的等待。
+ *  v2.10.0：显示现有框倍率，按主体与比例一键清理相近倍率，保留最小倍率并可整批撤销。
  * ===================================================================== */
 
 (function () {
@@ -47,6 +48,7 @@
    * =================================================================== */
 
   if (window.__LS_AUTO_COMPOSE__) {
+    try { window.__LS_AUTO_COMPOSE__.CropZoom?.stop(); } catch (e) {}
     try { window.__LS_AUTO_COMPOSE__.panel && window.__LS_AUTO_COMPOSE__.panel.remove(); } catch (e) {}
   }
   // 旧版「比例齐全度浮窗」还在跑的话它会重复渲染一套状态，提示一次即可
@@ -3025,6 +3027,8 @@
     multi: false,     // 多构图：同一比例给多个方案
     autoPreview: true,// 改任何设置后自动重算预览
     autoPreviewPreference: true, // 用户的开关偏好；本图写入后的暂停不保存成永久关闭
+    showZoom: true,
+    zoomThreshold: 0.4,
     pick: {},         // 每个比例当前选中的方案序号 {crop_16_9: 0, ...}
     pos: null,        // 面板位置（拖动后记住）
     last: null,       // 当前预览或应用的构图计划
@@ -3083,6 +3087,9 @@
       }
       if (typeof p.scene === 'boolean') STATE.scene = p.scene;
       if (typeof p.multi === 'boolean') STATE.multi = p.multi;
+      if (typeof p.showZoom === 'boolean') STATE.showZoom = p.showZoom;
+      if (typeof p.zoomThreshold === 'number' && p.zoomThreshold >= 0.1 && p.zoomThreshold <= 0.6 &&
+          Math.abs(p.zoomThreshold * 10 - Math.round(p.zoomThreshold * 10)) < 1e-9) STATE.zoomThreshold = p.zoomThreshold;
       // 旧版 autoPreview=false 可能是写入后自动保存的，升级时恢复写入前预览。
       if (typeof p.autoPreviewPreference === 'boolean') {
         STATE.autoPreviewPreference = p.autoPreviewPreference;
@@ -3119,6 +3126,8 @@
         replace: STATE.replace,
         scene: STATE.scene,
         multi: STATE.multi,
+        showZoom: STATE.showZoom,
+        zoomThreshold: STATE.zoomThreshold,
         autoPreview: STATE.autoPreviewPreference,
         autoPreviewPreference: STATE.autoPreviewPreference,
         panelSize: STATE.panelSize,
@@ -3129,6 +3138,16 @@
   }
 
   const CSS = `
+  .lsac-zoom-controls{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:5px 0;font-size:11px}
+  .lsac-zoom-controls select{font:inherit;color:inherit;background:#fff;border:1px solid #d0d7de;border-radius:5px;padding:3px}
+  .lsac-zoom-controls button{margin-left:auto;font:inherit;border:1px solid #e7c5c5;background:#fff7f7;color:#b04444;border-radius:5px;padding:4px 7px;cursor:pointer}
+  .lsac-zoom-controls button:disabled{opacity:.45;cursor:default}
+  .lsac-zoom-list{display:grid;gap:3px;max-height:100px;overflow:auto;margin-top:5px;scrollbar-width:thin}
+  .lsac-zoom-list[hidden]{display:none}
+  .lsac-zoom-item{display:flex;align-items:center;justify-content:space-between;gap:5px;width:100%;text-align:left;border:1px solid #e8ebef;border-radius:4px;background:#fafbfc;color:#57606a;padding:3px 6px;cursor:pointer;font:inherit;font-size:11px;line-height:1.45;font-variant-numeric:tabular-nums}
+  .lsac-zoom-item:hover{border-color:#9ebce2;background:#f0f6ff}
+  .lsac-zoom-item.pending{border-color:#efd6d6;background:#fff6f6;color:#b04444}
+  .lsac-zoom-item span:last-child{white-space:nowrap}
   .lsac-panel{position:fixed;top:110px;right:18px;z-index:2147483000;width:276px;height:360px;
     font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
     color:#1f2328;background:#fff;border:1px solid #d8dee4;border-radius:11px;
@@ -3383,6 +3402,12 @@
           <div class="lsac-hint">新框倍率 ≤${MAX_CROP_ZOOM}x</div>
         </div>
         <div class="lsac-sec">
+          <span class="lsac-lbl"><span>倍率清理</span><label class="lsac-check"><input type="checkbox" data-zoom-show>显示倍率</label></span>
+          <div class="lsac-zoom-controls"><label>差值 ≤ <select data-zoom-threshold aria-label="倍率差值">${[1,2,3,4,5,6].map(n=>`<option value="${n/10}">${(n/10).toFixed(1)}x</option>`).join('')}</select></label><button data-act="zoom-cleanup">一键清理</button></div>
+          <div class="lsac-hint" data-zoom-summary aria-live="polite"></div>
+          <div class="lsac-zoom-list" data-zoom-list aria-label="当前比例框倍率"></div>
+        </div>
+        <div class="lsac-sec">
           <span class="lsac-lbl">写入方式</span>
           <div class="lsac-seg">
             ${STRATEGIES.map(s => `<button data-strategy="${s.key}" title="${s.hint}">${s.label}</button>`).join('')}
@@ -3504,6 +3529,19 @@
     panel.querySelector('[data-act="preview"]').addEventListener('click', () => run('preview'));
     panel.querySelector('[data-act="apply"]').addEventListener('click', () => run('apply'));
     panel.querySelector('[data-act="undo"]').addEventListener('click', doUndo);
+    panel.querySelector('[data-act="zoom-cleanup"]').addEventListener('click', () => CropZoom.run());
+    panel.querySelector('[data-zoom-threshold]').addEventListener('change', e => CropZoom.setThreshold(Number(e.target.value)));
+    panel.querySelector('[data-zoom-show]').addEventListener('change', e => {
+      STATE.showZoom = e.target.checked; savePrefs(); CropZoom.refresh();
+    });
+    panel.querySelector('[data-zoom-list]').addEventListener('click', e => {
+      if (STATE.busy) return;
+      const button = e.target.closest('[data-zoom-id]');
+      const region = button && LS.regionList().find(r => String(r.id) === button.dataset.zoomId);
+      if (!region) return;
+      ensureWrittenSelected(region);
+      outlinerRegionRows().find(entry => entry.region === region)?.row.scrollIntoView?.({ block: 'nearest' });
+    });
     panel.querySelector('[data-act="detect-subjects"]').addEventListener('click', () => detectSubjects());
     panel.querySelector('[data-act="point-subject"]').addEventListener('click', () => SubjectPicker.active?SubjectPicker.stop(true):SubjectPicker.start());
     panel.querySelector('[data-act="selected-subjects"]').addEventListener('click', () => {
@@ -3828,6 +3866,7 @@
     });
     syncAddedSummary(addedNames);
     syncWrittenRows();
+    CropZoom.refresh();
 
     if (manual) {
       const scope = LS.subjectEntries(an).length ? '当前主体' : '当前图片';
@@ -4043,6 +4082,200 @@
   function sameFraming(a, b) {
     return ['x', 'y', 'w', 'h'].every(k => Math.abs(a[k] - b[k]) <= 0.15);
   }
+
+  /** 只读测量、分组预告和删除分开，倍率不依赖画布的显示缩放。 */
+  const CropZoom = {
+    timer: 0,
+    readOnly(node) {
+      return !!node && (node.readonly === true || node.locked === true || node.isReadOnly === true ||
+        typeof node.isReadOnly === 'function' && node.isReadOnly());
+    },
+    drawing(an) {
+      return an?.isDrawing === true || an?.regionStore?.isDrawing === true ||
+        LS.regionList(an).some(r => r.isDrawing === true || r.incomplete === true);
+    },
+    measure(region) {
+      try {
+        const serialized = typeof region.serialize === 'function' ? region.serialize() : null;
+        const box = serialized?.value || region, object = region.object;
+        const width = box.width, height = box.height, x = box.x, y = box.y;
+        if (![x,y,width,height].every(Number.isFinite) || !(width > 0 && height > 0) ||
+            x < 0 || y < 0 || x + width > 100.001 || y + height > 100.001) return null;
+        const { base } = LS.regionLabelsOf(region);
+        const name = nameOf(object) || nameOf(base?.to_name);
+        const frameIndex = region.item_index ?? serialized?.item_index ?? box.item_index;
+        const frame = frameIndex ?? 0;
+        const entity = typeof object?.findImageEntity === 'function' ? object.findImageEntity(frame) : null;
+        const multi = object?.imageEntities && (object.imageEntities.size ?? object.imageEntities.length) > 1;
+        const main = name === LS.imageName() ? LS.imageSize() : null;
+        const W = serialized?.original_width ?? entity?.naturalWidth ?? object?.naturalWidth ?? main?.width;
+        const H = serialized?.original_height ?? entity?.naturalHeight ?? object?.naturalHeight ?? main?.height;
+        if (![W,H].every(n => Number.isFinite(n) && n > 0)) return null;
+        const zoom = Math.hypot(W,H) / Math.hypot(width * W / 100, height * H / 100);
+        const source = entity?.src ?? object?.imageRef?.currentSrc ?? object?.value ?? '';
+        const group = name && !(multi && frameIndex == null) ? JSON.stringify([name,frame,source,W,H,serialized?.image_rotation ?? 0]) : null;
+        const signature = JSON.stringify([group,region.id,x,y,width,height,box.rotation ?? 0,LS.regionLabelsOf(region).labels]);
+        return { zoom, group, signature };
+      } catch (e) { return null; }
+    },
+    plan() {
+      const an = LS.annotation(), subjects = LS.subjectEntries(an), selected = STATE.subjectIds;
+      const rows = [], groups = new Map(), seen = new Set();
+      ASPECT_DEFS.forEach(aspect => LS.readRegions(aspect.name, an).forEach(crop => {
+        const region = crop.region;
+        if (seen.has(region)) return; seen.add(region);
+        const owners = subjects.filter(s => matchesSubjects(crop,[s])).map(s => s.id).sort();
+        if (subjects.length && !owners.some(id => selected.has(id))) return;
+        const measured = this.measure(region), locked = this.readOnly(region);
+        const shared = subjects.length && owners.some(id => !selected.has(id));
+        const row = { region, aspect, ...measured, index: rows.length, locked, shared };
+        rows.push(row);
+        if (!measured?.group || locked || shared || region.isDrawing === true || typeof region.deleteRegion !== 'function') return;
+        const key = JSON.stringify([measured.group,aspect.key,owners]);
+        if (!groups.has(key)) groups.set(key,[]);
+        groups.get(key).push(row);
+      }));
+      const targets = [];
+      for (const group of groups.values()) {
+        group.sort((a,b) => a.zoom - b.zoom || a.index - b.index);
+        let keeper = null;
+        for (const row of group) {
+          if (!keeper || row.zoom - keeper.zoom > STATE.zoomThreshold + 1e-9) keeper = row;
+          else targets.push({ ...row, keeper });
+        }
+      }
+      let reason = '';
+      if (!an) reason = '等待图片任务加载';
+      else if (STATE.busy || window.__ZOOM_DEDUP?.isRunning?.() || window.__REGION_DELETE?.isRunning?.() || window.__CLEAR_TAGS?.isRunning?.()) reason = '正在处理，请稍候';
+      else if (this.readOnly(an)) reason = '当前任务只读';
+      else if (this.drawing(an) || an.history?.isFrozen) reason = '请先完成当前绘制或调整';
+      else if (typeof an.serializeAnnotation !== 'function' || typeof an.deserializeResults !== 'function') reason = '当前页面不支持完整撤销，暂不清理';
+      else if (subjects.length && !selected.size) reason = '先勾选要清理的主体';
+      else if (!targets.length) reason = '没有倍率接近的同比例框';
+      return { an, rows, targets, reason };
+    },
+    setThreshold(value) {
+      if (STATE.busy || typeof value !== 'number' || !Number.isFinite(value) || value < .1 || value > .6 ||
+          Math.abs(value * 10 - Math.round(value * 10)) > 1e-9) return false;
+      STATE.zoomThreshold = value; savePrefs(); this.refresh(); return true;
+    },
+    refresh() {
+      if (!panel) return;
+      const current = this.plan(), targets = new Set(current.targets.map(row => row.region));
+      const list = panel.querySelector('[data-zoom-list]');
+      if (!list) return;
+      panel.querySelector('[data-zoom-show]').checked = STATE.showZoom;
+      panel.querySelector('[data-zoom-threshold]').value = String(STATE.zoomThreshold);
+      list.hidden = !STATE.showZoom;
+      const html = current.rows.map((row,index) => `<button type="button" class="lsac-zoom-item${targets.has(row.region)?' pending':''}" data-zoom-id="${esc(row.region.id)}" title="点击定位这个比例框"><span>${row.aspect.label} · ${index+1}</span><span>${row.zoom ? row.zoom.toFixed(2)+'x' : '倍率未知'}${targets.has(row.region)?' · 待删':row.locked?' · 锁定':row.shared?' · 共用':''}</span></button>`).join('') || '<span class="lsac-hint">当前没有可显示的比例框</span>';
+      if (STATE.showZoom && list.innerHTML !== html) list.innerHTML = html;
+      const summary = current.targets.length ? `待删 ${current.targets.length} 个 · 同主体、同比例，保留最小倍率` : current.reason;
+      const note = panel.querySelector('[data-zoom-summary]');
+      if (note.textContent !== summary) note.textContent = summary;
+      const button = panel.querySelector('[data-act="zoom-cleanup"]');
+      button.disabled = !!current.reason; button.title = current.reason || '删除待删框，可用面板撤销整批恢复';
+    },
+    async run() {
+      if (STATE.busy) return 0;
+      refreshSubjects();
+      const current = this.plan();
+      if (current.reason) { info(`<span class="lsac-warn">${esc(current.reason)}</span>`,false); return 0; }
+      const { an, targets } = current, originalTask = taskId(), route = location.href;
+      let snapshots;
+      const removed = [], history = an.history;
+      const capture = row => {
+        const ids = new Set([row.region.id,row.region.cleanId,String(row.region.id).split('#')[0]].filter(v => v != null).map(String));
+        const results = snapshots.filter(result => result.type !== 'relation' && ids.has(String(result.id)));
+        if (!results.length) throw new Error('无法保存比例框完整结果，未清理');
+        const links = STATE.undoStack.flatMap(record => (record.created || []).filter(item => item.region === row.region).map(item => ({ record,item })));
+        return { regionId: String(row.region.id), results: JSON.parse(JSON.stringify(results)), binding: STATE.subjectBindings.get(String(row.region.id)),
+          generatedReference: STATE.referenceGeneratedIds.has(String(row.region.id)), links };
+      };
+      let prepared;
+      try { snapshots = an.serializeAnnotation(); prepared = targets.map(row => ({ ...row, snapshot: capture(row) })); }
+      catch (e) { info(`<span class="lsac-warn">${esc(e.message)}</span>`,false); return 0; }
+      let frozen = false, stopped = false, error = null;
+      const lock = 'lsac-zoom-cleanup';
+      SubjectPicker.stop(); setAutoPreview(false,{remember:false}); clearPreview(); setBusy(true);
+      try {
+        if (typeof history?.freeze === 'function' && typeof history?.unfreeze === 'function') { history.freeze(lock); frozen = true; }
+        for (const row of prepared) {
+          const all = LS.regionList(an);
+          if (LS.annotation() !== an || taskId() !== originalTask || location.href !== route || this.readOnly(an) || this.drawing(an) ||
+              !all.includes(row.region) || !all.includes(row.keeper.region) || this.readOnly(row.region) || this.readOnly(row.keeper.region) ||
+              this.measure(row.region)?.signature !== row.signature || this.measure(row.keeper.region)?.signature !== row.keeper.signature) { stopped = true; break; }
+          try { await row.region.deleteRegion(); }
+          finally { if (!LS.regionList(an).includes(row.region)) removed.push(row.snapshot); }
+          if (LS.regionList(an).includes(row.region)) { stopped = true; break; }
+        }
+      } catch (e) { error = e; }
+      finally {
+        try { if (frozen) history.unfreeze(lock); } catch (e) { error ||= e; }
+        if (removed.length && LS.annotation() === an && taskId() === originalTask) {
+          const ids = new Set(removed.flatMap(snapshot => snapshot.results.map(result => String(result.id))));
+          const relations = snapshots.filter(result => result.type === 'relation' && (ids.has(String(result.from_id)) || ids.has(String(result.to_id))));
+          const rec = { kind: 'zoom-cleanup', created: [], removed, relations, annotation: an, taskId: originalTask };
+          STATE.undoStack.push(rec); if (STATE.undoStack.length > 5) STATE.undoStack.shift(); STATE.undo = rec;
+        }
+        setBusy(false); refreshCounts();
+      }
+      info(`<span class="${error||stopped?'lsac-warn':'lsac-ok'}">${removed.length ? `已清理 ${removed.length} 个框，保留各组最小倍率，可撤销。` : '未清理框。'}${error||stopped?'状态已变化或操作未完成，已停止。':''}</span>`,!(error||stopped));
+      return removed.length;
+    },
+    restore(rec) {
+      const an = rec.annotation;
+      if (this.readOnly(an) || this.drawing(an) || an.history?.isFrozen) { STATE.undoStack.push(rec); info('<span class="lsac-warn">请在可编辑且未绘制时撤销。</span>',false); return; }
+      const pending = new Set(rec.removed), history = an.history, lock = 'lsac-zoom-restore';
+      const resultKey = result => JSON.stringify([result.id,result.from_name,result.to_name,result.type,result.value?.frame,result.value?.time]);
+      const relink = snapshot => {
+        const region = LS.regionList(an).find(r => String(r.id) === snapshot.regionId || snapshot.results.some(result => String(result.id) === String(r.cleanId ?? r.id).split('#')[0]));
+        if (!region) return;
+        if (snapshot.binding) STATE.subjectBindings.set(String(region.id),snapshot.binding);
+        if (snapshot.generatedReference) STATE.referenceGeneratedIds.add(String(region.id));
+        (snapshot.links || []).forEach(({record,item}) => {
+          if (!STATE.undoStack.includes(record)) return;
+          item.region = region;
+          if (!record.created.includes(item)) record.created.push(item);
+        });
+      };
+      let frozen = false, restored = 0, error = false, pendingRelations = rec.relations || [];
+      setBusy(true);
+      try {
+        if (typeof history?.freeze === 'function' && typeof history?.unfreeze === 'function' && !history.isFrozen) { history.freeze(lock); frozen = true; }
+        for (const snapshot of rec.removed) {
+          const alive = new Set(an.serializeAnnotation().map(resultKey));
+          if (snapshot.results.every(result => alive.has(resultKey(result)))) { pending.delete(snapshot); relink(snapshot); continue; }
+          try {
+            // appendResults 会重建 ID；deserializeResults 才能保留原结果身份与附加标签。
+            an.deserializeResults(JSON.parse(JSON.stringify(snapshot.results.filter(result => !alive.has(resultKey(result))))));
+            an.updateObjects?.();
+            const after = new Set(an.serializeAnnotation().map(resultKey));
+            if (!snapshot.results.every(result => after.has(resultKey(result)))) throw new Error('未完整恢复');
+            relink(snapshot);
+            pending.delete(snapshot); restored++;
+          } catch (e) { error = true; }
+        }
+        const all = an.serializeAnnotation(), ids = new Set(all.filter(result => result.type !== 'relation').map(result => String(result.id)));
+        const relationKey = result => JSON.stringify([result.from_id,result.to_id,result.direction,result.labels]);
+        const relations = new Set(all.filter(result => result.type === 'relation').map(relationKey));
+        const ready = pendingRelations.filter(result => ids.has(String(result.from_id)) && ids.has(String(result.to_id)));
+        if (ready.length) an.deserializeResults(JSON.parse(JSON.stringify(ready.filter(result => !relations.has(relationKey(result))))));
+        const afterRelations = new Set(an.serializeAnnotation().filter(result => result.type === 'relation').map(relationKey));
+        pendingRelations = pendingRelations.filter(result => !afterRelations.has(relationKey(result)));
+      } catch (e) { error = true;
+      } finally {
+        try { if (frozen) history.unfreeze(lock); } catch (e) { error = true; } finally { setBusy(false); }
+      }
+      if (pending.size || pendingRelations.length) { rec.removed = [...pending]; rec.relations = pendingRelations; STATE.undoStack.push(rec); }
+      STATE.undo = STATE.undoStack.at(-1) || null; STATE.last = null;
+      clearAddedHighlights(); clearPreview(); refreshCounts();
+      info(`<span class="${error||pending.size||pendingRelations.length?'lsac-warn':'lsac-ok'}">已还原 ${restored} 个清理框${pending.size||pendingRelations.length?'，部分未恢复，可再次撤销。':'。'}</span>`,!(error||pending.size||pendingRelations.length));
+    },
+    watch() {
+      if (!this.timer) this.timer = setInterval(() => { if (!document.hidden && !STATE.hidden && !STATE.busy) this.refresh(); },300);
+    },
+    stop() { if (this.timer) clearInterval(this.timer); this.timer = 0; }
+  };
 
   function setCollapsed(v, silent) {
     STATE.collapsed = !!v;
@@ -4291,11 +4524,12 @@
   function setBusy(b) {
     STATE.busy = b;
     if (!panel) return;
-    panel.querySelectorAll('button, input').forEach(btn => {
+    panel.querySelectorAll('button, input, select').forEach(btn => {
       if (['hide', 'collapse'].includes(btn.dataset.act) || btn.classList.contains('lsac-auto')) return;
       if(btn.dataset.act==='point-subject'&&SubjectPicker.active)return;
       btn.disabled = b;
     });
+    CropZoom.refresh();
   }
 
   function info(html, ok) {
@@ -5107,7 +5341,7 @@
     if (!an) return;
 
     const usable = rec => rec && rec.annotation === an && rec.taskId === taskId() &&
-      ((rec.created && rec.created.length) || (rec.removed && rec.removed.length));
+      ((rec.created && rec.created.length) || (rec.removed && rec.removed.length) || (rec.relations && rec.relations.length));
 
     // 换图后旧记录无法撤销：先清掉，再取最近一条有效记录
     while (STATE.undoStack.length && !usable(STATE.undoStack[STATE.undoStack.length - 1])) {
@@ -5119,6 +5353,7 @@
       info('<span class="lsac-warn">没有可撤销的记录了（只记录本面板写入的框，最多退 5 步）</span>', false);
       return;
     }
+    if (last.kind === 'zoom-cleanup') { CropZoom.restore(last); return; }
 
     const alive = new Set(LS.regionList(an));
     let del = 0, restore = 0;
@@ -5161,7 +5396,7 @@
     window.__LS_AUTO_COMPOSE__ = {
       panel, run, fillOne, focusNewRegions, doUndo, detectSubjects, SubjectDetector, SubjectPicker, setStrategy, setCollapsed, clearPreview,
       applyPanelSize, refreshCounts, assessCompleteness,
-      LS, STATE, ComposeCore, SceneAnalyze: window.SceneAnalyze,
+      LS, STATE, CropZoom, ComposeCore, SceneAnalyze: window.SceneAnalyze,
       ASPECT_DEFS, STRATEGIES, cropRectToTarget, previewTargets, contentRect
     };
     info('<span style="color:#57606a">红格=缺的比例，点一下直接补；回车写入、Z 撤销、Esc 清预览。</span>', true);
@@ -5170,10 +5405,12 @@
       info('<span class="lsac-warn">检测到旧版「比例齐全度浮窗」仍开着，两边会同时改标注，建议关掉它。</span>', false);
     }
     watchAnnotation();
+    CropZoom.watch();
     setTimeout(()=>SubjectDetector.prime(),250);
     document.addEventListener('click', selectOutlinerSubject, true);
     window.addEventListener('pagehide', clearWrittenHighlights);
     window.addEventListener('pagehide', () => SubjectPicker.stop());
+    window.addEventListener('pagehide', () => CropZoom.stop());
   }
 
   /** SPA 内切换任务时，标注会整个换掉 —— 轮询 region 签名，变了就刷新角标 */
