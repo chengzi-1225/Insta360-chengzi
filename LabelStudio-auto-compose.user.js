@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Label Studio 自动构图（以主体为中心）
 // @namespace    https://label.insta360.com/
-// @version      2.9.0
-// @description  自动识别或点选漏检主体直接标注，按需复检、同图复用提速；保留头手脚边界，新比例框最高3.2x
+// @version      2.9.1
+// @description  点选主体直接标注，提前准备模型并复用局部结果提速；自动识别保留头手脚边界，新比例框最高3.2x
 // @author       chengzi
 // @match        https://label.insta360.com/*
 // @grant        none
@@ -36,6 +36,7 @@
  *  v2.7.0：增加点击识别主体，浏览器内检测人物或主要物体，主体框去重、定位和撤销。
  *  v2.8.0：改用实例轮廓模型，分块补漏和局部复检补足可见头手脚，保留原框边界。
  *  v2.9.0：增加图片点选主体，局部放大补漏；自动识别按需复检，同图重复识别复用结果。
+ *  v2.9.1：有效图片后台准备点选模型，连续点选复用可靠局部候选，减少点击后的等待。
  * ===================================================================== */
 
 (function () {
@@ -557,7 +558,7 @@
 
   // 模型只下载到浏览器；检测和轮廓复检均在本机执行。
   const SubjectDetector = {
-    model: null, loading: null, scripts: new Map(), cache: null,
+    model: null, loading: null, scripts: new Map(), cache: null, warmupAttempted: false,
     asset: {
       url: 'https://raw.githubusercontent.com/chengzi-1225/Insta360-chengzi/main/models/subject-detection/yolo11s-seg-v1.onnx',
       bytes: 40636304, sha256: '8cfd200432a7235ed52e7b0a5d4d0c4a20d21356ba5527c467bc0c1fa0a91d73'
@@ -601,6 +602,17 @@
         if(hash!==this.asset.sha256)throw new Error('主体模型内容校验失败，请刷新后重试');
         return new Uint8Array(buffer);
       }finally{clearTimeout(timer);}
+    },
+    async prime() {
+      if(this.model||this.loading||this.warmupAttempted||STATE.busy||STATE.hidden||document.hidden)return null;
+      try {
+        const annotation=LS.annotation(),control=LS.store()?.names?.get(LS.imageName());
+        const image=control?.imageRef?.isConnected?control.imageRef:LS._imgEl();
+        if(!annotation||annotation.readonly===true||!LS.controlFor('subject_tool',annotation)||
+          !image?.complete||!(image.naturalWidth>0&&image.naturalHeight>0))return null;
+        this.warmupAttempted=true;
+        return await this.getModel();
+      }catch(e){return null;/* 后台失败保持安静，主动点选仍可重试。 */}
     },
     async getModel(progress=()=>{}) {
       if(this.model)return this.model;if(this.loading)return this.loading;
@@ -814,15 +826,19 @@
     },
     async detectAt(image,point,progress=()=>{},guard=()=>{},options={}) {
       guard();const crops=this.pointCrops(image,point),cache=this.cacheFor(image,options);
-      const old=cache?.points.find(item=>Math.hypot((point.x-item.point.x)*image.width,(point.y-item.point.y)*image.height)<=Math.max(3,Math.min(image.width,image.height)*.008)&&this.selectAt([item.prediction],image,point));
-      if(old){guard();return this.clone([old.prediction]);}
+      const old=this.selectAt(cache?.points.map(item=>item.prediction)||[],image,point);
+      if(old){guard();return this.clone([old]);}
       const model=await this.getModel(progress);guard();
       for(let i=0;i<crops.length;i++){
         guard();progress('正在识别点击附近的主体 '+(i+1)+'/'+crops.length+'…');
         const predictions=await this.infer(image,crops[i],model,{targeted:true});guard();
         const found=this.selectAt(predictions,image,point);
         if(found){
-          if(cache){cache.points.push({point:{...point},prediction:this.clone([found])[0]});if(cache.points.length>8)cache.points.shift();}
+          if(cache){
+            const reusable=predictions.filter(p=>p===found||p.score>=.65);
+            cache.points.push(...this.clone(reusable).map(prediction=>({prediction})));
+            if(cache.points.length>32)cache.points.splice(0,cache.points.length-32);
+          }
           return this.clone([found]);
         }
         await sleep(0);
@@ -951,6 +967,7 @@
       const button=panel?.querySelector('[data-act="point-subject"]');if(!button)return;
       button.textContent=this.active?'退出点选':'点选识别';button.setAttribute('aria-pressed',String(this.active));
       button.disabled=STATE.busy&&!this.active;
+      if(this.active&&!STATE.busy&&SubjectDetector.model&&this.layer?.firstChild)this.layer.firstChild.textContent='点一下要标注的人或物 · Esc 退出';
     },
     layout() {
       if(!this.active)return;
@@ -980,6 +997,13 @@
         document.body.append(layer);this.layer=layer;this.layout();this.syncButton();
         this.timer=setInterval(()=>this.layout(),160);
         info('<span class="lsac-hint">在图片上点击漏检的人或物，识别后直接标注。可连续点选，Esc 退出。</span>',true);
+        if(!SubjectDetector.model){
+          const session=this.session;
+          const updateHint=text=>{if(this.active&&this.session===session&&this.layer===layer&&!STATE.busy)hint.textContent=text;};
+          updateHint('正在准备点选… 可先点击目标 · Esc 退出');
+          SubjectDetector.getModel().then(()=>updateHint('点一下要标注的人或物 · Esc 退出'))
+            .catch(()=>updateHint('准备失败，点击图片重试 · Esc 退出'));
+        }
       }catch(e){this.stop();info('<span class="lsac-warn">'+esc(e.message||e)+'</span>',false);}
     },
     stop(notify=false) {
@@ -5146,6 +5170,7 @@
       info('<span class="lsac-warn">检测到旧版「比例齐全度浮窗」仍开着，两边会同时改标注，建议关掉它。</span>', false);
     }
     watchAnnotation();
+    setTimeout(()=>SubjectDetector.prime(),250);
     document.addEventListener('click', selectOutlinerSubject, true);
     window.addEventListener('pagehide', clearWrittenHighlights);
     window.addEventListener('pagehide', () => SubjectPicker.stop());
@@ -5160,6 +5185,7 @@
       refreshSubjects();
       const an = LS.annotation();
       if (!an) return;
+      SubjectDetector.prime();
       // 切图/切任务后先自己算一遍，省得面板空着等用户碰任何一个控件
       if (an !== lastAnnot) {
         lastAnnot = an;
