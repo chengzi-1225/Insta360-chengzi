@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Label Studio 自动构图（以主体为中心）
 // @namespace    https://label.insta360.com/
-// @version      2.10.0
-// @description  显示比例框倍率，按差值一键清理并保留最小倍率，可撤销；保留点选主体、自动构图与3.2x上限
+// @version      2.10.1
+// @description  ID旁显示倍率，ID区域选择差值、清理与撤销；保留点选主体、自动构图与3.2x上限
 // @author       chengzi
 // @match        https://label.insta360.com/*
 // @grant        none
@@ -38,6 +38,7 @@
  *  v2.9.0：增加图片点选主体，局部放大补漏；自动识别按需复检，同图重复识别复用结果。
  *  v2.9.1：有效图片后台准备点选模型，连续点选复用可靠局部候选，减少点击后的等待。
  *  v2.10.0：显示现有框倍率，按主体与比例一键清理相近倍率，保留最小倍率并可整批撤销。
+ *  v2.10.1：倍率移至原生ID旁，差值、清理与撤销移至ID操作区，隐藏浮窗仍可使用。
  * ===================================================================== */
 
 (function () {
@@ -3138,16 +3139,25 @@
   }
 
   const CSS = `
-  .lsac-zoom-controls{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:5px 0;font-size:11px}
-  .lsac-zoom-controls select{font:inherit;color:inherit;background:#fff;border:1px solid #d0d7de;border-radius:5px;padding:3px}
-  .lsac-zoom-controls button{margin-left:auto;font:inherit;border:1px solid #e7c5c5;background:#fff7f7;color:#b04444;border-radius:5px;padding:4px 7px;cursor:pointer}
-  .lsac-zoom-controls button:disabled{opacity:.45;cursor:default}
-  .lsac-zoom-list{display:grid;gap:3px;max-height:100px;overflow:auto;margin-top:5px;scrollbar-width:thin}
-  .lsac-zoom-list[hidden]{display:none}
-  .lsac-zoom-item{display:flex;align-items:center;justify-content:space-between;gap:5px;width:100%;text-align:left;border:1px solid #e8ebef;border-radius:4px;background:#fafbfc;color:#57606a;padding:3px 6px;cursor:pointer;font:inherit;font-size:11px;line-height:1.45;font-variant-numeric:tabular-nums}
-  .lsac-zoom-item:hover{border-color:#9ebce2;background:#f0f6ff}
-  .lsac-zoom-item.pending{border-color:#efd6d6;background:#fff6f6;color:#b04444}
-  .lsac-zoom-item span:last-child{white-space:nowrap}
+  #lsac-zoom-toolbar{display:flex;flex-direction:column;flex:0 0 auto;gap:4px;width:100%;min-width:0;max-width:100%;box-sizing:border-box;
+    padding:6px 8px;border-bottom:1px solid #e8ebef;background:#fff;color:#57606a;font:11px/1.45 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;white-space:normal}
+  #__id_switch_toolbar #lsac-zoom-toolbar{padding:5px 0;border-top:1px solid #e8ebef;border-bottom:0}
+  #lsac-zoom-toolbar[hidden]{display:none!important}
+  #lsac-zoom-toolbar .lsac-zoom-controls{display:flex;align-items:center;gap:5px;flex-wrap:wrap;min-width:0}
+  #lsac-zoom-toolbar label{display:inline-flex;align-items:center;gap:3px;margin:0;white-space:nowrap;font:inherit;color:inherit}
+  #lsac-zoom-toolbar input{margin:0;accent-color:#3983cb}
+  #lsac-zoom-toolbar select,#lsac-zoom-toolbar button{box-sizing:border-box;height:24px;max-width:100%;margin:0;font:inherit;line-height:1.3;border:1px solid #d0d7de;border-radius:4px;background:#fff;color:#57606a;padding:2px 5px}
+  #lsac-zoom-toolbar button{cursor:pointer;white-space:nowrap}
+  #lsac-zoom-toolbar button[data-act="zoom-cleanup"]{margin-left:auto!important;color:#b04444;border-color:#e7c5c5;background:#fffafa}
+  #lsac-zoom-toolbar button:disabled,#lsac-zoom-toolbar select:disabled,#lsac-zoom-toolbar input:disabled{opacity:.45;cursor:default}
+  #lsac-zoom-toolbar .lsac-zoom-status{display:flex;align-items:center;gap:5px;min-width:0}
+  #lsac-zoom-toolbar [data-zoom-summary]{flex:1;min-width:0;overflow-wrap:anywhere;font-size:10px}
+  .lsac-zoom-badge{display:inline-block;flex:0 0 auto;margin:0 5px;padding:0 4px;border-radius:3px;background:#eef3f8;color:#5b738c;
+    font:10px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .lsac-zoom-badge.pending{background:#fff0f0;color:#b04444}
+  .lsac-zoom-outliner{display:flex;flex-direction:column;min-height:0}
+  .lsac-zoom-outliner>.lsf-view-controls{flex:0 0 auto}
+  .lsac-zoom-outliner>.lsf-outliner-tree{flex:1;min-height:0;height:auto!important}
   .lsac-panel{position:fixed;top:110px;right:18px;z-index:2147483000;width:276px;height:360px;
     font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
     color:#1f2328;background:#fff;border:1px solid #d8dee4;border-radius:11px;
@@ -3402,12 +3412,6 @@
           <div class="lsac-hint">新框倍率 ≤${MAX_CROP_ZOOM}x</div>
         </div>
         <div class="lsac-sec">
-          <span class="lsac-lbl"><span>倍率清理</span><label class="lsac-check"><input type="checkbox" data-zoom-show>显示倍率</label></span>
-          <div class="lsac-zoom-controls"><label>差值 ≤ <select data-zoom-threshold aria-label="倍率差值">${[1,2,3,4,5,6].map(n=>`<option value="${n/10}">${(n/10).toFixed(1)}x</option>`).join('')}</select></label><button data-act="zoom-cleanup">一键清理</button></div>
-          <div class="lsac-hint" data-zoom-summary aria-live="polite"></div>
-          <div class="lsac-zoom-list" data-zoom-list aria-label="当前比例框倍率"></div>
-        </div>
-        <div class="lsac-sec">
           <span class="lsac-lbl">写入方式</span>
           <div class="lsac-seg">
             ${STRATEGIES.map(s => `<button data-strategy="${s.key}" title="${s.hint}">${s.label}</button>`).join('')}
@@ -3529,19 +3533,6 @@
     panel.querySelector('[data-act="preview"]').addEventListener('click', () => run('preview'));
     panel.querySelector('[data-act="apply"]').addEventListener('click', () => run('apply'));
     panel.querySelector('[data-act="undo"]').addEventListener('click', doUndo);
-    panel.querySelector('[data-act="zoom-cleanup"]').addEventListener('click', () => CropZoom.run());
-    panel.querySelector('[data-zoom-threshold]').addEventListener('change', e => CropZoom.setThreshold(Number(e.target.value)));
-    panel.querySelector('[data-zoom-show]').addEventListener('change', e => {
-      STATE.showZoom = e.target.checked; savePrefs(); CropZoom.refresh();
-    });
-    panel.querySelector('[data-zoom-list]').addEventListener('click', e => {
-      if (STATE.busy) return;
-      const button = e.target.closest('[data-zoom-id]');
-      const region = button && LS.regionList().find(r => String(r.id) === button.dataset.zoomId);
-      if (!region) return;
-      ensureWrittenSelected(region);
-      outlinerRegionRows().find(entry => entry.region === region)?.row.scrollIntoView?.({ block: 'nearest' });
-    });
     panel.querySelector('[data-act="detect-subjects"]').addEventListener('click', () => detectSubjects());
     panel.querySelector('[data-act="point-subject"]').addEventListener('click', () => SubjectPicker.active?SubjectPicker.stop(true):SubjectPicker.start());
     panel.querySelector('[data-act="selected-subjects"]').addEventListener('click', () => {
@@ -4086,6 +4077,9 @@
   /** 只读测量、分组预告和删除分开，倍率不依赖画布的显示缩放。 */
   const CropZoom = {
     timer: 0,
+    toolbar: null,
+    fallbackHost: null,
+    stopped: false,
     readOnly(node) {
       return !!node && (node.readonly === true || node.locked === true || node.isReadOnly === true ||
         typeof node.isReadOnly === 'function' && node.isReadOnly());
@@ -4159,21 +4153,85 @@
           Math.abs(value * 10 - Math.round(value * 10)) > 1e-9) return false;
       STATE.zoomThreshold = value; savePrefs(); this.refresh(); return true;
     },
+    mountToolbar() {
+      if (this.stopped) return null;
+      const outliner = [...document.querySelectorAll('.lsf-outliner')].find(node => !node.closest('.lsf-panel-tabs__ghost-tab'));
+      if (!outliner) { if (this.toolbar) this.toolbar.hidden = true; return null; }
+      if (!this.toolbar) {
+        const toolbar = document.createElement('div');
+        toolbar.id = 'lsac-zoom-toolbar'; toolbar.setAttribute('role','group'); toolbar.setAttribute('aria-label','ID倍率与清理');
+        toolbar.innerHTML = `<div class="lsac-zoom-controls"><label title="在比例ID旁显示原图倍率"><input type="checkbox" data-zoom-show>倍率</label>
+          <label>差值 ≤ <select data-zoom-threshold aria-label="倍率差值">${[1,2,3,4,5,6].map(n=>`<option value="${n/10}">${(n/10).toFixed(1)}x</option>`).join('')}</select></label>
+          <button type="button" data-act="zoom-cleanup">一键清理</button></div>
+          <div class="lsac-zoom-status"><span data-zoom-summary role="status" aria-live="polite"></span><button type="button" data-act="zoom-undo">撤销</button></div>`;
+        toolbar.querySelector('[data-act="zoom-cleanup"]').addEventListener('click', () => this.run());
+        toolbar.querySelector('[data-act="zoom-undo"]').addEventListener('click', doUndo);
+        toolbar.querySelector('[data-zoom-threshold]').addEventListener('change', e => this.setThreshold(Number(e.target.value)));
+        toolbar.querySelector('[data-zoom-show]').addEventListener('change', e => {
+          if (STATE.busy) return;
+          STATE.showZoom = e.target.checked; savePrefs(); this.refresh();
+        });
+        for (const type of ['pointerdown','mousedown','click','dblclick','keydown','keyup']) toolbar.addEventListener(type,e => e.stopPropagation());
+        this.toolbar = toolbar;
+      }
+      const toolbar = this.toolbar;
+      // 原生列表重建或第三方工具复制节点时恢复同一实例，不重复绑定事件。
+      document.querySelectorAll('#lsac-zoom-toolbar').forEach(node => { if (node !== toolbar) node.remove(); });
+      const toolkit = document.getElementById('__id_switch_toolbar');
+      const shared = toolkit && !toolkit.closest('.lsf-panel-tabs__ghost-tab') && toolkit.parentElement?.contains(outliner);
+      const host = shared ? toolkit : outliner;
+      if (this.fallbackHost && this.fallbackHost !== (shared ? null : host)) this.fallbackHost.classList.remove('lsac-zoom-outliner');
+      this.fallbackHost = shared ? null : host;
+      if (shared) {
+        const presets = toolkit.querySelector('#__id_switch_preset_details');
+        if (presets?.parentElement === toolkit) { if (toolbar.nextElementSibling !== presets) toolkit.insertBefore(toolbar,presets); }
+        else if (toolbar.parentElement !== toolkit) toolkit.append(toolbar);
+      } else {
+        host.classList.add('lsac-zoom-outliner');
+        if (host.firstElementChild !== toolbar) host.prepend(toolbar);
+      }
+      toolbar.hidden = false;
+      return toolbar;
+    },
     refresh() {
-      if (!panel) return;
+      if (this.stopped) return;
       const current = this.plan(), targets = new Set(current.targets.map(row => row.region));
-      const list = panel.querySelector('[data-zoom-list]');
-      if (!list) return;
-      panel.querySelector('[data-zoom-show]').checked = STATE.showZoom;
-      panel.querySelector('[data-zoom-threshold]').value = String(STATE.zoomThreshold);
-      list.hidden = !STATE.showZoom;
-      const html = current.rows.map((row,index) => `<button type="button" class="lsac-zoom-item${targets.has(row.region)?' pending':''}" data-zoom-id="${esc(row.region.id)}" title="点击定位这个比例框"><span>${row.aspect.label} · ${index+1}</span><span>${row.zoom ? row.zoom.toFixed(2)+'x' : '倍率未知'}${targets.has(row.region)?' · 待删':row.locked?' · 锁定':row.shared?' · 共用':''}</span></button>`).join('') || '<span class="lsac-hint">当前没有可显示的比例框</span>';
-      if (STATE.showZoom && list.innerHTML !== html) list.innerHTML = html;
-      const summary = current.targets.length ? `待删 ${current.targets.length} 个 · 同主体、同比例，保留最小倍率` : current.reason;
-      const note = panel.querySelector('[data-zoom-summary]');
+      const planned = new Map(current.rows.map(row => [row.region,row]));
+      for (const {row,region} of outlinerRegionRows()) {
+        let badge = row.querySelector('.lsac-zoom-badge');
+        // 不改ID标题，不接管别的脚本已有的倍率徽标；主体和幽灵副本不显示。
+        if (!STATE.showZoom || !region || !LS.aspectOf(region) || row.querySelector('.ls-zoom-badge')) { badge?.remove(); continue; }
+        const item = planned.get(region), measured = item || this.measure(region), pending = targets.has(region);
+        const titleNode = row.querySelector('.lsf-outliner-item__title');
+        if (!titleNode) { badge?.remove(); continue; }
+        if (!badge) { badge = document.createElement('span'); badge.className = 'lsac-zoom-badge'; }
+        if (titleNode.nextElementSibling !== badge) titleNode.after(badge);
+        badge.dataset.zoomId = String(region.id);
+        const text = measured?.zoom ? measured.zoom.toFixed(2)+'x' : '倍率未知';
+        if (badge.textContent !== text) badge.textContent = text;
+        badge.classList.toggle('pending',pending);
+        const status = pending ? '待删，保留同组范围更大的框' : this.readOnly(region) ? '锁定，保留' : item?.shared ? '跨主体共用，保留' : !item ? '不参与当前勾选主体的清理' : '保留';
+        const title = measured?.zoom ? `倍率 ${text} · ${status} · 原图对角线 / 框对角线` : '无法确认原图尺寸或几何，不参与清理';
+        if (badge.title !== title) badge.title = title;
+      }
+      const toolbar = this.mountToolbar();
+      if (!toolbar) return;
+      toolbar.querySelector('[data-zoom-show]').checked = STATE.showZoom;
+      const select = toolbar.querySelector('[data-zoom-threshold]');
+      if (select.value !== String(STATE.zoomThreshold)) select.value = String(STATE.zoomThreshold);
+      toolbar.querySelectorAll('button,input,select').forEach(node => { node.disabled = STATE.busy; });
+      const summary = current.reason && STATE.busy ? current.reason : current.targets.length ? `待删 ${current.targets.length} 个 · 保留小倍率` : current.reason;
+      const note = toolbar.querySelector('[data-zoom-summary]');
       if (note.textContent !== summary) note.textContent = summary;
-      const button = panel.querySelector('[data-act="zoom-cleanup"]');
-      button.disabled = !!current.reason; button.title = current.reason || '删除待删框，可用面板撤销整批恢复';
+      note.title = current.reason || '只清理同主体、同比例的相近框，保留倍率小、范围大的框';
+      const button = toolbar.querySelector('[data-act="zoom-cleanup"]');
+      button.disabled = !!current.reason; button.title = current.reason || '删除待删框，可点旁边的撤销整批恢复';
+      const undo = toolbar.querySelector('[data-act="zoom-undo"]');
+      const record = STATE.undoStack.findLast(rec => rec.annotation === current.an && rec.taskId === taskId() &&
+        (rec.created?.length || rec.removed?.length || rec.relations?.length));
+      undo.disabled = STATE.busy || !record || this.readOnly(current.an) || this.drawing(current.an) || !!current.an?.history?.isFrozen ||
+        !!window.__ZOOM_DEDUP?.isRunning?.() || !!window.__REGION_DELETE?.isRunning?.() || !!window.__CLEAR_TAGS?.isRunning?.();
+      undo.title = record ? record.kind === 'zoom-cleanup' ? '撤销上次清理，整批恢复原框' : '撤销上次写入' : '没有可撤销的记录';
     },
     async run() {
       if (STATE.busy) return 0;
@@ -4272,9 +4330,16 @@
       info(`<span class="${error||pending.size||pendingRelations.length?'lsac-warn':'lsac-ok'}">已还原 ${restored} 个清理框${pending.size||pendingRelations.length?'，部分未恢复，可再次撤销。':'。'}</span>`,!(error||pending.size||pendingRelations.length));
     },
     watch() {
-      if (!this.timer) this.timer = setInterval(() => { if (!document.hidden && !STATE.hidden && !STATE.busy) this.refresh(); },300);
+      this.stopped = false;
+      if (!this.timer) this.timer = setInterval(() => { if (!document.hidden) this.refresh(); },300);
     },
-    stop() { if (this.timer) clearInterval(this.timer); this.timer = 0; }
+    stop() {
+      this.stopped = true;
+      if (this.timer) clearInterval(this.timer); this.timer = 0;
+      this.toolbar?.remove(); this.toolbar = null;
+      this.fallbackHost?.classList.remove('lsac-zoom-outliner'); this.fallbackHost = null;
+      document.querySelectorAll('.lsac-zoom-badge').forEach(node => node.remove());
+    }
   };
 
   function setCollapsed(v, silent) {
